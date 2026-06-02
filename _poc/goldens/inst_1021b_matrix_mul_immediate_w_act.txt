@@ -1,0 +1,350 @@
+G_buffer size :  16385
+
+
+
+0
+Program memory size :  401
+
+
+
+0
+0
+580
+20000080
+30288
+80000090
+20000342
+80002080
+a0000080
+80000098
+2080
+20000080
+30288
+80000090
+0
+0
+0
+0
+0
+0
+0
+
+
+
+p_counter :  0
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  1
+instruction :  580
+
+
+
+p_counter :  2
+instruction :  20000080
+
+
+
+p_counter :  3
+instruction :  30288
+
+
+
+p_counter :  4
+instruction :  80000090
+PE_in_data_1_array :  5
+PE_in_data_1_array :  6
+PE_in_data_1_array :  7
+PE_in_data_1_array :  8
+PE_in_data_1_array :  9
+PE_in_data_1_array :  10
+
+
+
+p_counter :  5
+instruction :  20000342
+225
+324
+441
+576
+729
+900
+
+
+
+p_counter :  6
+instruction :  80002080
+
+
+
+p_counter :  7
+instruction :  a0000080
+
+
+
+p_counter :  8
+instruction :  80000098
+PE_out_array :  225
+PE_out_array :  324
+PE_out_array :  441
+PE_out_array :  576
+PE_out_array :  729
+PE_out_array :  900
+
+
+
+p_counter :  9
+instruction :  2080
+
+
+
+p_counter :  10
+instruction :  20000080
+
+
+
+p_counter :  11
+instruction :  30288
+
+
+
+p_counter :  12
+instruction :  80000090
+PE_in_data_1_array :  225
+PE_in_data_1_array :  324
+PE_in_data_1_array :  441
+PE_in_data_1_array :  576
+PE_in_data_1_array :  729
+PE_in_data_1_array :  900
+
+
+
+p_counter :  13
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  14
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  15
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  16
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  17
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  18
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  19
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  20
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  21
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  22
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  23
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  24
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  25
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  26
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  27
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  28
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  29
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  30
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  31
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  32
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  33
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  34
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  35
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  36
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  37
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  38
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  39
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  40
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  41
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  42
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  43
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  44
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  45
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  46
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  47
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  48
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  49
+instruction :  0
+NOP --- 
+
+
+
+p_counter :  50
+instruction :  0
+NOP --- 
+
+
