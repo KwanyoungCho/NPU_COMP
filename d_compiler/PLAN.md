@@ -9,7 +9,9 @@
 
 ## 0. 한 줄 요약
 
-**최종 목표는 Llama 3.2 3B 추론을 NPU c-model에서 돌리는 것.** PyTorch/Relax로 표현된 모델을 받아 → NPU가 실제 지원하는 primitive로 분해(legalize) → 64×64 타일링 → NPU ISA 바이너리로 코드 생성 → `mysim`에서 실행·검증하는 컴파일러를 만든다. **3B의 모든 차원(D=3072, F=8192, HD=128)이 255를 초과하므로 타일링은 필수**이며, 28개 레이어·KV 캐시·autoregressive decode 등 모델 레벨 요소도 다룬다. 손으로 짠 `b_program_examples/`(특히 `npu.py`, `llama_layer.py`)는 **검증 기준(golden)·축소 프록시**로만 쓰고, 컴파일러 본체는 그것과 독립적으로 TVM 위에 새로 짠다.
+**최종 목표는 Llama 3.2 3B 추론을 NPU c-model에서 돌리는 것.** PyTorch/Relax로 표현된 모델을 받아 → NPU가 실제 지원하는 primitive로 분해(legalize) → 64×64 타일링 → NPU ISA 바이너리로 코드 생성 → `mysim`에서 실행·검증하는 컴파일러를 만든다. **3B의 `D=3072`·`F=8192`는 255를 한참 초과, `HD=128`은 ≤255지만 PE(64) 초과 → 모두 64×64 타일링 필수**이며, 28개 레이어·KV 캐시·autoregressive decode 등 모델 레벨 요소도 다룬다. 손으로 짠 `b_program_examples/`(특히 `npu.py`, `llama_layer.py`)는 **검증 기준(golden)·축소 프록시**로만 쓰고, 컴파일러 본체는 그것과 독립적으로 TVM 위에 새로 짠다.
+
+> ⚠️ **타깃 실행기 = `_poc/mysim`(개선판), 원본 `a.out` 아님.** 본 계획은 `_poc/mysim`의 개선 기능(`--gout` write-back, `HALT`, uncapped buffer)을 **전제로** 한다. 원본 `a.out`(G-buffer 8192·program 32768 캡, write-back/halt 없음)으로는 이 파이프라인이 안 돌아간다. "mysim 수정 불가"는 **이 개선판을 더 이상 안 고친다**는 뜻이며, 원본 `a.out`은 **작은 커널 byte-exact 교차검증용**으로만 쓴다.
 
 ---
 
@@ -27,7 +29,7 @@
 | 연산 정밀도 | 내부 float32, **FP16 반올림은 G-buffer 저장 시에만** | 텐서 dtype=float16, 검증은 FP16 톨러런스 |
 | 정적 메모리 | 동적 할당 없음, G-buffer 평탄 주소 | 모든 텐서를 컴파일 타임에 G-buffer 오프셋으로 정적 배치 |
 | 즉시값 = 정수 | eps(1e-5), 1/√d 등 분수 상수 인코딩 불가 | 상수 텐서로 G-buffer에 적재(상수 폴딩) |
-| 루프/분기 없음 | 현재 ISA에 제어 흐름 없음 → 완전 언롤만 가능 | 초기엔 축소 차원 언롤, 풀 차원은 후기(B2)에서 ISA 확장 |
+| 루프/분기 없음 | 현재 ISA에 제어 흐름 없음 → 완전 언롤만 가능 | **전부 언롤**(타일·레이어). ISA 루프 추가는 보류(§1.4) |
 | reduce-max 없음 | softmax 수치 안정화(max 빼기) 우회 불가 | 초기엔 생략(작은 가중치로 회피), 후기 ISA 확장 후보 |
 | 미지원 연산 다수 | reduce-sum, broadcast, transpose, SiLU 등 | **legalize 패스로 기존 명령 조합으로 분해**(§5) |
 
@@ -47,13 +49,28 @@
 | activation | **SiLU / SwiGLU** | §5 legalize |
 | tie_word_embeddings | **true** | embedding과 lm_head 가중치 공유 |
 
-**핵심 함의**: 모든 핵심 차원이 64×64 PE를 한참 넘으므로 **타일링(B1)은 선택이 아니라 필수**다. 또한 한 레이어의 단일 projection matmul만 64×64 타일로 펼쳐도 수천~수만 명령이 되어, 28레이어를 완전 언롤하면 프로그램이 비현실적으로 커진다 → **루프 지원(B2)이 사실상 필수 경로**가 된다(mysim은 명령어 캡이 없어 *실행*은 가능하나, 프로그램 크기·시뮬레이션 시간이 비현실적). 자세한 영향은 §4·§10.
+**핵심 함의**: 모든 핵심 차원이 64×64 PE를 한참 넘으므로 **타일링은 필수**다. 루프/누산 ISA가 없으므로 타일·누산은 **전부 언롤/명시적 명령 시퀀스**로 펼친다(아래 §1.4).
+
+### 1.4 현재 구현 스코프 (확정 2026-06-08)
+> 빠르게 **prefill 동작**에 도달하기 위한 의도적 단순화. 항목별로 나중에 ISA 추가 시 재검토.
+
+| 항목 | 현재 방침 | 나중에 |
+|---|---|---|
+| **mysim 수정** | **불가(고정)**. 모든 건 현재 ISA로 | 필수 ISA 여부 별도 판단 후 검토 |
+| **루프/분기** | ISA 추가 안 함 → **타일·레이어 전부 언롤(반복 emit)** | loop ISA 추가 시 롤링 |
+| **matmul-accumulate** | 누산 비트 없음 → **save→load→matrix_add 시퀀스로 명시적 누산** | accumulate ISA 추가 시 단순화 |
+| **softmax max-subtraction** | **제외**(작은 가중치로 회피) | reduce-max ISA 추가 시 적용 |
+| **실행 단계** | **prefill만 우선** 동작시킴 | decode는 그 후 |
+| **KV 캐시** | **저장만** 한다고 가정(K/V 계산·배치까지) | decode 설계 시 재사용 로직 추가 |
+| **transpose** | **원소 단위 복사**로 구현 + **그 명령어 오버헤드를 직접 측정·분석**(산출물) | 블록 전치/strided/전치 ISA 검토 |
+
+→ 즉 **B2(루프/누산 ISA)는 현재 비활성**. 큰 차원은 "언롤된 거대 프로그램"으로 두고, 그 비용(명령어 수·시뮬 시간·transpose 오버헤드)을 **분석 대상**으로 삼는다. 완전 언롤한 풀 28레이어 3B는 시뮬 비현실적일 수 있으므로 **단일 레이어 prefill 동작 + 풀 모델 비용 추정**이 현실 목표(§9·§10).
 
 ---
 
 ## 2. 설계 원칙
 
-0. **`mysim.cpp`(주어진 c-model)가 유일한 실행기이자 기준(source of truth)이다.** 우리가 만드는 것은 **컴파일러**(모델 → NPU 명령어 바이너리)일 뿐, **NPU 동작 실행기를 새로 만들지 않는다.** 모든 실행·결과는 주어진 `mysim`이 낸다. 명령어 인코딩의 정답 규칙도 `mysim.cpp`의 디코드 로직이 정의한다(즉 `mysim.cpp`가 ISA 사양). ⚠️ `isa.py`는 **명령어를 32비트 워드로 인코딩해 `program_memory.bin`을 만드는 인코더**일 뿐 — **실행기가 아니다.** (B2의 루프/누산처럼 `mysim`을 *수정*해야 하는 항목은 별도의 명시적 결정 사항으로 다룬다 → §10.)
+0. **`mysim.cpp`(주어진 c-model)가 유일한 실행기이자 기준(source of truth)이며, 현재는 수정 불가(고정)로 간주한다.** 우리가 만드는 것은 **컴파일러**(모델 → NPU 명령어 바이너리)일 뿐, **NPU 동작 실행기를 새로 만들지 않는다.** 모든 실행·결과는 주어진 `mysim`이 낸다. 명령어 인코딩의 정답 규칙도 `mysim.cpp`의 디코드 로직이 정의한다(즉 `mysim.cpp`가 ISA 사양). ⚠️ `isa.py`는 **명령어를 32비트 워드로 인코딩해 `program_memory.bin`을 만드는 인코더**일 뿐 — **실행기가 아니다.** ⚠️ **mysim에 없는 기능(루프/분기, matmul-accumulate, reduce-max 등)은 ISA를 추가하지 않고 기존 명령으로 우회/언롤한다.** ISA 추가 필요 여부는 **나중에 별도로 판단**(§1.4·§10).
 1. **앞단/뒷단 분리.** `Relax import → legalize → memory plan`(앞단, 백엔드 무관, 작업량의 대부분) 과 `codegen → ISA`(뒷단)를 명확히 분리한다. 앞단은 어떤 코드젠 전략을 쓰든 **재사용**된다.
 2. **버려지는 코드 없이 점진.** 처음부터 TIR 기반으로 짓고(§4), tensorize/ISA확장 같은 어려운 부분은 한꺼번에 하지 않고 단계로 쌓는다(§4 로드맵). 각 단계는 이전 단계를 그대로 재사용한다.
 3. **항상 검증 가능.** 모든 단계에서 출력이 (a) float 참조, (b) 기존 `llama_layer.py` golden, (c) 가능하면 원본 `a.out`과 일치하는지 differential test. **검증 실행기는 항상 `mysim`.**
@@ -87,25 +104,30 @@
 
 ---
 
-## 4. 로드맵 — B0 → B1 → B2 → M (한 TIR 파이프라인 위에 누적)
+## 4. 로드맵 — B0 → B0.5 → B1 → M (한 TIR 파이프라인 위에 누적)
 
-> "A(npu.py 비지터) vs B(tensorize)"는 폐기된 프레이밍이다. 실제 분기는 **코드젠 한 단계뿐**이고, 앞단은 공유된다. 아래는 어려운 것을 하나씩만 추가하는 경로. **타깃이 Llama 3.2 3B이므로 B1·B2는 선택이 아니라 최종 목표의 필수 단계**이고, B0는 그 토대를 검증하는 bring-up 단계다.
+> 실제 분기는 **코드젠 한 단계뿐**, 앞단은 공유된다. 어려운 것을 하나씩만 추가한다. (B2=루프/누산/reduce-max ISA는 mysim 수정이라 **보류**.)
 
-| 단계 | 추가되는 것 | mysim ISA 변경 | 산출물 | 검증 기준 |
-|---|---|---|---|---|
-| **B0** *(단기 목표, bring-up)* | Relax→TIR→**flat** ISA 코드젠 (tensorize 없음) | 불필요 | **축소 프록시**(3.2 3B 구조, 작은 차원) 단일 레이어 컴파일·실행 | float 참조 + `llama_layer.py` golden |
-| **B1** *(필수)* | matmul을 64×64 PE intrinsic으로 **tensorize** (바깥 타일루프 **언롤**) | 불필요 (언롤로 회피) | **실제 차원** 단일 레이어(예: D=3072) 타일링 실행 | B0 출력을 oracle로, float 참조 |
-| **B2** *(사실상 필수)* | 바깥 타일루프를 **롤된 채** emit + matmul-accumulate | **필요**: 루프/분기 + 누산 명령 추가 | 프로그램 크기 유한(언롤 폭증 제거) → 28레이어 현실화 | B1 출력 / float 참조 |
-| **M** *(모델 레벨)* | KV 캐시, prefill/decode, 28레이어, embedding/lm_head, RoPE scaling | (KV캐시용 구조) | **Llama 3.2 3B end-to-end** 추론 | HF 참조 logits/토큰 |
+| 단계 | 내용 | 산출물 | 검증 기준 |
+|---|---|---|---|
+| **B0** *(logical bring-up)* | Relax→TIR→**flat** ISA 코드젠, **64×64 타일링 없음**(mysim이 ≤255 logical matmul 허용하므로 그대로 한 방에) | **축소 프록시** 단일 레이어 **prefill** 컴파일·실행 | float 참조 + `llama_layer.py` golden (tolerance) |
+| **B0.5** *(64×64 legal oracle)* | **작은 차원에서 진짜 64×64 타일링** + K타일 `save→load→m_add` 누산 | 64×64-legal 커널(matmul/한 레이어) 실행 | **tiled-FP16 참조**와 tolerance 비교(§9) |
+| **B1** *(스케일·costing)* | 실제 3.2 3B 차원으로 타일링 코드 **생성** | **선별 커널 실측**(작은 것만 실제 실행) + **전체 레이어 명령어 수/메모리/시간 비용 추정** | tiled-FP16 참조(실행분), 비용 모델(추정분) |
+| **M** *(모델, prefill)* | embedding/lm_head, RoPE(llama3 scaling), 28레이어 그래프, **KV는 저장만** | **풀 그래프 lowering + 비용 산정**(실제 풀-3B 실행/HF logits는 비대상). 정확도는 **단일 레이어/축소 프록시에서만** HF·float 참조와 대조 | 단일 레이어 정확도 + 풀모델 cost report |
+| ~~B2~~ *(보류)* | 루프/분기 롤링, matmul-accumulate, reduce-max (mysim 수정 필요) | — | 현재 비활성 |
+| *(이후)* decode | KV 재사용, autoregressive | decode 동작 | — |
 
-핵심 정정: **tensorize(64×64 매핑) 자체는 ISA 루프가 불필요**하다(바깥 루프 언롤). ISA 루프(B2)는 "차원이 커질 때 명령어 폭증을 막기 위해서" 필요하다 — 3.2 3B에선 이게 곧 현실적 필수.
+⚠️ **B0의 위상**: B0는 mysim이 64 초과 타일(≤255)을 logical하게 받아주기 때문에 도는 **"logical c-model bring-up"**이다 — 실제 64×64 PE HW에서 legal한 코드가 **아니다**(기존 `llama_layer.py`도 동일하게 logical 전제). 64×64-legal 코드는 **B0.5**에서 처음 나온다. 이 구분을 명확히 둔다.
 
-왜 B0를 건너뛰지 않나: B1/B2를 바로 하면 tensorize + TIR→ISA 코드젠 + ISA확장을 **동시에** 디버깅하게 되고 정답지(oracle)가 없다. B0가 그 oracle과 앞단(legalize/메모리플래닝/하네스) 검증을 먼저 제공한다. **B0의 모든 앞단 코드는 B1/B2/M에서 그대로 재사용**된다.
+⚠️ **B1 "실제 차원 단일 레이어 실행"은 과대약속이라 하향**: `mysim.cpp`는 **매 instruction·load·save 원소마다 무조건 `cout` 출력**(quiet 옵션 없음). stdout을 `/dev/null`로 보내도 C++ 포맷팅(float→문자열) 비용은 그대로 → 3B 단일 레이어(수십만~수백만 명령, 타일당 수천 원소 출력)는 **실측 비현실적**. 따라서 B1 산출물 = **선별(작은) 커널 실측 + 전체 비용 추정**.
 
-### 4.1 명령어 수 개략 추정 (왜 B2가 필요한가)
-- 한 matmul `[M,K]@[K,N]`를 64×64 타일로: 타일 MAC 수 = ⌈M/64⌉·⌈N/64⌉·⌈K/64⌉, 각 타일마다 tile/addr/load/compute/save 수 명령.
-- decode(1토큰) q-proj `[1,3072]@[3072,3072]` ≈ 1·48·48 ≈ 2,304 타일 → 수천~만 명령. 레이어당 q/k/v/o/gate/up/down 합치면 **레이어 1개도 수만 명령**, ×28 → 완전 언롤은 수십만~수백만 명령.
-- mysim은 명령어 캡이 없어 *실행*은 가능하지만 프로그램 파일·시뮬레이션 시간이 비현실적 → **루프(B2)로 타일·레이어를 롤**해야 함.
+왜 B0를 건너뛰지 않나: B0.5/B1을 바로 하면 tensorize + TIR→ISA 코드젠을 동시에 디버깅하게 되고 정답지(oracle)가 없다. B0가 앞단(legalize/메모리플래닝/하네스) + logical 정확도를 먼저 잡고, **그 코드가 B0.5/B1/M에 그대로 재사용**된다.
+
+### 4.1 명령어 수 / 비용 분석 (B1의 핵심 산출물 — 일찍 만든다)
+- 한 matmul `[M,K]@[K,N]`를 64×64 타일로: 타일 수 = ⌈M/64⌉·⌈N/64⌉·⌈K/64⌉, 타일마다 tile/addr/load/compute/save + (K누산 시) save/load/m_add. 거기에 **mysim이 출력하는 원소 수**(load 2×타일면적 + save 타일면적)까지 모델링 → "실제로 실행 가능한 한계"를 빨리 판단.
+- prefill(seq=S) 레이어당 q/k/v/o/gate/up/down 합 → **레이어 1개도 수만~수십만 명령**, ×28 = 완전 언롤 시 수백만+. + 3B 가중치 ≈12GB+(mysim `vector<float> G`).
+- **transpose(원소복사) 오버헤드 분석**: 전치 1회당 명령어 = O(행×열), vlen=1 복사 언롤. attention K 전치·Xn 전치가 전체 명령어에서 차지하는 비중을 실측 → "전치 ISA 필요성"의 근거.
+- → **비용 모델을 코드젠 초기에 작성**(quiet mysim 없이도 어디까지 실제 실행 가능한지 판단).
 
 ---
 
@@ -115,7 +137,7 @@
 
 | Relax op | NPU primitive 분해 | 비고 / 비용 |
 |---|---|---|
-| `matmul` (행렬모드) | `m_mul` (matrix mode) | 네이티브. B1부터 64×64 타일 |
+| `matmul` (행렬모드) | `m_mul` (matrix mode) | 네이티브. B1부터 64×64 타일. **K>64는 타일별 부분곱을 save→load→`m_add`로 명시적 누산**(accumulate ISA 없음), 전부 언롤 |
 | `add/sub/mul/div` | `v_add/v_sub/v_mul/v_div` | 네이티브 |
 | `exp`, `sqrt` | `v_exp`, `v_sqrt` | 네이티브 |
 | `reduce_sum`(행 합) | `ones[1×K]`와 **matmul** | reduction마다 matmul 1회 |
@@ -145,7 +167,7 @@
   - float 참조 대비 rel ≤ ~0.5%,
   - 기존 `llama_layer.py` golden과 동등 수준.
 - 부분 목표(먼저 통과시킬 순서): ① 단일 `matmul` → ② elementwise(add/mul/div/exp/sqrt) → ③ rms_norm → ④ attention(softmax 포함) → ⑤ swiglu → ⑥ 전체 레이어.
-- ⚠️ B0는 **축소 프록시 전용 bring-up**이다(실제 3B 차원은 타일링 없이는 못 돌림). 목적은 앞단(legalize/메모리플래닝/코드젠/하네스)을 검증하고 B1의 oracle을 확보하는 것.
+- ⚠️ B0는 **축소 프록시 + logical(64×64 타일링 없음) bring-up**이다. mysim이 ≤255 타일을 받아줘서 도는 것이며 실제 64×64 PE-legal 코드가 아니다(64×64 legal은 B0.5부터). 목적은 앞단(legalize/메모리플래닝/코드젠/하네스) 검증과 oracle 확보.
 
 ### 6.2 디렉토리 레이아웃 (제안)
 ```
@@ -159,9 +181,11 @@ d_compiler/
     legalize.py            # §5 매핑표를 구현한 Relax 패스들
     memplan.py             # G-buffer 정적 오프셋 할당
     isa.py                 # 명령어 인코더(32비트 워드 → program_memory.bin). 실행기 아님; mysim.cpp 디코드 규칙을 따름
-    codegen.py             # TIR → ISA (B0: flat)
-    intrin.py              # (B1) 64x64 PE tensorize intrinsic
+    codegen.py             # TIR → ISA (B0: flat / B0.5~: 64x64 타일링)
+    intrin.py              # (B0.5~) 64x64 PE tensorize intrinsic
     runtime.py             # program/G-buffer 작성 → 주어진 mysim 실행 → gout 파싱
+    cost.py                # 비용 모델: 명령어 수 + mysim 출력 원소 수 추정 (§4.1)
+    reference.py           # float 참조 + tiled_fp16_reference (B0.5/B1 oracle, §9-4)
     config.py              # 차원/주소맵/상수
   tests/
     test_matmul.py
@@ -199,14 +223,25 @@ d_compiler/
    - 단기: `llama_layer.py`와 동일 구성의 레이어를 **Relax로 직접 기술**(가장 통제 쉬움). 이후 `torch.export`→Relax import로 확장.
 
 ### 6.4 B0 마일스톤 체크리스트
-- [ ] M0: 환경 구축(TVM 설치) + `runtime.py`로 mysim 빌드·실행·gout 파싱
-- [ ] M1: `isa.py` 인코더 + 기존 예제 바이트 교차검증
-- [ ] M2: 단일 matmul Relax → ISA → mysim, float 참조 일치
-- [ ] M3: elementwise 세트 통과
-- [ ] M4: rms_norm (reduce/broadcast legalize 포함) 통과
-- [ ] M5: attention(softmax 포함) 통과
-- [ ] M6: swiglu(silu legalize) 통과
-- [ ] M7: 전체 레이어 vs `llama_layer.py` golden 동등
+- [x] **환경**: `npu-tvm` + TVM v0.19 소스 빌드 (§8)
+- [x] **M1**: `isa.py` 인코더 — golden 21 + **14,336 워드(56개 .bin) 라운드트립 일치** (`tests/test_isa.py`)
+- [x] **M0**: `runtime.py` — mysim 빌드·실행·gout 파싱; vector-add·matmul e2e 검증 (`tests/test_runtime.py`)
+- [x] **M2**: 단일 matmul **Relax → memplan → codegen → ISA → mysim**, FP16 참조 **byte-exact**(rel=0, dims≤255) (`tests/test_matmul.py`). + `memplan.py`/`codegen.py`(operator-level)/`driver.py` 추가
+- [x] **M3**: elementwise(add/sub/mul/div/sqrt/exp) + 체인 — 전부 byte-exact (`tests/test_elementwise.py`)
+- [x] **M4**: rms_norm — reduce/broadcast=ones-matmul legalize + 상수배치, rel 8e-4 (`tests/test_rmsnorm.py`); `legalize.py` 등장
+- [x] **M5**: single-head causal attention — transpose(원소복사 macro)+softmax(max-sub 제외)+mask, rel 2e-4 (`tests/test_attention.py`)
+- [x] **M6**: swiglu — silu=z/(1+exp(-z)) legalize, rel 7e-4 (`tests/test_swiglu.py`)
+- [x] **M7**: 전체 레이어(RMSNorm→GQA+RoPE+causal→res→RMSNorm→SwiGLU→res) — float 참조 대비 **rel=0.13%** (golden 0.12% 수준), 3171 instr, G-buffer 65488 FP16 (`tests/test_layer.py`). **→ B0 완성**
+
+**transpose 오버헤드 실측(§4.1 분석)**: attention seq8/hd16에서 k^T 원소복사 = 768명령 = **전체 프로그램의 68%**. → 전치/strided-load ISA 필요성의 정량 근거.
+
+### 6.5 B0.5 — 64×64 hardware-legal 타일링 (진행)
+- [x] **B0.5 K-타일링**: K를 ≤64로 쪼개 부분곱을 `save→load→add`로 누산(매 save FP16 반올림). codegen `tile=64` 경로 + memplan `scratch_alloc` + A-타일 gather(strided→연속). (`tests/test_tiling.py`)
+  - 타일 출력 == **`tiled_fp16_reference` byte-exact** (K=192/130/256/128)
+  - one-shot과 512중 260개 다름 → **B0 oracle로 byte-exact 비교 금지** 실증 (리뷰어 지적 확인), float64 대비 rel 5e-4
+  - 모든 m_mul 타일 **≤64×64 (hardware-legal)** 자동 검사
+- [ ] **B1 (M/N 타일링)**: M>64 또는 N>64일 때 출력 타일 + A/B gather·C scatter. (현재 B0.5는 K만; M,N≤64)
+- [ ] `cost.py` 비용 모델, 실제 3.2 3B 차원 코드생성 + 선별 실측
 
 ---
 
@@ -229,43 +264,47 @@ d_compiler/
 
 ## 8. 환경 / 설치
 
-현재 상태: **TVM 미설치**, Python 3.12.7, g++ 11.2.
-- ⚠️ **기존 conda env `ssd`는 다른 작업에서 사용 중 → 절대 건드리지 않는다.** (`env_setup.sh`의 lib 경로도 `ssd` 것이므로 본 프로젝트에선 의존하지 않는다.)
+현재 상태: 기존 conda env 들(`base/ssd/ssd-int8/tvm/tvm-study`) 존재. g++ 11.2.
+- ⚠️ **기존 conda env `ssd`는 다른 작업에서 사용 중 → 절대 건드리지 않는다.**
+- ⚠️ 기존 `tvm-study` env에 깔린 TVM은 **mlc.ai nightly(0.20.dev1070)** 인데, `tir→tirx`, `nd→runtime.tensor`로 **개명된 리팩토링 중간 빌드**다. Relax 파이프라인은 동작(검증함)하나 **표준 `tvm.tir`/`tvm.script.tir`가 없고 TVMScript TIR 작성(`T.block`)이 깨져** 공식 문서·MLC-LLM 소스를 그대로 못 따라간다. → **사용 안 함.**
+- mlc.ai 휠 인덱스엔 이 nightly 한 버전뿐 → 표준 API TVM은 **소스 빌드**로만 확보 가능.
 
-계획:
-- **TVM 전용 conda env를 새로 만든다: `tvm-study`** (Python 3.11/3.12). `ssd`에는 어떤 변경도 가하지 않는다.
-- TVM(Relax 포함) 설치: 프리빌트 휠(mlc-ai nightly 계열) 또는 LLVM 켜고 소스 빌드 중 택1. **버전 고정**(reproducibility)하고 `pyproject.toml`에 명시.
+**결정: 표준 API TVM을 소스 빌드.** (이유: 문서·튜토리얼·MLC-LLM이 전부 표준 `tvm.tir` 사용 → study/장기 개발엔 표준 API 필수)
+- 새 conda env **`npu-tvm`** (Python 3.11, conda-forge: `cmake ninja llvmdev numpy cython`). 기존 env엔 변경 없음.
+- TVM 소스: **apache/tvm v0.19.0**(tirx 리팩토링 이전 = 표준 레이아웃 + Relax 지원), 레포 밖 `~/tvm-src`에 클론.
+- 빌드: `USE_LLVM` 켜고 cmake+ninja → `pip install -e python`.
 - mysim 빌드는 `runtime.py` 픽스처가 자동 수행.
-- (정확한 설치 커맨드는 M0에서 환경 확정 후 README에 기록.)
+- 설치 확정 커맨드는 빌드 성공 후 `README.md`에 고정 기록.
 
 ---
 
 ## 9. 검증 전략 (differential testing)
 
-1. **float 참조**: 각 커널을 순수 Python/numpy로 독립 구현(이미 `test_*.py`에 존재) → rel error 비교.
-2. **golden 대조**: 동일 입력으로 기존 `llama_layer.py` 결과와 비교(전체 레이어 oracle).
-3. **원본 a.out 교차검증**(가능 범위): G-buffer 한계(8192) 내 작은 커널은 원본에서도 실행해 byte-exact 확인.
-4. **단계 oracle**: B1/B2 출력은 B0 출력을 oracle로 byte-exact 비교.
-5. FP16 톨러런스: 저장 시 반올림 특성 반영(절대/상대 혼합 임계).
+1. **float 참조**: 각 커널을 순수 Python/numpy로 독립 구현 → rel error(FP16 tolerance) 비교.
+2. **golden 대조**: 동일 입력으로 기존 `llama_layer.py` 결과와 비교(logical 전체 레이어 oracle, B0용).
+3. **원본 a.out 교차검증**(작은 커널 한정): 원본 `a.out`은 G-buffer 8192·program 32768 캡이라, **그 한계 내 작은 커널만** 원본에서도 돌려 `_poc/mysim`과 **같은 표현끼리** byte-exact 확인(원본은 보조 검증용, 메인 타깃 아님).
+4. ⚠️ **B0.5/B1은 B0와 byte-exact 비교 금지.** B0(one-shot matmul)는 **최종 1회만** FP16 반올림하지만, B0.5/B1은 **K타일마다 `save`→FP16 반올림→`load`→`m_add`** 누산이라 결과가 **정상적으로 달라진다**(mysim.cpp 저장 시 반올림). → 별도의 **`tiled_fp16_reference`**(동일한 타일링·중간 FP16 반올림 순서를 numpy로 모사)를 만들어 그것과 비교한다. B0와는 **tolerance** 비교만.
+5. **FP16 톨러런스**: 저장 시 반올림 특성 반영(절대/상대 혼합 임계). 비교는 **항상 같은 표현(저장된 FP16값 vs FP16 참조)** 끼리.
 
 ---
 
 ## 10. 리스크 / 오픈 퀘스천 (리뷰 포인트)
 
-- **[결정 필요] `mysim` 수정 허용 범위.** 원칙상 주어진 c-model이 기준(§2.0)이지만, 3.2 3B를 현실적으로 돌리려면 B2의 **루프/분기 + matmul-accumulate**가 사실상 필수다. 이건 `mysim.cpp` *수정*을 의미한다(보고서가 말한 "기존 c-model에 비파괴적 추가"와 동일 노선). → **mysim을 어디까지 수정해도 되는가**가 핵심 결정 사항. 옵션: (a) mysim as-is만 사용, 풀 모델은 언롤로 강행(비현실적 크기), (b) 보고서 권고대로 루프/누산/reduce-max를 비파괴적으로 추가, (c) 절충(루프만 추가).
-- **softmax 안정성**: max-subtraction 부재 → 큰 score에서 FP16 오버플로. 3.2 3B 실제 가중치에선 위험할 수 있음. 단기엔 회피, 근본 해결은 mysim에 reduce-max 추가(위 결정에 종속).
-- **시뮬레이션 실현성(중요)**: 3B 가중치를 mysim의 `vector<float> G`에 올리면 **파라미터 32억 × 4B ≈ 12GB+ 호스트 RAM**. 풀 모델 end-to-end를 mysim에서 한 번에 돌리는 건 비현실적일 수 있음 → **레이어 단위 검증 + 가중치 스트리밍/체이닝(`--gout`)** 전략, 또는 양자화 고려. 풀 모델 정확도 검증은 HF 참조와 레이어별 대조로.
-- **TVM 버전/설치 방식**: 프리빌트 vs 소스 빌드, Python 3.12 호환성, `tvm-study` env.
-- **메모리 재사용 정책**: 중간 버퍼 재사용(라이브러리 vs 활성값 vs KV캐시 영역 분리). G-buffer 평탄 주소 안에서 KV캐시 배치.
-- **frontend 범위**: 축소 프록시 직접 기술(B0) → 실제 차원(B1) → MLC 경로로 풀 모델(M) 전환 시점.
-- **transpose 비용**: 원소 복사 방식의 명령어 폭증 → 풀 차원에서 블록 전치/레이아웃(호스트 사전 전치) 전략 필요.
-- **decode vs prefill**: autoregressive decode(M=1)와 prefill(M=seq)의 타일링·KV캐시 접근이 다름 → 둘 다 코드젠 필요.
+- **mysim 수정: 현재 불가(결정됨).** 루프/누산/reduce-max 등은 ISA 추가 없이 언롤·우회로 구현(§1.4). 필수 ISA 여부는 나중에 비용 분석(§4.1) 근거로 별도 판단. → 당분간 모든 한계는 "컴파일러가 우회"로 흡수.
+- **시뮬레이션 실현성(최대 리스크).** 루프 ISA 없이 완전 언롤 → 풀 28레이어 3B 프로그램은 명령어 수백만+, 게다가 mysim의 `vector<float> G`에 3B 가중치(≈12GB+ RAM) → **풀 모델 end-to-end 실행은 비현실적일 수 있음.** 대응: **단일 레이어 prefill을 실제로 돌려 검증** + **풀 모델은 명령어 수/메모리 추정**으로 다룬다. (레이어별 `--gout` 체이닝, 가중치 스트리밍, 양자화는 추후 옵션.)
+- **softmax 안정성**: max-subtraction 제외(§1.4) → 큰 score에서 FP16 오버플로 위험. 작은 가중치로 회피. 근본 해결은 reduce-max ISA(보류).
+- **transpose 오버헤드(분석 대상)**: 원소복사 전치 = 전치당 O(행×열) 명령. 실측해서 전체 명령어 중 비중을 보고(§4.1) → 전치 ISA 필요성 판단 근거.
+- **메모리 재사용 정책**: 중간 버퍼 재사용 vs **KV는 저장만**(전용 영역 확보). G-buffer 평탄 주소 안에서 가중치/활성/KV 영역 분리 배치.
+- **frontend 범위**: 축소 프록시 직접 기술(B0) → 실제 차원(B1) → MLC 경로로 풀 모델 prefill(M) 전환 시점.
+- **decode(이후)**: autoregressive(M=1) + KV 재사용은 별도 단계. 지금은 KV 저장 포맷/위치만 prefill에서 확정해 둠.
 
 ---
 
 ## 11. 다음 액션 (제안)
-1. 본 PLAN.md 리뷰 → 범위·우선순위 확정. **특히 §10의 "mysim 수정 허용 범위" 결정**(B2/풀모델의 전제).
-2. M0: `tvm-study` env에 TVM 설치 + `runtime.py`로 **주어진 mysim** 빌드·실행·gout 파싱.
-3. M1: `isa.py` **인코더**(실행기 아님) + 기존 예제 `program_memory.bin`과 바이트 교차검증.
-4. M2: 단일 matmul end-to-end PoC (축소 프록시).
-5. (이후) B0 전체 레이어 → B1 실제 차원 타일링 → §10 결정에 따라 B2 → M(풀 3.2 3B).
+1. ✅ 환경: **`npu-tvm`** env + TVM v0.19 소스 빌드 완료(§8, README).
+2. M1: `isa.py` **인코더**(실행기 아님) + 기존 예제 `program_memory.bin`과 바이트 교차검증.
+3. M0: `runtime.py`로 **주어진 `_poc/mysim`** 빌드·실행·gout 파싱.
+4. **비용 모델**(`cost.py`): 명령어 수 + mysim 출력 원소 수 추정 → "실제 실행 가능 한계"를 일찍 확보(§4.1).
+5. M2: 단일 matmul **logical** e2e (B0, 축소 프록시) → float/golden tolerance.
+6. **`tiled_fp16_reference`** 구현 → **B0.5**: 작은 차원 64×64 타일링+누산 oracle 통과.
+7. B0 전체 레이어(prefill, logical) → **B1**: 실제 차원 코드 생성 + 선별 실측 + 비용 추정 → **M**(풀 그래프 lowering + costing).

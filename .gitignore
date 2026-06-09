@@ -1,0 +1,11 @@
+# build artifacts (note: original a_npu/*.out etc. are intentionally tracked)
+d_compiler/build/
+**/__pycache__/
+*.pyc
+
+# run/sim outputs
+gout.bin
+*.egg-info/
+
+# TVM is built out-of-repo (~/tvm-src); never commit it
+tvm-src/
