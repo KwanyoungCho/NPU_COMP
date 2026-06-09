@@ -70,26 +70,36 @@ def compile_func(func, mp, tile=None):
             mt = min(T, M - mi)
             for nj in range(0, N, T):                     # output col tiles
                 nt = min(T, N - nj)
+                # output tile C[mi:mi+mt, nj:nj+nt]. If it spans full width (nt==N)
+                # it's contiguous in C -> accumulate directly there (no scatter).
+                cdst = (ac + mi * N) if nt == N else sC
                 for ti, kk in enumerate(range(0, K, T)):  # accumulate over K
                     kt = min(T, K - kk)
-                    # gather A[mi:mi+mt, kk:kk+kt] (row stride K) -> sA [mt,kt]
-                    copy2d(sA, kt, ax + mi * K + kk, K, mt, kt)
-                    # gather B[kk:kk+kt, nj:nj+nt] (row stride N) -> sB [kt,nt]
-                    copy2d(sB, nt, aw + kk * N + nj, N, kt, nt)
+                    # A tile: contiguous iff full K (kt==K) -> load directly, else gather
+                    if kt == K:
+                        a_src = ax + mi * K
+                    else:
+                        copy2d(sA, kt, ax + mi * K + kk, K, mt, kt); a_src = sA
+                    # B tile: contiguous iff full width (nt==N) -> load directly, else gather
+                    if nt == N:
+                        b_src = aw + kk * N
+                    else:
+                        copy2d(sB, nt, aw + kk * N + nj, N, kt, nt); b_src = sB
                     a.tile(0, mt, kt); a.tile(1, kt, nt)
-                    a.addr(SRC1, sA); a.load(1, 0)
-                    a.addr(SRC2, sB); a.load(1, 1)
+                    a.addr(SRC1, a_src); a.load(1, 0)
+                    a.addr(SRC2, b_src); a.load(1, 1)
                     a.m_mul(mode=VECTOR)
                     if ti == 0:
-                        a.addr(DST, sC); a.save(1)        # sC = first partial (FP16 round)
+                        a.addr(DST, cdst); a.save(1)      # accumulator = first partial
                     else:
                         a.addr(DST, sP); a.save(1)        # partial -> sP (FP16 round)
-                        a.vlen(mt * nt)                   # sC = sC + partial (FP16 round)
-                        a.addr(SRC1, sC); a.load(0, 0)
+                        a.vlen(mt * nt)                   # acc = acc + partial (FP16 round)
+                        a.addr(SRC1, cdst); a.load(0, 0)
                         a.addr(SRC2, sP); a.load(0, 1); a.v_add(mode=VECTOR)
-                        a.addr(DST, sC); a.save(0)
-                # scatter sC [mt,nt] -> C[mi:mi+mt, nj:nj+nt] (row stride N)
-                copy2d(ac + mi * N + nj, N, sC, nt, mt, nt)
+                        a.addr(DST, cdst); a.save(0)
+                # scatter only when the output tile is NOT contiguous (nt<N)
+                if nt != N:
+                    copy2d(ac + mi * N + nj, N, sC, nt, mt, nt)
 
     def emit_transpose(dst, src):
         """2D transpose [R,C]->[C,R] via per-element copy (no transpose/strided ISA).

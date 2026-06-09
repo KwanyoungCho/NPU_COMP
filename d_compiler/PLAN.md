@@ -244,7 +244,8 @@ d_compiler/
 - [x] **B1 (M/N/K 일반 타일링)**: 출력을 64×64 타일로 쪼개고 A/B gather(`copy2d`)·K누적·C scatter. **임의 차원(M>64·N>64·K>64) hardware-legal** (`tests/test_tiling.py`)
   - M>64·N>64·비64배수 포함 8케이스 전부 **tiled_fp16_ref와 byte-exact**, 모든 m_mul 타일 ≤64×64 자동검사
 - [ ] `cost.py` 정적 자원/실행가능성 분석(§4.1) — 실제 3.2 3B 차원 코드생성 + 명령어/메모리/출력량 추정
-- [ ] (선택) gather/scatter 최적화: 연속인 경우 복사 생략, 버퍼 재사용
+- [x] gather/scatter 최적화: **연속이면 복사 생략**(A는 kt==K, B/C는 nt==N일 때 직접 load/store). 4×128×4 기준 1156→100. 진짜 strided(N>64 등)일 때만 gather/scatter 수행 — 잔여 비용은 strided-load ISA 부재의 본질적 비용.
+- [ ] (선택) 추가 최적화: 스크래치 버퍼 재사용, 가중치 호스트 사전 타일링
 
 ---
 
