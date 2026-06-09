@@ -128,6 +128,7 @@
 - prefill(seq=S) 레이어당 q/k/v/o/gate/up/down 합 → **레이어 1개도 수만~수십만 명령**, ×28 = 완전 언롤 시 수백만+. + 3B 가중치 ≈12GB+(mysim `vector<float> G`).
 - **transpose(원소복사) 오버헤드 분석**: 전치 1회당 명령어 = O(행×열), vlen=1 복사 언롤. attention K 전치·Xn 전치가 전체 명령어에서 차지하는 비중을 실측 → "전치 ISA 필요성"의 근거.
 - → **비용 모델을 코드젠 초기에 작성**(quiet mysim 없이도 어디까지 실제 실행 가능한지 판단).
+- ⚠️ **명확화**: 이 "비용 모델"은 **성능(latency/cycle) 예측이 아니다** — mysim은 시간을 모델링하지 않고 HW 타이밍 스펙도 없어 latency는 불가. 대신 **HW 데이터 없이 프로그램만으로 세는 정적 자원 분석**이다: 명령어 수(+종류별), G-buffer 원소/바이트, MATMUL 타일 수, **load+save 원소 수(=mysim 출력량=시뮬 시간 직결)**, copy/transpose 오버헤드 비중. 목적은 **실행가능성·크기·상대 오버헤드** 판단. (나중에 HW 타이밍 스펙이 생기면 `counts × per-op cost`로 진짜 latency 모델을 위에 얹을 수 있고, 이 정적 카운터가 그 토대가 됨.)
 
 ---
 
@@ -240,8 +241,10 @@ d_compiler/
   - 타일 출력 == **`tiled_fp16_reference` byte-exact** (K=192/130/256/128)
   - one-shot과 512중 260개 다름 → **B0 oracle로 byte-exact 비교 금지** 실증 (리뷰어 지적 확인), float64 대비 rel 5e-4
   - 모든 m_mul 타일 **≤64×64 (hardware-legal)** 자동 검사
-- [ ] **B1 (M/N 타일링)**: M>64 또는 N>64일 때 출력 타일 + A/B gather·C scatter. (현재 B0.5는 K만; M,N≤64)
-- [ ] `cost.py` 비용 모델, 실제 3.2 3B 차원 코드생성 + 선별 실측
+- [x] **B1 (M/N/K 일반 타일링)**: 출력을 64×64 타일로 쪼개고 A/B gather(`copy2d`)·K누적·C scatter. **임의 차원(M>64·N>64·K>64) hardware-legal** (`tests/test_tiling.py`)
+  - M>64·N>64·비64배수 포함 8케이스 전부 **tiled_fp16_ref와 byte-exact**, 모든 m_mul 타일 ≤64×64 자동검사
+- [ ] `cost.py` 정적 자원/실행가능성 분석(§4.1) — 실제 3.2 3B 차원 코드생성 + 명령어/메모리/출력량 추정
+- [ ] (선택) gather/scatter 최적화: 연속인 경우 복사 생략, 버퍼 재사용
 
 ---
 

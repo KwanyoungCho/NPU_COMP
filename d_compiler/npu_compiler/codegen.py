@@ -49,36 +49,47 @@ def compile_func(func, mp, tile=None):
             a.m_mul(mode=VECTOR)          # real matrix multiply
             a.addr(DST, off[dst]); a.save(1)
             return
-        # ---- B0.5 K-tiled, hardware-legal (<=64x64 per m_mul) ----
+        # ---- B1: general M/N/K tiling, hardware-legal (every m_mul <=64x64) ----
         T = tile
-        if M > T or N > T:
-            raise CodegenError(f"B0.5 tiles K only; M,N must be <={T}, got M={M} N={N} "
-                               f"(M/N tiling is B1)")
         ax, aw, ac = off[x], off[w], off[dst]
-        sA = mp.scratch_alloc(M * T)      # gathered A tile [M, kt]
-        sP = mp.scratch_alloc(M * N)      # partial product [M, N]
-        nkt = (K + T - 1) // T
-        for ti in range(nkt):
-            kk = ti * T
-            kt = min(T, K - kk)
-            # gather A[:, kk:kk+kt] (rows strided by K) -> sA contiguous [M,kt]
-            for r in range(M):
-                a.vlen(kt); a.addr(SRC1, ax + r * K + kk); a.load(0, 0)
-                a.v_add(mode=IMM, imm=0)                  # identity copy
-                a.addr(DST, sA + r * kt); a.save(0)
-            # B K-tile is contiguous rows: w[kk:kk+kt, :] at aw + kk*N, shape [kt,N]
-            a.tile(0, M, kt); a.tile(1, kt, N)
-            a.addr(SRC1, sA); a.load(1, 0)
-            a.addr(SRC2, aw + kk * N); a.load(1, 1)
-            a.m_mul(mode=VECTOR)
-            if ti == 0:
-                a.addr(DST, ac); a.save(1)               # C = first partial (FP16 round)
-            else:
-                a.addr(DST, sP); a.save(1)               # partial -> sP (FP16 round)
-                a.vlen(M * N)                            # C = C + partial (FP16 round)
-                a.addr(SRC1, ac); a.load(0, 0)
-                a.addr(SRC2, sP); a.load(0, 1); a.v_add(mode=VECTOR)
-                a.addr(DST, ac); a.save(0)
+        sA = mp.scratch_alloc(T * T)      # gathered A tile  [mt, kt]
+        sB = mp.scratch_alloc(T * T)      # gathered B tile  [kt, nt]
+        sP = mp.scratch_alloc(T * T)      # partial product  [mt, nt]
+        sC = mp.scratch_alloc(T * T)      # output-tile accumulator [mt, nt]
+
+        def copy2d(dst_off, dst_stride, src_off, src_stride, rows, cols):
+            """Copy a [rows,cols] block; one side may be strided. Per-row copy
+            (a+0). Used for gather (strided src->contiguous) and scatter (reverse)."""
+            for r in range(rows):
+                a.vlen(cols)
+                a.addr(SRC1, src_off + r * src_stride); a.load(0, 0)
+                a.v_add(mode=IMM, imm=0)
+                a.addr(DST, dst_off + r * dst_stride); a.save(0)
+
+        for mi in range(0, M, T):                         # output row tiles
+            mt = min(T, M - mi)
+            for nj in range(0, N, T):                     # output col tiles
+                nt = min(T, N - nj)
+                for ti, kk in enumerate(range(0, K, T)):  # accumulate over K
+                    kt = min(T, K - kk)
+                    # gather A[mi:mi+mt, kk:kk+kt] (row stride K) -> sA [mt,kt]
+                    copy2d(sA, kt, ax + mi * K + kk, K, mt, kt)
+                    # gather B[kk:kk+kt, nj:nj+nt] (row stride N) -> sB [kt,nt]
+                    copy2d(sB, nt, aw + kk * N + nj, N, kt, nt)
+                    a.tile(0, mt, kt); a.tile(1, kt, nt)
+                    a.addr(SRC1, sA); a.load(1, 0)
+                    a.addr(SRC2, sB); a.load(1, 1)
+                    a.m_mul(mode=VECTOR)
+                    if ti == 0:
+                        a.addr(DST, sC); a.save(1)        # sC = first partial (FP16 round)
+                    else:
+                        a.addr(DST, sP); a.save(1)        # partial -> sP (FP16 round)
+                        a.vlen(mt * nt)                   # sC = sC + partial (FP16 round)
+                        a.addr(SRC1, sC); a.load(0, 0)
+                        a.addr(SRC2, sP); a.load(0, 1); a.v_add(mode=VECTOR)
+                        a.addr(DST, sC); a.save(0)
+                # scatter sC [mt,nt] -> C[mi:mi+mt, nj:nj+nt] (row stride N)
+                copy2d(ac + mi * N + nj, N, sC, nt, mt, nt)
 
     def emit_transpose(dst, src):
         """2D transpose [R,C]->[C,R] via per-element copy (no transpose/strided ISA).

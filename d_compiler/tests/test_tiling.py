@@ -48,9 +48,12 @@ def tiled_fp16_ref(A, B, T=64):
 
 
 def test_tiled_matches_tiled_ref():
-    """Tiled NPU output == tiled_fp16_reference, byte-exact."""
+    """Tiled NPU output == tiled_fp16_reference, byte-exact.
+    Includes M>64 and N>64 (B1 M/N tiling), and non-64-multiple dims."""
     out = {}
-    for (M, K, N) in [(8, 192, 64), (8, 130, 64), (64, 256, 64), (1, 128, 32)]:
+    cases = [(8, 192, 64), (8, 130, 64), (64, 256, 64), (1, 128, 32),  # K-only
+             (128, 64, 96), (96, 128, 130), (65, 65, 65), (128, 192, 128)]  # M/N tiling
+    for (M, K, N) in cases:
         rng = np.random.default_rng(K)
         x = _fp16(rng.standard_normal((M, K)) * 0.3)
         w = _fp16(rng.standard_normal((K, N)) * 0.1)
@@ -80,7 +83,7 @@ def test_tiled_differs_from_oneshot():
 
 def test_tiled_legality():
     """Every emitted matmul tile is <=64x64 (hardware-legal)."""
-    M, K, N = 64, 192, 64
+    M, K, N = 128, 192, 96      # M>64 and N>64 -> multiple output tiles
     asm, _ = compile_func(make_matmul_mod(M, K, N)["main"], tile=64)
     # decode tile-setting instructions (opcode 0x88) and check dims <=64
     bad = []
@@ -90,13 +93,13 @@ def test_tiled_legality():
             if d1 > 64 or d2 > 64:
                 bad.append((d1, d2))
     assert not bad, f"non-legal tiles: {bad}"
-    return len(asm.words)
+    return f"{M}x{K}@{K}x{N}", len(asm.words)
 
 
 if __name__ == "__main__":
     print("[PASS] tiled == tiled_fp16_ref (byte-exact):", test_tiled_matches_tiled_ref())
     ndiff, n, rel = test_tiled_differs_from_oneshot()
     print(f"[PASS] tiled differs from one-shot: {ndiff}/{n} elems differ; vs float64 rel={rel:.4g}")
-    ninstr = test_tiled_legality()
-    print(f"[PASS] all m_mul tiles <=64x64 (hardware-legal); 64x192@192x64 -> {ninstr} instrs")
+    dims, ninstr = test_tiled_legality()
+    print(f"[PASS] all m_mul tiles <=64x64 (hardware-legal); {dims} -> {ninstr} instrs")
     print("ALL B0.5 TILING TESTS PASSED")

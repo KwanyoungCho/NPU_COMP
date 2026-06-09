@@ -471,6 +471,19 @@ B의 K조각 `B[kk:kk+64, :]`은 연속된 행들이라 메모리에서 **연속
 
 환경: `conda activate npu-tvm` (또는 `/home/chokwans99/anaconda3/envs/npu-tvm/bin/python` 직접 사용).
 
+### ⭐ 먼저: 단계별 walkthrough 스크립트 (가장 좋은 학습 진입점)
+각 스크립트는 파이프라인의 각 단계에서 **실제 값·명령어를 출력**하며 설명을 곁들입니다. 순서대로 돌려보세요:
+```bash
+P=/home/chokwans99/anaconda3/envs/npu-tvm/bin/python
+$P d_compiler/walkthrough_matmul.py    # 기본 흐름: Relax→memplan→codegen→mysim (6단계)
+$P d_compiler/walkthrough_rmsnorm.py   # legalize: 1개 연산 → 여러 primitive, reduce/broadcast=ones곱
+$P d_compiler/walkthrough_tiling.py    # 타일링: K쪼개기+FP16누산, one-shot과 왜 다른지
+```
+- `walkthrough_matmul.py` → 본 문서 §6,§7,§9 (memplan/codegen/driver)와 대조.
+- `walkthrough_rmsnorm.py` → §8 (legalize). 한 줄 `rms_norm()`이 10개 연산으로 펼쳐지는 걸 봄.
+- `walkthrough_tiling.py` → §10 (타일링). hardware-legal 64×64 조각 + 누적 + FP16 반올림 효과.
+- 공용 명령어 해석기는 `study_util.py`의 `disasm()`.
+
 ### 테스트 돌려보기
 ```bash
 cd /home/chokwans99/NPU_cmodel
