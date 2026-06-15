@@ -16,7 +16,13 @@
 9. [전체 연결 — `driver.py`](#9-전체-연결--driverpy)
 10. [타일링과 FP16 누산 — B0.5](#10-타일링과-fp16-누산--b05)
 11. [직접 실험해보기](#11-직접-실험해보기)
-12. [용어집](#용어집)
+12. [지금의 큰 그림 — 두 백엔드 + 프런트엔드](#12-지금의-큰-그림--두-백엔드--프런트엔드)
+13. [두 번째 백엔드 — TIR + tensorize](#13-두-번째-백엔드--tir--tensorize-tir_backendpy)
+14. [input reuse + 하이브리드](#14-input-reuse--하이브리드-t1t2)
+15. [PyTorch import](#15-pytorch-import-frontendpy--import_legalizepy)
+16. [실제 가중치 검증](#16-실제-가중치-검증-teststest_real_weightspy)
+17. [전체 코드 지도](#17-전체-코드-지도-현재)
+18. [용어집](#용어집)
 
 ---
 
@@ -478,10 +484,14 @@ P=/home/chokwans99/anaconda3/envs/npu-tvm/bin/python
 $P d_compiler/walkthrough_matmul.py    # 기본 흐름: Relax→memplan→codegen→mysim (6단계)
 $P d_compiler/walkthrough_rmsnorm.py   # legalize: 1개 연산 → 여러 primitive, reduce/broadcast=ones곱
 $P d_compiler/walkthrough_tiling.py    # 타일링: K쪼개기+FP16누산, one-shot과 왜 다른지
+$P d_compiler/walkthrough_tir.py       # TIR+tensorize 백엔드: Relax→TIR→스케줄→walker, reuse 효과 (§13~14)
+$P d_compiler/walkthrough_import.py    # PyTorch import: torch.export→Relax→legalize→NPU (§15)
 ```
 - `walkthrough_matmul.py` → 본 문서 §6,§7,§9 (memplan/codegen/driver)와 대조.
 - `walkthrough_rmsnorm.py` → §8 (legalize). 한 줄 `rms_norm()`이 10개 연산으로 펼쳐지는 걸 봄.
-- `walkthrough_tiling.py` → §10 (타일링). hardware-legal 64×64 조각 + 누적 + FP16 반올림 효과.
+- `walkthrough_tiling.py` → §10 (direct 타일링). hardware-legal 64×64 조각 + 누적 + FP16 반올림.
+- `walkthrough_tir.py` → §13~14 (TIR 백엔드). Relax→TIR→스케줄된TIR→walker, direct vs reuse 명령 수.
+- `walkthrough_import.py` → §15 (PyTorch import). 단계마다 op이 어떻게 우리 primitive로 바뀌나.
 - 공용 명령어 해석기는 `study_util.py`의 `disasm()`.
 
 ### 테스트 돌려보기
@@ -526,6 +536,87 @@ print("주소표:", {k.name_hint: v for k, v in mp.offset.items() if hasattr(k, 
 
 ---
 
+> ⚠️ §1~11은 **첫 백엔드(direct)** 와 기본 흐름. §12~16은 그 위에 추가한 **두 번째 백엔드(TIR+tensorize)**, **PyTorch import**, **실제 가중치**까지. 처음이면 §1~11을 먼저, 그다음 아래로.
+
+## 12. 지금의 큰 그림 — 두 백엔드 + 프런트엔드
+
+코드는 이제 세 덩어리입니다:
+```
+ [프런트엔드]  PyTorch ─torch.export→ Relax ─import_legalize→ (우리 primitive 그래프)   §15
+                                  │
+ [백엔드 2개]  ┌── direct   : Relax 연산 → 명령 직접 (손 타일링)            §7,§10
+              └── TIR+tensorize : Relax→TIR→스케줄→walker → 명령 (reuse)   §13,§14
+                                  │  (하이브리드: matmul은 TIR, 나머지는 direct §14)
+ [공용]        isa(인코더) · memplan(주소) · runtime(mysim) · cost(분석)    §3,§6,§4
+```
+- **공용 토대(isa/memplan/runtime)는 두 백엔드가 같이 씀** → 백엔드를 바꿔도 안 버려짐.
+- 왜 백엔드가 둘? direct는 빠른 검증용, TIR은 **input reuse 같은 스케줄 최적화**를 표현하려고(§13).
+
+## 13. 두 번째 백엔드 — TIR + tensorize (`tir_backend.py`)
+
+**왜**: direct의 고정 템플릿으론 "같은 입력 타일을 다시 안 불러오기(reuse)" 같은 최적화를 표현 못 함. 정석 TVM은 연산을 **TIR(루프)** 로 내린 뒤 스케줄(루프 변형)로 최적화함.
+
+**3조각** (walkthrough_tir.py로 단계별 확인):
+1. **intrinsic**: "64×64 블록 행렬곱"을 하드웨어 명령으로 바꿀 (설명desc, 구현impl) 한 쌍 등록. impl은 `call_extern("npu_gemm_acc", 포인터·stride)` 표식. 심볼릭 stride라 strided 타일에도 매칭.
+2. **schedule** (`schedule_matmul`): TIR 3중 루프를 `split(64³) → reorder → decompose_reduction(init/누적 분리) → tensorize`(안쪽 64블록을 intrinsic으로 치환). 결과 = "바깥 타일 루프 + intrinsic 호출".
+3. **walker** (`_Walker`): 스케줄된 TIR을 **해석**해 명령 emit — `for` 펼치기(unroll), `match_buffer`의 주소·stride 심볼을 실제 G-buffer 값으로 계산, `call_extern`을 만나면 gather+m_mul+누적 명령으로. **이게 곧 "TIR→우리 ISA codegen"**.
+
+→ §5에서 "TIR을 받으면 범용 codegen(루프·수식 해석기)이 필요하다"던 그 해석기의 실물이 walker입니다.
+
+## 14. input reuse + 하이브리드 (T1/T2)
+
+**input reuse** (walker 최적화):
+- A·B 입력 타일은 읽기 전용 → 같은 `(주소,stride)` 타일을 **한 번만 gather(연속 복사)** 하고 재사용(메모이제이션). 기존엔 같은 A 타일을 N/64번, B를 M/64번 중복 gather했음.
+- + fill 융합(0초기화 생략), 연속 C 누적버퍼.
+- 효과: 명령 수 차원이 클수록 크게 감소(실제 3B matmul −72%). walkthrough_tir §5에서 direct vs reuse 숫자 확인.
+
+**하이브리드** (`driver backend="hybrid"`): 한 그래프에서 **matmul만 TIR(reuse) 경로**, elementwise/transpose는 **direct** 그대로. matmul→PE intrinsic은 TIR이 깔끔하고, 나머지는 이미 검증된 direct가 처리. (라우터: 64배수 matmul만 TIR, reduce/broadcast(차원1)는 direct.)
+
+## 15. PyTorch import (`frontend.py` + `import_legalize.py`)
+
+**목표**: 실제 PyTorch 모델을 받아 컴파일. walkthrough_import.py로 단계 확인.
+
+**파이프라인** (`frontend.import_torch`):
+```
+torch.export(고정shape→static) → from_exported_program(Relax) → FoldConstant → import_legalize
+```
+- **from_exported_program**(TVM 제공): PyTorch → Relax. 단 고수준 op(`nn.silu`, `softmax`, `mean`...) + 가중치 전치(permute_dims 상수) + tuple 출력 + fp32로 나옴.
+- **FoldConstant**: Linear의 W^T(상수 전치)를 미리 계산해 상수로(런타임 전치 제거).
+- **import_legalize** (우리 패스, mutator): 고수준 op → 우리 primitive로 분해:
+  - silu→z/(1+exp(−z)), negative→0−x, power(x,2)→x·x, rsqrt→1/√, **mean→ones-matmul·(1/D)**, **softmax→exp/ones-matmul rowsum/broadcast/div**(max 생략).
+  - layout(`strided_slice`,`concat`)은 codegen이 복사로 처리 → RoPE rotate_half(slice+neg+concat) 가능.
+- 나머지 갭은 memplan/driver: **tuple 언래핑**, **bias broadcast**(상수 호스트 확장), **fp32→fp16**(G-buffer가 fp16), **위치(list) 입력**.
+
+→ 이걸로 **PyTorch로 짠 전체 Llama 디코더 블록**(RMSNorm+GQA+RoPE+softmax+SwiGLU)이 import→컴파일→실행됩니다(`tests/test_import.py::test_llama_block`, torch 대비 rel ~2.5%).
+
+## 16. 실제 가중치 검증 (`tests/test_real_weights.py`)
+
+- 실제 meta-llama/Llama-3.2-3B에서 **layer-0 텐서만 range-read(~200MB)** → npz 저장(전체 5GB 안 받음).
+- ⚠️ **풀 D=3072 레이어는 mysim에서 실행 불가**(원소를 다 출력 → 수억 개). 그래서 **실행 가능한 조각**을 실제 가중치로 검증:
+  - q/k/v/o projection, FFN(gate/up/down+silu) → 각각 **NPU vs torch rel ~0.002** 일치.
+- 풀 레이어는 compile + cost(≈18.8M 명령/레이어)로 산정. 모든 가중치 컴포넌트가 개별 일치 → 레이어 전체도 (실행만 가능하면) 맞음.
+
+## 17. 전체 코드 지도 (현재)
+
+```
+npu_compiler/
+  isa.py          명령어 인코더 (32비트 워드)              §3
+  runtime.py      주어진 mysim 빌드·실행·gout              §4
+  memplan.py      텐서→G-buffer 주소 (+상수/tuple/broadcast) §6,§15
+  codegen.py      direct 백엔드 (matmul/원소/transpose/slice/concat) + 하이브리드 라우터  §7,§14
+  tir_backend.py  TIR+tensorize 백엔드 (intrinsic/schedule/_Walker, reuse)  §13,§14
+  legalize.py     레이어 빌더 (rms_norm/softmax/silu/rope/attention) — 손으로 그래프 짤 때  §8
+  import_legalize.py  import된 고수준 op → 우리 primitive (mutator)  §15
+  frontend.py     PyTorch import (torch.export→Relax→정규화)  §15
+  model.py        설정 기반 Llama 레이어 빌더 + numpy 참조 (REDUCED/MEDIUM/3B)
+  cost.py         정적 비용 분석 (명령/메모리, 실행 X)
+  driver.py       전체 묶기: run_module(backend=direct|tir|hybrid)  §9
+tests/   13개 (isa…real_weights)
+walkthrough_*.py  5개 학습 스크립트 (§11)
+```
+
+---
+
 ## 용어집
 - **NPU**: 신경망 가속기. 여기선 64×64 행렬 연산기 + 벡터 연산기.
 - **mysim**: 주어진 NPU 시뮬레이터(`_poc/mysim.cpp`). 우리의 실행기 겸 정답 기준.
@@ -541,9 +632,17 @@ print("주소표:", {k.name_hint: v for k, v in mp.offset.items() if hasattr(k, 
 - **gather/scatter**: 띄엄띄엄한 데이터를 연속으로 모으기 / 그 반대.
 - **logical vs hardware-legal**: 시뮬레이터가 받아주는(>64 타일) 코드 vs 실제 64×64 PE에 맞는 코드.
 - **one-shot vs tiled**: 한 방에 한 행렬곱 vs 조각내 누적 (FP16 반올림 시점이 달라 결과가 다름).
+- **TIR**: TVM의 루프 레벨 IR(스칼라 for문). Relax(그래프, 무엇)보다 낮은 층(어떻게).
+- **tensorize**: TIR의 안쪽 블록을 하드웨어 명령(intrinsic)으로 치환하는 스케줄 기법.
+- **walker** (`_Walker`): 스케줄된 TIR을 해석해 우리 명령으로 내리는 codegen(루프 펼침+주소계산).
+- **input reuse**: 같은 입력 타일을 한 번만 gather해 재사용 → 명령/데이터이동 절감.
+- **하이브리드**: matmul=TIR(reuse) 경로 + 나머지=direct 경로를 한 그래프에서.
+- **import / from_exported_program**: PyTorch→Relax 변환(TVM 프런트엔드).
+- **legalize(import)**: import된 고수준 op을 우리 primitive로 분해하는 패스.
 
 ---
 
 ## 다음 단계 (참고)
-`PLAN.md §4` 로드맵 기준 현재 **B0 완성 + B0.5 K-타일링** 까지. 다음은 B1(M/N 타일링 → 임의 차원), 비용 모델(`cost.py`), 실제 Llama 3.2 3B 차원 코드 생성입니다.
+`PLAN.md` 로드맵 기준 현재까지: B0/B0.5/B1(direct 타일링) → T0/T1/T2(TIR+tensorize+reuse+하이브리드) → PyTorch import + 전체 legalize → 실제 3B 가중치 조각 검증, 까지 완료.
+다음 후보: 가중치 호스트 사전패킹(더 큰 실제 레이어 실행 가능화), embedding/lm_head/샘플링(호스트 전후처리), 28레이어 체이닝, decode+KV 캐시.
 ```

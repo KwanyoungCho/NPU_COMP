@@ -28,15 +28,17 @@ def broadcast_col(bb, x, rows, n):
 
 
 def rms_norm(bb, x, w, seq, d, eps=0.0):
-    """RMSNorm(x[seq,d], w[1,d]) -> [seq,d], eps=0 (matches proxy).
+    """RMSNorm(x[seq,d], w[1,d]) -> [seq,d].
 
-    ms = mean(x^2, axis=-1); y = x / sqrt(ms) * w
+    ms = mean(x^2, axis=-1) + eps; y = x / sqrt(ms) * w
     reduce via ones-matmul, broadcast via ones-matmul, 1/rms via ones-divide.
+    eps (e.g. 1e-5) added as a constant tensor (immediate can't encode it).
     """
-    assert eps == 0.0, "eps!=0 needs a constant-add (TODO when real model)"
     sq = bb.emit(relax.op.multiply(x, x))                       # [seq,d]
     ssum = reduce_sum_lastdim(bb, sq, seq, d)                   # [seq,1]
     mean = bb.emit(relax.op.multiply(ssum, _c(np.full((seq, 1), 1.0 / d))))  # /d
+    if eps:
+        mean = bb.emit(relax.op.add(mean, _c(np.full((seq, 1), eps))))       # + eps
     rms = bb.emit(relax.op.sqrt(mean))                         # [seq,1]
     inv = bb.emit(relax.op.divide(_c(np.ones((seq, 1))), rms))  # 1/rms  [seq,1]
     scale = broadcast_col(bb, inv, seq, d)                      # [seq,d]
@@ -45,16 +47,36 @@ def rms_norm(bb, x, w, seq, d, eps=0.0):
     return bb.emit(relax.op.multiply(xn, wb))                  # * weight
 
 
-def rope_tables(seq, hd, base=10000.0):
+def _llama3_scale_freqs(freqs, factor=32.0, low=1.0, high=4.0, old_ctx=8192):
+    """Llama-3 RoPE frequency scaling (smooth low/high-frequency interpolation)."""
+    out = np.empty_like(freqs)
+    low_wl = old_ctx / low                                     # wavelength thresholds
+    high_wl = old_ctx / high
+    for i, f in enumerate(freqs):
+        wl = 2.0 * np.pi / f
+        if wl > low_wl:
+            out[i] = f / factor                               # low freq: scale down
+        elif wl < high_wl:
+            out[i] = f                                        # high freq: unchanged
+        else:
+            s = (old_ctx / wl - low) / (high - low)           # smooth interpolation
+            out[i] = (1 - s) * f / factor + s * f
+    return out
+
+
+def rope_tables(seq, hd, base=10000.0, llama3_scaling=False):
     """Host-precomputed cos/sin tables [seq,hd] (NPU can't do sin/cos) and the
-    rotate_half permutation matrix [hd,hd] (so rotate_half = q @ Rot, no slice/concat)."""
+    rotate_half permutation matrix [hd,hd] (so rotate_half = q @ Rot, no slice/concat).
+    base=500000 + llama3_scaling=True for Llama 3.2."""
     half = hd // 2
+    freqs = base ** (-2.0 * np.arange(half) / hd)              # [half]
+    if llama3_scaling:
+        freqs = _llama3_scale_freqs(freqs)
     cos = np.zeros((seq, hd)); sin = np.zeros((seq, hd))
     for p in range(seq):
-        for i in range(half):
-            th = p * (base ** (-2.0 * i / hd))
-            cos[p, i] = cos[p, i + half] = np.cos(th)
-            sin[p, i] = sin[p, i + half] = np.sin(th)
+        ang = p * freqs                                       # [half]
+        cos[p, :half] = cos[p, half:] = np.cos(ang)
+        sin[p, :half] = sin[p, half:] = np.sin(ang)
     rot = np.zeros((hd, hd))
     for j in range(half):
         rot[j + half, j] = -1.0          # rh[:, j<half]  = -q[:, j+half]

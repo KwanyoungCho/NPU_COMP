@@ -15,28 +15,42 @@ def compile_func(func, tile=None):
     return asm, mp
 
 
-def run_module(mod, inputs, func_name="main", maxrun=None, tile=None):
+def run_module(mod, inputs, func_name="main", maxrun=None, tile=None, backend="direct"):
     """Run a Relax module on mysim.
 
     inputs: dict {param_name -> np.ndarray}. Returns the output np.ndarray
     (float32, FP16-rounded by the NPU) reshaped to the output tensor shape.
     """
-    func = mod[func_name]
-    asm, mp = compile_func(func, tile=tile)
+    if backend == "tir":                      # matmul-only modules via pure TIR path
+        from . import tir_backend
+        asm, mp = tir_backend.compile_func(mod, func_name)
+        func = None
+    elif backend == "hybrid":                 # whole graph: matmul->TIR, rest->direct
+        func = mod[func_name]
+        mp = _memplan.plan(func)
+        asm = _codegen.compile_func(func, mp, tile=64, mm_backend="tir")
+        func = None
+    else:
+        func = mod[func_name]
+        asm, mp = compile_func(func, tile=tile)
 
     gbuf = np.zeros(mp.top, dtype=np.float32)
     for c in mp.constants:                         # bake constant data into initial G-buffer
         data = mp.const_data[c].astype(np.float32).reshape(-1)
         off = mp.offset[c]
         gbuf[off:off + data.size] = data
-    for p in mp.params:
-        name = p.name_hint
-        if name not in inputs:
-            raise KeyError(f"missing input for param '{name}'")
-        arr = np.asarray(inputs[name], dtype=np.float32).reshape(-1)
+    # inputs: dict keyed by param name, OR list/tuple positional (matches param order)
+    for i, p in enumerate(mp.params):
+        if isinstance(inputs, dict):
+            if p.name_hint not in inputs:
+                raise KeyError(f"missing input for param '{p.name_hint}'")
+            src = inputs[p.name_hint]
+        else:
+            src = inputs[i]
+        arr = np.asarray(src, dtype=np.float32).reshape(-1)
         off = mp.offset[p]
         if arr.size != _numel(mp.shape[p]):
-            raise ValueError(f"param '{name}' size {arr.size} != {mp.shape[p]}")
+            raise ValueError(f"param #{i} '{p.name_hint}' size {arr.size} != {mp.shape[p]}")
         gbuf[off:off + arr.size] = arr
 
     out_var = mp.output

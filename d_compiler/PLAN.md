@@ -130,6 +130,58 @@
 - → **비용 모델을 코드젠 초기에 작성**(quiet mysim 없이도 어디까지 실제 실행 가능한지 판단).
 - ⚠️ **명확화**: 이 "비용 모델"은 **성능(latency/cycle) 예측이 아니다** — mysim은 시간을 모델링하지 않고 HW 타이밍 스펙도 없어 latency는 불가. 대신 **HW 데이터 없이 프로그램만으로 세는 정적 자원 분석**이다: 명령어 수(+종류별), G-buffer 원소/바이트, MATMUL 타일 수, **load+save 원소 수(=mysim 출력량=시뮬 시간 직결)**, copy/transpose 오버헤드 비중. 목적은 **실행가능성·크기·상대 오버헤드** 판단. (나중에 HW 타이밍 스펙이 생기면 `counts × per-op cost`로 진짜 latency 모델을 위에 얹을 수 있고, 이 정적 카운터가 그 토대가 됨.)
 
+### 4.2 [전략 전환 2026-06-10] codegen 백본을 TIR+tensorize로 이행
+**결정**: matmul 코드 생성을 직접 템플릿 방식에서 **TIR+tensorize 기반**으로 전환한다.
+
+**이유 — 스케줄 최적화 공간(특히 input reuse)이 고정 템플릿으로는 표현 불가**:
+- 현재 루프 순서 `(mi, nj, kk)` 고정 → **A 타일 gather가 N/64배**(3B의 N=3072면 48배), **B 타일 gather가 M/64배 중복**. 피연산자 reuse(mysim의 pin1/pin2는 유지됨에도 매번 재로드), 가중치 호스트 사전 패킹, 더블버퍼링 등도 미표현.
+- 이를 손으로 하나씩 추가하면 스케줄러 재발명 → reorder/cache_read/compute_at/layout 변환을 가진 **TIR 스케줄 인프라가 정답**. 실제 HW에서 데이터 이동(=dataflow 선택)이 지배 비용이라는 점에서도 방향이 맞음.
+
+**살아남는 것**: isa.py·runtime.py·tiled_fp16_ref·테스트/golden·legalize 레시피(그래프 레벨)·memplan(스크래치 할당). 현 codegen matmul 경로는 **참조 구현(oracle)**으로 유지, elementwise는 당분간 직접 경로 병행(하이브리드).
+
+**새로 짓는 것**: ① NPU 64×64 gemm **intrinsic**(desc+impl; impl은 tile/load/m_mul/save→load→add 누산 시퀀스 = FP16 반올림 순서 보존), ② **TIR 스케줄**(split/reorder/tensorize + 패킹/hoisting), ③ **TIR→ISA walker**(For 언롤 + 인덱스 수식 평가 + intrinsic 호출→명령; 수백 줄 규모).
+
+**단계**:
+- [x] **T0 (기반) — 완료**: `tir_backend.py` — intrinsic 2종(`npu_fill_zero`/`npu_gemm_acc`, 심볼릭 stride desc+impl) 등록, `schedule_matmul`(64³ split→reorder→decompose_reduction→tensorize), **`_Walker`**(For 언롤·BlockRealize/match_buffer 심볼 바인딩·인덱스 수식 상수평가·call_extern→명령 emit). driver `backend="tir"`. (`tests/test_tir_backend.py`)
+  - 검증: 4개 차원조합 + 체인(2연속 matmul)에서 **direct 경로 및 tiled_fp16_ref와 byte-exact**, 타일 전부 ≤64, matmul 타일 수 정확(⌈M/64⌉⌈N/64⌉⌈K/64⌉).
+  - 수치 보존 핵심: `C=0; C=fp16(C+fp16(p_k))` 순서가 oracle과 동일(fp16(0+x)=fp16(x)).
+  - ⚠️ T0 명령 수는 direct보다 큼(예: 128×192×128에서 21,669 vs 14,569) — 원인: ① init fill을 실제 emit(direct는 첫 partial 직접 저장), ② 항상 load+add 누산. **T1의 최적화 대상**(fill+첫acc 융합, gather hoisting, 가중치 사전 패킹). T0 제약: 차원 64배수(패딩은 추후).
+- [x] **T1 (reuse) — 완료**: walker 최적화 ① **fill+첫 누적 융합**(중복 init 제거, 첫 partial 직접 저장), ② **gather 메모이제이션**(read-only 타일은 `(주소,stride)`당 1회만 gather → input reuse), ③ **연속 C 누적 버퍼 + flush scatter**(strided C도 누적은 한 방, 끝에 한 번 scatter). `cost.py` 정적 분석기 추가(명령 종류별/matmul타일/gather복사/누적 카운트, G-buf 풋프린트). 전부 byte-exact 유지(10/10).
+  - **실측(direct 대비)**: 128×192×128 **-43%**(14569→8425), 256³ **-66%**(75025→25873), 512³ **-81%**(568129→109377). gather 복사 512³서 69632→12288. **차원 클수록 절감↑**(gather 중복이 차원 비례).
+  - 트레이드오프: G-buffer 풋프린트 증가(타일 복사본 보관) — **가중치 호스트 사전 패킹 시 B-gather 0**으로 이 메모리·잔여복사 추가 제거 가능(T2).
+- [x] **T2 (하이브리드 통합) — 완료**: 한 파이프라인에서 **matmul만 TIR(reuse) 경로, elementwise/transpose는 기존 direct** 로 라우팅. `tir_backend.emit_matmul_into()`(단일 matmul을 주어진 asm/주소에 emit) + `codegen.compile_func(mm_backend="tir")` + `driver backend="hybrid"`. tir_backend.compile_func는 이 경유 wrapper로 재구성.
+  - 검증: matmul+원소곱+원소덧셈 그래프가 **direct와 byte-exact**(`test_tir_backend.test_hybrid_vs_direct`). 10/10 유지.
+  - **실제 3.2 3B 차원 reuse 실측(cost.py, 실행X)**: q_proj[128,3072]@[3072,3072] direct 4,872,673 → tir+reuse 1,382,881 **(-72%)**; gate/down **-73%**. (elementwise는 굳이 TIR로 안 옮김 — direct가 이미 byte-exact, 하이브리드 유지가 정답.)
+  - 남은 커버리지: 비64배수 차원 pad(특히 SEQ), 가중치 호스트 사전 패킹(B-gather 0).
+- [x] **실제 Llama 3.2 3B 단일 레이어 prefill compile — 완료** (`npu_compiler/model.py`, `tests/test_real_layer.py`):
+  - `model.py`: 설정 기반 레이어 빌더(`LayerConfig`/`build_layer_module`/`make_weights`/`ref_layer`) — REDUCED/MEDIUM/LLAMA_3_2_3B 한 코드로. eps·RoPE(base=500000+llama3 scaling) 반영.
+  - **라우터**: 64배수 matmul만 TIR, 그 외(reduce/broadcast 등 차원1)는 direct (패딩 대신). SEQ는 64배수로(prefill 패딩).
+  - **emit_ew 청크 분할**(≤8192): 큰 활성([SEQ,F]=1M)의 16비트 vlen 오버플로 수정.
+  - 검증: REDUCED hybrid==direct & rel 8e-4 / **MEDIUM(64배수, TIR 경로 실제 실행) rel 9e-4** / 3B-차원 matmul hardware-legal 컴파일 확인. 11/11.
+  - **3B 단일 레이어 cost(실행 불가→산정)**: G-buffer 0.28GB/레이어, 행렬곱 17.8M + 전치 1.05M ≈ **18.8M 명령/레이어**(TIR reuse 경로). 풀 28레이어는 ~530M로 mysim 실행 비현실적(처음부터 "단일 레이어 동작+풀모델 추정"이 목표).
+
+### 6.6 실제 PyTorch 모델 import (진행 중)
+> 목표: 실제 HF/ONNX 모델을 받아 prefill 컴파일. 선택: **torch.export 프런트엔드 + 토이/랜덤 가중치로 파이프라인 우선**(HF 다운로드/auth는 출력품질용으로 별도).
+- 환경: `npu-tvm`에 **torch 2.12 CPU** 설치.
+- 파이프라인(`frontend.import_torch`): `torch.export`(고정 shape→static) → `from_exported_program` → `FoldConstant`(가중치 전치 fold) → `import_legalize.legalize`(고수준 op→우리 primitive).
+- 정규화 처리: **tuple 출력 언래핑**(memplan), **bias broadcast**(상수 호스트 확장, memplan), **fp32→fp16**(G-buffer가 fp16이라 데이터만 변환), **위치 기반 입력**(param명이 torch 인자명이라 dict 대신 list).
+- legalize 패스(`import_legalize.py`, 확장형): **relax.nn.silu → z/(1+exp(-z))** (우리 primitive). 
+- [x] **검증(`tests/test_import.py`)**: Linear / MLP / **SwiGLU FFN(실제 Llama FFN)** torch import→하이브리드 컴파일→torch 참조 **rel ~7e-4**.
+- [x] **legalize 패스 전부 구현 — 전체 Llama 디코더 블록 import 동작**:
+  - compute(import_legalize.py mutator): `silu`, `negative`(0−x), `power`(x²→x·x), `rsqrt`(1/√), `mean`(last-axis → ones-matmul·1/D), `softmax`(exp/ones-matmul rowsum/broadcast/div, max 생략).
+  - layout(codegen): `strided_slice`(2D last-axis 행별 복사), `concat`(2D last-axis 열 결합) — RoPE rotate_half(slice+neg+concat)를 복사로 처리.
+  - **전체 PyTorch Llama 디코더 블록**(RMSNorm+GQA+RoPE+causal softmax+SwiGLU, eager·헤드별)을 `torch.export`→import→하이브리드 컴파일→실행, **torch 참조 대비 rel ~2.5%**(FP16+누적). 12/12.
+  - 메모: per-head 구성으로 reshape 회피(헤드 분할용 reshape/expand 불필요). `torch.zeros` 초기화는 미지원→리스트 합산으로 우회. 풀 3B는 차원만 키우면 동일 경로(cost는 §6.5와 동일 규모).
+
+### 6.7 실제 Llama 3.2 3B 가중치 검증 (`tests/test_real_weights.py`)
+- 로컬에 가중치 없음 → meta-llama/Llama-3.2-3B(게이트, 토큰 보유)에서 **layer-0 텐서만 range-read(~200MB)** 로 받아 `d_compiler/build/llama32_3b_layer0.npz` 저장(bf16→fp32). config 일치 확인(D=3072,H=24,KV=8,HD=128,F=8192,θ=500000,llama3 scaling,eps=1e-5).
+- ⚠️ **풀 D=3072 레이어는 mysim 실행 불가**(원소 전부 출력) → **실행 가능한 조각**을 실제 가중치로 검증:
+  - [x] q/k/v/o projection(head0, 실제 가중치): torch import→하이브리드 컴파일→**NPU vs torch rel ~0.002** (전부 PASS).
+  - [x] FFN(gate/up/down 실제 가중치 + SiLU): **NPU vs torch rel 0.0023** (mysim ~338s, PASS).
+- → **실제 3B 학습 가중치로 컴파일된 NPU 출력이 torch와 일치**함을 모든 가중치 컴포넌트(attention 4개 proj + FFN)에서 입증. 풀 레이어 동시 실행만 mysim 한계로 불가 → §6.5 cost(≈18.8M 명령/레이어)로 산정.
+- [ ] **T3**: 전체 레이어를 새 경로로 → golden 대조 → 실제 3B 차원 costing.
+- (이후) MetaSchedule/dlight식 자동 스케줄, TVM 정식 target 등록.
+
 ---
 
 ## 5. [핵심] NPU-legalize 매핑표

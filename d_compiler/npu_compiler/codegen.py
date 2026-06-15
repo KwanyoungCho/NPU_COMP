@@ -22,13 +22,13 @@ class CodegenError(Exception):
     pass
 
 
-def compile_func(func, mp, tile=None):
+def compile_func(func, mp, tile=None, mm_backend="direct"):
     """Emit an Asm for a planned Relax function. Returns Asm (ending in halt).
 
     tile=None  -> B0 logical matmul (single m_mul, dims<=255, simulator-only).
-    tile=64    -> B0.5 hardware-legal: split K into <=64 chunks, accumulate
-                  partial products via save->load->add (FP16 rounding each save).
-                  (This first version tiles K only; M,N must be <=tile.)
+    tile=64    -> B0.5/B1 hardware-legal direct tiling (gather/scatter, contiguous-skip).
+    mm_backend="tir" -> route matmul to the TIR+tensorize path (T1 input reuse);
+                  elementwise/transpose still emitted directly here (hybrid).
     """
     a = Asm()
     off = mp.offset
@@ -38,6 +38,12 @@ def compile_func(func, mp, tile=None):
         K2, N = mp.shape[w]
         if K != K2:
             raise CodegenError(f"matmul K mismatch {K} vs {K2}")
+        # hybrid router: only 64-multiple matmuls (big projections) go to the TIR
+        # path; reduce/broadcast matmuls (dims of 1, from legalize) stay direct.
+        if mm_backend == "tir" and M % 64 == 0 and K % 64 == 0 and N % 64 == 0:
+            from . import tir_backend
+            tir_backend.emit_matmul_into(a, mp, off[dst], off[x], off[w], M, K, N)
+            return
         if tile is None:
             if max(M, K, N) > 255:
                 raise CodegenError(f"B0 logical matmul needs dims<=255, got {M}x{K}x{N} "
@@ -117,16 +123,58 @@ def compile_func(func, mp, tile=None):
                 a.v_add(mode=IMM, imm=0)                 # identity copy (a + 0)
                 a.addr(DST, d0 + c * R + r); a.save(0)
 
+    def emit_strided_slice(dst, call):
+        """2D last-axis slice x[:, b:e] -> contiguous dst (per-row copy)."""
+        src = call.args[0]
+        axes = [int(f.value) for f in call.args[1]]
+        begin = [int(f.value) for f in call.args[2]]
+        end = [int(f.value) for f in call.args[3]]
+        R, C = mp.shape[src]
+        if axes[0] not in (1, -1):
+            raise CodegenError(f"strided_slice: only last-axis 2D (axes={axes})")
+        b0 = begin[0] + (C if begin[0] < 0 else 0)
+        e0 = min(end[0], C)
+        w = e0 - b0
+        for r in range(R):
+            a.vlen(w)
+            a.addr(SRC1, off[src] + r * C + b0); a.load(0, 0)
+            a.v_add(mode=IMM, imm=0)
+            a.addr(DST, off[dst] + r * w); a.save(0)
+
+    def emit_concat(dst, call):
+        """2D last-axis concat: copy each input's columns into the output (per-row)."""
+        srcs = list(call.args[0].fields)
+        if int(call.attrs.axis) not in (1, -1):
+            raise CodegenError(f"concat: only last-axis 2D (axis={call.attrs.axis})")
+        Cd = mp.shape[dst][1]
+        col = 0
+        for s in srcs:
+            Rs, Cs = mp.shape[s]
+            for r in range(Rs):
+                a.vlen(Cs)
+                a.addr(SRC1, off[s] + r * Cs); a.load(0, 0)
+                a.v_add(mode=IMM, imm=0)
+                a.addr(DST, off[dst] + r * Cd + col); a.save(0)
+            col += Cs
+
     def emit_ew(dst, op_method, args, n):
-        """Elementwise vector op over n contiguous elements. args: 1 or 2 vars."""
-        a.vlen(n)
-        a.addr(SRC1, off[args[0]]); a.load(0, 0)
-        if len(args) == 2:
-            a.addr(SRC2, off[args[1]]); a.load(0, 1)
-            op_method(mode=VECTOR)
-        else:
-            op_method()               # unary (sqrt/exp) — no mode/operand2
-        a.addr(DST, off[dst]); a.save(0)
+        """Elementwise vector op over n contiguous elements. args: 1 or 2 vars.
+        Chunked to <=8192 (16-bit vlen field max is 65535; 8192 matches the
+        documented PE buffer) so large activations (e.g. [SEQ,F]=1M) don't overflow."""
+        CH = 8192
+        o0 = off[args[0]]
+        o1 = off[args[1]] if len(args) == 2 else None
+        od = off[dst]
+        for base in range(0, n, CH):
+            m = min(CH, n - base)
+            a.vlen(m)
+            a.addr(SRC1, o0 + base); a.load(0, 0)
+            if o1 is not None:
+                a.addr(SRC2, o1 + base); a.load(0, 1)
+                op_method(mode=VECTOR)
+            else:
+                op_method()           # unary (sqrt/exp) — no mode/operand2
+            a.addr(DST, od + base); a.save(0)
 
     EW2 = {"relax.add": a.v_add, "relax.subtract": a.v_sub,
            "relax.multiply": a.v_mul, "relax.divide": a.v_div}
@@ -137,7 +185,7 @@ def compile_func(func, mp, tile=None):
         for binding in block.bindings:
             dst = binding.var
             call = binding.value
-            if isinstance(call, relax.Var):          # alias (offset already shared in memplan)
+            if isinstance(call, (relax.Var, relax.Tuple)):  # alias / tuple output: no emit
                 continue
             if not isinstance(call, relax.Call):
                 raise CodegenError(f"unsupported binding value {type(call)}")
@@ -146,6 +194,10 @@ def compile_func(func, mp, tile=None):
                 emit_matmul(dst, call.args[0], call.args[1])
             elif name == "relax.permute_dims":
                 emit_transpose(dst, call.args[0])
+            elif name == "relax.strided_slice":
+                emit_strided_slice(dst, call)
+            elif name == "relax.concat":
+                emit_concat(dst, call)
             elif name in EW2:
                 n = 1
                 for d in mp.shape[dst]:
