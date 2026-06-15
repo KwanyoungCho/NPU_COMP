@@ -7,8 +7,10 @@ support: matmul, add/subtract/multiply/divide, sqrt, exp, permute_dims.
 Extensible: add a handler per op. Currently:
   - relax.nn.silu  ->  z / (1 + exp(-z))      (= z * sigmoid(z))
 
-TODO for a full Llama block: reduce/mean (rms,softmax) via ones-matmul, rsqrt,
-softmax (no max-sub), reshape/strided_slice/concat (head split), RoPE.
+Reductions (mean/softmax rowsum) and broadcasts are emitted as dedicated
+relax.sum / relax.broadcast_to ops (NOT ones-matmul), so that relax.matmul in
+the graph is exclusively true GEMM (-> TIR-only backend). codegen lowers
+sum/broadcast efficiently on the matrix engine.
 """
 import numpy as np
 import tvm
@@ -73,7 +75,9 @@ class _Legalizer(relax.PyExprMutator):
         s = self.builder_.emit(relax.op.sqrt(x))
         return self.builder_.emit(relax.op.divide(relax.const(np.ones(shp, dt)), s))
 
-    # mean over last dim of [R,C] (keepdims) = (x @ ones[C,1]) * (1/C)  -> [R,1]
+    # mean over last dim of [R,C] (keepdims) = sum(x,-1) * (1/C)  -> [R,1]
+    # reduce is a dedicated op (relax.sum), NOT a matmul: codegen lowers it
+    # efficiently on the matrix engine, keeping matmul-the-op TIR-only.
     def _mean(self, x, attrs, sinfo):
         xshp, dt = self._shp(x.struct_info)
         axis = [int(a) % len(xshp) for a in attrs.axis]      # normalize -1 -> last
@@ -81,18 +85,20 @@ class _Legalizer(relax.PyExprMutator):
             f"mean: only last-axis keepdims 2D (axis={axis})"
         R, C = xshp
         b = self.builder_
-        ssum = b.emit(relax.op.matmul(x, relax.const(np.ones((C, 1), dt))))   # [R,1]
+        ssum = b.emit(relax.op.sum(x, axis=[len(xshp) - 1], keepdims=True))   # [R,1]
         return b.emit(relax.op.multiply(ssum, relax.const(np.full((R, 1), 1.0 / C, dt))))
 
     # softmax over last dim of [R,C] (no max-subtraction): exp / rowsum-broadcast
+    # rowsum via relax.sum, broadcast via relax.broadcast_to (both dedicated ops,
+    # not matmul).
     def _softmax(self, x, attrs, sinfo):
         shp, dt = self._shp(sinfo)
         assert len(shp) == 2 and int(attrs.axis) in (-1, 1), f"softmax axis {attrs.axis}"
         R, C = shp
         b = self.builder_
         e = b.emit(relax.op.exp(x))                                          # [R,C]
-        ssum = b.emit(relax.op.matmul(e, relax.const(np.ones((C, 1), dt))))  # [R,1]
-        denom = b.emit(relax.op.matmul(ssum, relax.const(np.ones((1, C), dt))))  # [R,C]
+        ssum = b.emit(relax.op.sum(e, axis=[1], keepdims=True))              # [R,1]
+        denom = b.emit(relax.op.broadcast_to(ssum, relax.ShapeExpr([R, C])))  # [R,C]
         return b.emit(relax.op.divide(e, denom))
 
 

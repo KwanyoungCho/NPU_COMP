@@ -14,14 +14,23 @@ _OPN = {0x80: "ADDR", 0x82: "VLEN", 0x88: "TILE", 0x90: "LOAD", 0x98: "SAVE",
 
 
 def analyze(asm, mp=None):
-    """asm: Asm (or .words list). mp: optional MemPlan for footprint. -> dict."""
+    """asm: Asm (or .words list). mp: optional MemPlan for footprint. -> dict.
+
+    by_role: per-word command count grouped by the role tag set during emission
+    (gather/mmul/accum/scatter/reduce/broadcast/transpose/elementwise/...). Only
+    populated when the Asm carried tags (asm.tags); else everything is 'untagged'.
+    """
     words = asm.words if hasattr(asm, "words") else list(asm)
+    tags = getattr(asm, "tags", None)
     by_op = Counter()
+    by_role = Counter()
     matmul_tiles = 0       # real matrix multiplies (op 0x42, vector mode)
     copy_rows = 0          # identity copies (a+0) = gather/scatter/fill rows
     accum_adds = 0         # vector add with two operands = accumulation
-    for w in words:
+    for i, w in enumerate(words):
         op = w & 0xFF
+        if tags is not None:
+            by_role[tags[i] if tags[i] is not None else "untagged"] += 1
         if w == 0:
             by_op["NOP"] += 1; continue
         by_op[_OPN.get(op, hex(op))] += 1
@@ -37,6 +46,7 @@ def analyze(asm, mp=None):
     return {
         "total": len(words),
         "by_op": dict(by_op),
+        "by_role": dict(by_role),
         "matmul_tiles": matmul_tiles,
         "copy_ops": copy_rows,             # gather/scatter/fill identity-copies
         "accum_adds": accum_adds,

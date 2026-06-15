@@ -3,10 +3,12 @@ NPU-supported primitives (matmul + elementwise + sqrt/exp), per report.md §5.
 
 These are *builders* (emit decomposed ops into a relax.BlockBuilder), reusable
 when constructing the model graph. The key tricks:
-  - reduce-sum over last dim  ->  matmul with a ones[K,1] vector
-  - broadcast / outer product ->  matmul with a ones row/col
+  - reduce-sum over last dim  ->  relax.sum (dedicated reduce op)
+  - broadcast                 ->  relax.broadcast_to (dedicated op)
   - 1/x                       ->  divide(ones, x)
-No 64x64 tiling here (B0 logical). softmax max-subtraction is intentionally omitted.
+reduce/broadcast are NOT matmul nodes (codegen lowers them on the matrix engine),
+so relax.matmul stays exclusively true GEMM -> the TIR-only backend.
+softmax max-subtraction is intentionally omitted.
 """
 import numpy as np
 from tvm import relax
@@ -18,13 +20,16 @@ def _c(arr):
 
 
 def reduce_sum_lastdim(bb, x, rows, k):
-    """x[rows,k] -> [rows,1], sum over last dim, via matmul with ones[k,1]."""
-    return bb.emit(relax.op.matmul(x, _c(np.ones((k, 1)))))
+    """x[rows,k] -> [rows,1], sum over last dim. Dedicated reduce op (relax.sum),
+    NOT a matmul: codegen lowers it on the matrix engine (ones-matmul under the
+    hood) so matmul-the-op stays TIR-only."""
+    return bb.emit(relax.op.sum(x, axis=[-1], keepdims=True))
 
 
 def broadcast_col(bb, x, rows, n):
-    """x[rows,1] -> [rows,n] by outer product with ones[1,n]."""
-    return bb.emit(relax.op.matmul(x, _c(np.ones((1, n)))))
+    """x[rows,1] -> [rows,n] (replicate each row's scalar). Dedicated broadcast
+    op (relax.broadcast_to), not an outer-product matmul."""
+    return bb.emit(relax.op.broadcast_to(x, relax.ShapeExpr([rows, n])))
 
 
 def rms_norm(bb, x, w, seq, d, eps=0.0):
@@ -43,7 +48,7 @@ def rms_norm(bb, x, w, seq, d, eps=0.0):
     inv = bb.emit(relax.op.divide(_c(np.ones((seq, 1))), rms))  # 1/rms  [seq,1]
     scale = broadcast_col(bb, inv, seq, d)                      # [seq,d]
     xn = bb.emit(relax.op.multiply(x, scale))                  # x/rms
-    wb = bb.emit(relax.op.matmul(_c(np.ones((seq, 1))), w))     # broadcast w[1,d] -> [seq,d]
+    wb = bb.emit(relax.op.broadcast_to(w, relax.ShapeExpr([seq, d])))  # w[1,d] -> [seq,d]
     return bb.emit(relax.op.multiply(xn, wb))                  # * weight
 
 
@@ -97,10 +102,10 @@ def rope(bb, q, cos_c, sin_c, rot_c):
 def softmax_lastdim(bb, s, rows, cols):
     """softmax over last dim of s[rows,cols]. NO max-subtraction (ISA has no
     reduce-max) -> safe only when scores are small (report.md §6.1).
-    exp -> rowsum(ones-matmul) -> broadcast -> divide."""
+    exp -> rowsum(relax.sum) -> broadcast(relax.broadcast_to) -> divide."""
     e = bb.emit(relax.op.exp(s))                                # [rows,cols]
-    rowsum = bb.emit(relax.op.matmul(e, _c(np.ones((cols, 1)))))  # [rows,1]
-    denom = bb.emit(relax.op.matmul(rowsum, _c(np.ones((1, cols)))))  # [rows,cols]
+    rowsum = bb.emit(relax.op.sum(e, axis=[-1], keepdims=True))  # [rows,1]
+    denom = bb.emit(relax.op.broadcast_to(rowsum, relax.ShapeExpr([rows, cols])))  # [rows,cols]
     return bb.emit(relax.op.divide(e, denom))
 
 

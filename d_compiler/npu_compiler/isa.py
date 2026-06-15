@@ -106,9 +106,24 @@ class Asm:
 
     def __init__(self):
         self.words = []
+        self.tags = []                 # per-word role label (None unless tagged)
+        self._role = None              # current role (set via role() context manager)
+
+    def role(self, name):
+        """Context manager: label every word emitted in the block with `name`,
+        for per-role command-overhead analysis (cost.analyze by_role). Nestable;
+        restores the previous role on exit. No effect on emitted bytes."""
+        asm = self
+        class _Role:
+            def __enter__(s):
+                s.prev = asm._role; asm._role = name
+            def __exit__(s, *exc):
+                asm._role = s.prev
+        return _Role()
 
     def _emit(self, w):
         self.words.append(w & MASK32)
+        self.tags.append(self._role)
         return self
 
     # control

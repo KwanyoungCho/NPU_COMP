@@ -7,6 +7,14 @@ to NPU instructions, using G-buffer offsets from memplan. No TIR lowering and no
 
 Unsupported model ops (softmax/rms_norm/silu/...) are expected to already be
 decomposed into these NPU-supported ops by Relax-level legalize passes (later).
+
+Op handling:
+  - relax.matmul       -> TIR+tensorize backend (true GEMM, 64-multiple dims).
+                          The direct tiling here is an oracle/test + non-64 fallback.
+  - relax.sum          -> emit_row_sum   (row reduction, matrix-engine ones-matmul)
+  - relax.broadcast_to -> emit_broadcast (outer-product ones-matmul)
+  - elementwise / permute_dims / strided_slice / concat -> emitted directly here.
+Reductions/broadcasts are dedicated ops (not matmul) so matmul-the-op is TIR-only.
 """
 from tvm import relax
 from . import isa
@@ -33,14 +41,26 @@ def compile_func(func, mp, tile=None, mm_backend="direct"):
     a = Asm()
     off = mp.offset
 
+    def copy2d(dst_off, dst_stride, src_off, src_stride, rows, cols):
+        """Copy a [rows,cols] block; one side may be strided. Per-row copy
+        (a+0). Used for gather (strided src->contiguous) and scatter (reverse)."""
+        for r in range(rows):
+            a.vlen(cols)
+            a.addr(SRC1, src_off + r * src_stride); a.load(0, 0)
+            a.v_add(mode=IMM, imm=0)
+            a.addr(DST, dst_off + r * dst_stride); a.save(0)
+
     def emit_matmul(dst, x, w):
         M, K = mp.shape[x]
         K2, N = mp.shape[w]
         if K != K2:
             raise CodegenError(f"matmul K mismatch {K} vs {K2}")
-        # hybrid router: only 64-multiple matmuls (big projections) go to the TIR
-        # path; reduce/broadcast matmuls (dims of 1, from legalize) stay direct.
-        if mm_backend == "tir" and M % 64 == 0 and K % 64 == 0 and N % 64 == 0:
+        # matmul-the-op is TIR-only: reductions/broadcasts are dedicated
+        # relax.sum / relax.broadcast_to (see emit_row_sum/emit_broadcast), and the
+        # TIR path now pads non-64-multiple dims itself (emit_matmul_into), so EVERY
+        # relax.matmul routes to TIR. The direct tiling below is retained only as a
+        # byte-exact oracle for the direct/tir-comparison tests (backend="direct").
+        if mm_backend == "tir":
             from . import tir_backend
             tir_backend.emit_matmul_into(a, mp, off[dst], off[x], off[w], M, K, N)
             return
@@ -62,15 +82,6 @@ def compile_func(func, mp, tile=None, mm_backend="direct"):
         sB = mp.scratch_alloc(T * T)      # gathered B tile  [kt, nt]
         sP = mp.scratch_alloc(T * T)      # partial product  [mt, nt]
         sC = mp.scratch_alloc(T * T)      # output-tile accumulator [mt, nt]
-
-        def copy2d(dst_off, dst_stride, src_off, src_stride, rows, cols):
-            """Copy a [rows,cols] block; one side may be strided. Per-row copy
-            (a+0). Used for gather (strided src->contiguous) and scatter (reverse)."""
-            for r in range(rows):
-                a.vlen(cols)
-                a.addr(SRC1, src_off + r * src_stride); a.load(0, 0)
-                a.v_add(mode=IMM, imm=0)
-                a.addr(DST, dst_off + r * dst_stride); a.save(0)
 
         for mi in range(0, M, T):                         # output row tiles
             mt = min(T, M - mi)
@@ -106,6 +117,79 @@ def compile_func(func, mp, tile=None, mm_backend="direct"):
                 # scatter only when the output tile is NOT contiguous (nt<N)
                 if nt != N:
                     copy2d(ac + mi * N + nj, N, sC, nt, mt, nt)
+
+    def emit_row_sum(dst, src):
+        """Row reduction src[R,C] -> dst[R,1] (sum over last dim). The NPU has no
+        reduce instruction, so the *efficient* lowering on this matrix engine is
+        a ones-matmul: dst = src @ ones[C,1] (degenerate N=1, hardware-legal,
+        no 64x padding -> same m_mul count as a true GEMM's K reduction).
+        This keeps `relax.sum` out of the matmul-the-op path (which is TIR-only)."""
+        R, C = mp.shape[src]
+        assert mp.shape[dst][-1] == 1, f"emit_row_sum expects [R,1] dst, got {mp.shape[dst]}"
+        T = tile or 64
+        ssrc, sd = off[src], off[dst]
+        ones = mp.scratch_alloc(T)          # ones[kt,1] column, filled once
+        sA = mp.scratch_alloc(T * T)        # gathered A tile
+        sP = mp.scratch_alloc(T)            # partial column [mt,1]
+        a.vlen(T); a.addr(SRC1, ssrc); a.load(0, 0)          # load T valid elems -> pin1
+        a.v_move(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)   # ones = 1.0
+        for mi in range(0, R, T):
+            mt = min(T, R - mi)
+            cdst = sd + mi                                    # dst[R,1]: row mi at +mi
+            for ti, kk in enumerate(range(0, C, T)):
+                kt = min(T, C - kk)
+                if kt == C:
+                    a_src = ssrc + mi * C
+                else:
+                    copy2d(sA, kt, ssrc + mi * C + kk, C, mt, kt); a_src = sA
+                a.tile(0, mt, kt); a.tile(1, kt, 1)          # A[mt,kt] @ ones[kt,1]
+                a.addr(SRC1, a_src); a.load(1, 0)
+                a.addr(SRC2, ones); a.load(1, 1)
+                a.m_mul(mode=VECTOR)                          # -> [mt,1]
+                if ti == 0:
+                    a.addr(DST, cdst); a.save(1)
+                else:
+                    a.addr(DST, sP); a.save(1)               # partial -> sP (FP16 round)
+                    a.vlen(mt)
+                    a.addr(SRC1, cdst); a.load(0, 0)
+                    a.addr(SRC2, sP); a.load(0, 1); a.v_add(mode=VECTOR)
+                    a.addr(DST, cdst); a.save(0)
+
+    def emit_broadcast(dst, src):
+        """Broadcast src -> dst[R,C], either [R,1]->[R,C] (col) or [1,C]->[R,C]
+        (row). No broadcast instruction either, so lower via ones-matmul (outer
+        product), degenerate K=1: col = src[R,1] @ ones[1,C]; row = ones[R,1] @ src[1,C].
+        Keeps `relax.broadcast_to` out of the matmul-the-op (TIR) path."""
+        Rd, Cd = mp.shape[dst]
+        sshape = list(mp.shape[src]) + [1, 1]
+        sr, sc = sshape[0], sshape[1]
+        T = tile or 64
+        ssrc, sd = off[src], off[dst]
+        col_bcast = (sc == 1 and sr == Rd)                   # [R,1] -> [R,C]
+        row_bcast = (sr == 1 and sc == Cd)                   # [1,C] -> [R,C]
+        if not (col_bcast or row_bcast):
+            raise CodegenError(f"broadcast {sshape[:2]} -> {[Rd,Cd]} unsupported")
+        ones = mp.scratch_alloc(T)
+        sP = mp.scratch_alloc(T * T)
+        a.vlen(T); a.addr(SRC1, ssrc); a.load(0, 0)
+        a.v_move(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)   # ones = 1.0
+        for mi in range(0, Rd, T):
+            mt = min(T, Rd - mi)
+            for nj in range(0, Cd, T):
+                nt = min(T, Cd - nj)
+                a.tile(0, mt, 1); a.tile(1, 1, nt)           # K=1 outer product
+                if col_bcast:
+                    a.addr(SRC1, ssrc + mi); a.load(1, 0)    # src column [mt,1]
+                    a.addr(SRC2, ones); a.load(1, 1)         # ones row  [1,nt]
+                else:
+                    a.addr(SRC1, ones); a.load(1, 0)         # ones col  [mt,1]
+                    a.addr(SRC2, ssrc + nj); a.load(1, 1)    # src row   [1,nt]
+                a.m_mul(mode=VECTOR)                          # -> [mt,nt] (= broadcast)
+                if nt == Cd:
+                    a.addr(DST, sd + mi * Cd); a.save(1)
+                else:
+                    a.addr(DST, sP); a.save(1)
+                    copy2d(sd + mi * Cd + nj, Cd, sP, nt, mt, nt)
 
     def emit_transpose(dst, src):
         """2D transpose [R,C]->[C,R] via per-element copy (no transpose/strided ISA).
@@ -191,23 +275,37 @@ def compile_func(func, mp, tile=None, mm_backend="direct"):
                 raise CodegenError(f"unsupported binding value {type(call)}")
             name = _opname(call)
             if name == "relax.matmul":
-                emit_matmul(dst, call.args[0], call.args[1])
+                emit_matmul(dst, call.args[0], call.args[1])   # roles tagged inside (walker)
+            elif name == "relax.sum":
+                axis = [int(x) % len(mp.shape[call.args[0]]) for x in call.attrs.axis]
+                if axis != [len(mp.shape[call.args[0]]) - 1]:
+                    raise CodegenError(f"sum: only last-axis keepdims supported (axis={axis})")
+                with a.role("reduce"):
+                    emit_row_sum(dst, call.args[0])
+            elif name == "relax.broadcast_to":
+                with a.role("broadcast"):
+                    emit_broadcast(dst, call.args[0])
             elif name == "relax.permute_dims":
-                emit_transpose(dst, call.args[0])
+                with a.role("transpose"):
+                    emit_transpose(dst, call.args[0])
             elif name == "relax.strided_slice":
-                emit_strided_slice(dst, call)
+                with a.role("layout"):
+                    emit_strided_slice(dst, call)
             elif name == "relax.concat":
-                emit_concat(dst, call)
+                with a.role("layout"):
+                    emit_concat(dst, call)
             elif name in EW2:
                 n = 1
                 for d in mp.shape[dst]:
                     n *= d
-                emit_ew(dst, EW2[name], [call.args[0], call.args[1]], n)
+                with a.role("elementwise"):
+                    emit_ew(dst, EW2[name], [call.args[0], call.args[1]], n)
             elif name in EW1:
                 n = 1
                 for d in mp.shape[dst]:
                     n *= d
-                emit_ew(dst, EW1[name], [call.args[0]], n)
+                with a.role("elementwise"):
+                    emit_ew(dst, EW1[name], [call.args[0]], n)
             else:
                 raise CodegenError(f"unsupported op for B0 codegen: {name}")
     a.halt()

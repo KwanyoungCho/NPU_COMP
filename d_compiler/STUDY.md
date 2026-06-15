@@ -337,17 +337,18 @@ for r in range(R):
 
 NPU ISA엔 없지만 신경망에 필요한 연산들을, **있는 연산 조합으로** 만드는 곳입니다. 이게 컴파일러의 진짜 알맹이입니다.
 
-### 합(reduce-sum) = ones와의 행렬곱
-"행마다 다 더하기"를 어떻게? `x[rows,k]`에 `ones[k,1]`을 곱하면:
-`(x @ ones)[i,0] = Σ_k x[i,k]·1 = x의 i행 합`. 행렬곱이 곧 합이 됩니다.
+### 합(reduce-sum) = ones와의 행렬곱 (단, 전용 op로 분리)
+"행마다 다 더하기"를 어떻게? 이 NPU엔 reduce 명령이 없어서, `x[rows,k]`에 `ones[k,1]`을 곱하면:
+`(x @ ones)[i,0] = Σ_k x[i,k]·1 = x의 i행 합`. **행렬곱이 곧 합**이 됩니다. 이게 이 행렬 엔진에서 reduction의 *효율적* lowering입니다(전치+벡터합은 O(R·C) 복사라 훨씬 비쌈).
+
+다만 이걸 **그래프에 `relax.matmul`로 두지 않습니다.** reduction은 전용 op `relax.sum`으로 표현하고, codegen의 `emit_row_sum`이 *내부적으로* ones-matmul(degenerate N=1, 64패딩 없음)로 lowering합니다. 이렇게 분리한 이유: **`relax.matmul`은 전부 진짜 GEMM(64배수)만 남아 TIR 백엔드 단독 경로**가 되기 때문(direct의 일반 타일링은 oracle/테스트로 격하).
 ```python
 def reduce_sum_lastdim(bb, x, rows, k):
-    return bb.emit(relax.op.matmul(x, _c(np.ones((k, 1)))))   # [rows,1]
+    return bb.emit(relax.op.sum(x, axis=[-1], keepdims=True))   # [rows,1], matmul 아님
 ```
-`_c(...)`는 numpy 배열을 FP16 relax 상수로 만드는 헬퍼.
 
-### 브로드캐스트 = ones와의 외적
-스칼라 하나를 벡터로 복제: `x[rows,1] @ ones[1,n]` → `[rows,n]` (각 행의 값이 n번 복제). 역시 행렬곱.
+### 브로드캐스트 = ones와의 외적 (역시 전용 op `relax.broadcast_to`)
+스칼라를 벡터로 복제: `[rows,1]→[rows,n]`(열복제)은 `x @ ones[1,n]`, `[1,d]→[rows,d]`(행복제)는 `ones[rows,1] @ x`. K=1 외적 행렬곱이 효율적 lowering이고, 그래프엔 `relax.broadcast_to`로 두어 `emit_broadcast`가 처리합니다. (matmul-the-op은 TIR 전용 유지.)
 
 ### RMSNorm
 수식: `y = x / sqrt(mean(x²)) · w`. 이걸 위 도구들로 조립(`rms_norm`):
@@ -485,12 +486,14 @@ $P d_compiler/walkthrough_matmul.py    # 기본 흐름: Relax→memplan→codege
 $P d_compiler/walkthrough_rmsnorm.py   # legalize: 1개 연산 → 여러 primitive, reduce/broadcast=ones곱
 $P d_compiler/walkthrough_tiling.py    # 타일링: K쪼개기+FP16누산, one-shot과 왜 다른지
 $P d_compiler/walkthrough_tir.py       # TIR+tensorize 백엔드: Relax→TIR→스케줄→walker, reuse 효과 (§13~14)
+$P d_compiler/walkthrough_mnk.py       # M·N·K 3축 타일링 확인: 수학+TIR루프+명령어증거+여러차원 (§10,§13)
 $P d_compiler/walkthrough_import.py    # PyTorch import: torch.export→Relax→legalize→NPU (§15)
 ```
 - `walkthrough_matmul.py` → 본 문서 §6,§7,§9 (memplan/codegen/driver)와 대조.
 - `walkthrough_rmsnorm.py` → §8 (legalize). 한 줄 `rms_norm()`이 10개 연산으로 펼쳐지는 걸 봄.
 - `walkthrough_tiling.py` → §10 (direct 타일링). hardware-legal 64×64 조각 + 누적 + FP16 반올림.
 - `walkthrough_tir.py` → §13~14 (TIR 백엔드). Relax→TIR→스케줄된TIR→walker, direct vs reuse 명령 수.
+- `walkthrough_mnk.py` → §10,§13 (타일링). M·N·K 3축이 어떻게 쪼개지는지 수학+TIR루프+명령어수로 확인.
 - `walkthrough_import.py` → §15 (PyTorch import). 단계마다 op이 어떻게 우리 primitive로 바뀌나.
 - 공용 명령어 해석기는 `study_util.py`의 `disasm()`.
 
@@ -570,7 +573,14 @@ print("주소표:", {k.name_hint: v for k, v in mp.offset.items() if hasattr(k, 
 - + fill 융합(0초기화 생략), 연속 C 누적버퍼.
 - 효과: 명령 수 차원이 클수록 크게 감소(실제 3B matmul −72%). walkthrough_tir §5에서 direct vs reuse 숫자 확인.
 
-**하이브리드** (`driver backend="hybrid"`): 한 그래프에서 **matmul만 TIR(reuse) 경로**, elementwise/transpose는 **direct** 그대로. matmul→PE intrinsic은 TIR이 깔끔하고, 나머지는 이미 검증된 direct가 처리. (라우터: 64배수 matmul만 TIR, reduce/broadcast(차원1)는 direct.)
+> **왜 reuse가 schedule(cache_read)이 아니라 walker에 있나?** (설계 근거)
+> 표준 TVM에선 reuse를 `cache_read`+`compute_at`으로 schedule에 표현하는 게 정석입니다. 하지만 이 NPU의 `m_mul`은 **연속(contiguous) 64×64 타일**을 load해야 하는데, A의 K조각은 strided(§의 gather 이유)라서 **연속화(gather)와 reuse(memoize)를 *동시에*** 해야 합니다. `cache_read`는 둘 중 하나만 됩니다:
+> - `compute_at(ko)` (타일 단위): 타일은 연속이지만 캐시 복사가 `for io,jo,ko` 안에 들어가 **jo마다 중복 복사**(reuse 손실).
+> - `compute_at(io)` (스트립 단위): 한 번만 복사(reuse)되지만 64×64 부분타일이 **strided** → walker가 다시 gather(무의미).
+>
+> 둘 다 만족하려면 **tile-blocked layout transform**(`transform_layout`으로 캐시를 [k,64,64]로 재배치)이 필요한데, 크고 깨지기 쉬우며 **emit되는 명령은 walker 방식과 동일**합니다. 그래서 walker의 "gather+memoize"가 이 아키텍처에선 정답이고, 각 입력 타일을 **정확히 한 번** gather합니다(최적). cache_read 이전은 미래의 선택지로 남겨둡니다.
+
+**하이브리드** (`driver backend="hybrid"`): 한 그래프에서 **matmul은 전부 TIR(reuse) 경로**, elementwise/transpose는 **direct** 그대로. matmul→PE intrinsic은 TIR이 깔끔하고, 나머지는 이미 검증된 direct가 처리. (라우터: 모든 `relax.matmul`→TIR. 비-64배수는 `emit_matmul_into`가 패딩해 처리하므로 direct fallback 없음. reduce/broadcast는 애초에 matmul이 아님 → §8.)
 
 ## 15. PyTorch import (`frontend.py` + `import_legalize.py`)
 
@@ -583,7 +593,7 @@ torch.export(고정shape→static) → from_exported_program(Relax) → FoldCons
 - **from_exported_program**(TVM 제공): PyTorch → Relax. 단 고수준 op(`nn.silu`, `softmax`, `mean`...) + 가중치 전치(permute_dims 상수) + tuple 출력 + fp32로 나옴.
 - **FoldConstant**: Linear의 W^T(상수 전치)를 미리 계산해 상수로(런타임 전치 제거).
 - **import_legalize** (우리 패스, mutator): 고수준 op → 우리 primitive로 분해:
-  - silu→z/(1+exp(−z)), negative→0−x, power(x,2)→x·x, rsqrt→1/√, **mean→ones-matmul·(1/D)**, **softmax→exp/ones-matmul rowsum/broadcast/div**(max 생략).
+  - silu→z/(1+exp(−z)), negative→0−x, power(x,2)→x·x, rsqrt→1/√, **mean→relax.sum·(1/D)**, **softmax→exp/relax.sum rowsum/relax.broadcast_to/div**(max 생략). reduce/broadcast는 전용 op(§8)라 `relax.matmul`은 진짜 GEMM만 → TIR 단독.
   - layout(`strided_slice`,`concat`)은 codegen이 복사로 처리 → RoPE rotate_half(slice+neg+concat) 가능.
 - 나머지 갭은 memplan/driver: **tuple 언래핑**, **bias broadcast**(상수 호스트 확장), **fp32→fp16**(G-buffer가 fp16), **위치(list) 입력**.
 

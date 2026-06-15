@@ -117,12 +117,13 @@ class _Walker:
     """Interpret scheduled TIR: unroll For loops, bind block/match-buffer vars,
     evaluate index expressions to constants, emit ISA for intrinsic calls."""
 
-    def __init__(self, asm, mp, data_base):
+    def __init__(self, asm, mp, data_base, verbose=False):
         self.a = asm
         self.mp = mp
         self.base = dict(data_base)        # buffer-data Var -> G-buffer base offset
         self.env = {}                      # tir Var -> IntImm (current binding)
         self.ana = arith.Analyzer()
+        self.verbose = verbose             # learning hook: trace each intrinsic/gather
         self.sP = mp.scratch_alloc(TILE * TILE)   # matmul partial
         # T1 input-reuse state:
         self.gather_cache = {}             # (src_off, stride) -> scratch offset (gather once)
@@ -197,11 +198,17 @@ class _Walker:
             raise TirBackendError(f"walker: unhandled call {call}")
         name = call.args[0].value
         if name == "npu_fill_zero":
-            self.emit_fill(self.ptr(call.args[1]), self.ev(call.args[2]))
+            c, sc = self.ptr(call.args[1]), self.ev(call.args[2])
+            if self.verbose:
+                print(f"    [walker] fill_zero  C@{c}(stride {sc}) -> mark tile as zero")
+            self.emit_fill(c, sc)
         elif name == "npu_gemm_acc":
-            self.emit_acc(self.ptr(call.args[1]), self.ev(call.args[2]),
-                          self.ptr(call.args[3]), self.ev(call.args[4]),
-                          self.ptr(call.args[5]), self.ev(call.args[6]))
+            c, sc = self.ptr(call.args[1]), self.ev(call.args[2])
+            a, sa = self.ptr(call.args[3]), self.ev(call.args[4])
+            b, sb = self.ptr(call.args[5]), self.ev(call.args[6])
+            if self.verbose:
+                print(f"    [walker] gemm_acc   C@{c}(s{sc}) += A@{a}(s{sa}) · B@{b}(s{sb})")
+            self.emit_acc(c, sc, a, sa, b, sb)
         else:
             raise TirBackendError(f"unknown extern {name}")
 
@@ -215,19 +222,26 @@ class _Walker:
         (src, stride) tile at most ONCE and reuse the contiguous copy.
         Already-contiguous tiles (stride==64) need no gather at all."""
         if stride == TILE:
+            if self.verbose:
+                print(f"      gather  SKIP  @{off} already contiguous (stride==64)")
             return off
         key = (off, stride)
         hit = self.gather_cache.get(key)
         if hit is not None:
+            if self.verbose:
+                print(f"      gather  REUSE @{off}(s{stride}) -> scratch@{hit} (memoized)")
             return hit
         dst = self.mp.scratch_alloc(TILE * TILE)
         a = self.a
-        for r in range(TILE):
-            a.vlen(TILE)
-            a.addr(SRC1, off + r * stride); a.load(0, 0)
-            a.v_add(mode=IMM, imm=0)
-            a.addr(DST, dst + r * TILE); a.save(0)
+        with a.role("gather"):
+            for r in range(TILE):
+                a.vlen(TILE)
+                a.addr(SRC1, off + r * stride); a.load(0, 0)
+                a.v_add(mode=IMM, imm=0)
+                a.addr(DST, dst + r * TILE); a.save(0)
         self.gather_cache[key] = dst
+        if self.verbose:
+            print(f"      gather  NEW   @{off}(s{stride}) -> scratch@{dst} (copy {TILE} rows)")
         return dst
 
     def emit_acc(self, c, sc, aoff, sa, boff, sb):
@@ -237,53 +251,110 @@ class _Walker:
         bsrc = self._gather_cached(boff, sb)
         first = c in self.zeroed
         self.zeroed.discard(c)
-        a.tile(0, TILE, TILE); a.tile(1, TILE, TILE)
-        a.addr(SRC1, asrc); a.load(1, 0)
-        a.addr(SRC2, bsrc); a.load(1, 1)
-        a.m_mul(mode=VECTOR)
+        with a.role("mmul"):                          # the real 64x64 matrix multiply
+            a.tile(0, TILE, TILE); a.tile(1, TILE, TILE)
+            a.addr(SRC1, asrc); a.load(1, 0)
+            a.addr(SRC2, bsrc); a.load(1, 1)
+            a.m_mul(mode=VECTOR)
         if sc == TILE:                               # C contiguous
             if first:
-                a.addr(DST, c); a.save(1)            # store partial directly (no add)
+                with a.role("mmul"):
+                    a.addr(DST, c); a.save(1)        # store partial directly (no add)
             else:
-                a.addr(DST, self.sP); a.save(1)
-                a.vlen(TILE * TILE)
-                a.addr(SRC1, c); a.load(0, 0)
-                a.addr(SRC2, self.sP); a.load(0, 1); a.v_add(mode=VECTOR)
-                a.addr(DST, c); a.save(0)
+                with a.role("accum"):                # K-accumulation add
+                    a.addr(DST, self.sP); a.save(1)
+                    a.vlen(TILE * TILE)
+                    a.addr(SRC1, c); a.load(0, 0)
+                    a.addr(SRC2, self.sP); a.load(0, 1); a.v_add(mode=VECTOR)
+                    a.addr(DST, c); a.save(0)
         else:                                        # strided C: accumulate in a
             if first:                                # contiguous tile buffer, scatter at flush
                 ctile = self.mp.scratch_alloc(TILE * TILE)
                 self.cbuf[c] = (ctile, sc)
-                a.addr(DST, ctile); a.save(1)        # partial -> contiguous accumulator
+                with a.role("mmul"):
+                    a.addr(DST, ctile); a.save(1)    # partial -> contiguous accumulator
             else:
                 ctile = self.cbuf[c][0]
-                a.addr(DST, self.sP); a.save(1)
-                a.vlen(TILE * TILE)                  # accumulator += partial (one shot)
-                a.addr(SRC1, ctile); a.load(0, 0)
-                a.addr(SRC2, self.sP); a.load(0, 1); a.v_add(mode=VECTOR)
-                a.addr(DST, ctile); a.save(0)
+                with a.role("accum"):
+                    a.addr(DST, self.sP); a.save(1)
+                    a.vlen(TILE * TILE)              # accumulator += partial (one shot)
+                    a.addr(SRC1, ctile); a.load(0, 0)
+                    a.addr(SRC2, self.sP); a.load(0, 1); a.v_add(mode=VECTOR)
+                    a.addr(DST, ctile); a.save(0)
 
     def flush(self):
         """Scatter finished contiguous C-accumulators to their strided locations."""
         a = self.a
-        for c, (ctile, sc) in self.cbuf.items():
-            for r in range(TILE):
-                a.vlen(TILE)
-                a.addr(SRC1, ctile + r * TILE); a.load(0, 0)
-                a.v_add(mode=IMM, imm=0)
-                a.addr(DST, c + r * sc); a.save(0)
+        with a.role("scatter"):
+            for c, (ctile, sc) in self.cbuf.items():
+                for r in range(TILE):
+                    a.vlen(TILE)
+                    a.addr(SRC1, ctile + r * TILE); a.load(0, 0)
+                    a.v_add(mode=IMM, imm=0)
+                    a.addr(DST, c + r * sc); a.save(0)
         self.cbuf.clear()
+
+
+# ============================ padding helpers ============================
+def _ceil64(x):
+    return (x + TILE - 1) // TILE * TILE
+
+
+def _copy2d(asm, dst_off, dst_stride, src_off, src_stride, rows, cols):
+    """Per-row copy of a [rows,cols] block (a+0); either side may be strided."""
+    with asm.role("pad"):
+        for r in range(rows):
+            asm.vlen(cols)
+            asm.addr(SRC1, src_off + r * src_stride); asm.load(0, 0)
+            asm.v_add(mode=IMM, imm=0)
+            asm.addr(DST, dst_off + r * dst_stride); asm.save(0)
+
+
+def _copy_block(asm, dst_off, src_off, n, CH=8192):
+    """Contiguous copy of n elements (chunked to the PE buffer size)."""
+    with asm.role("pad"):
+        for base in range(0, n, CH):
+            m = min(CH, n - base)
+            asm.vlen(m)
+            asm.addr(SRC1, src_off + base); asm.load(0, 0)
+            asm.v_add(mode=IMM, imm=0)
+            asm.addr(DST, dst_off + base); asm.save(0)
 
 
 # ============================ single-matmul emit (hybrid entry) ============================
 def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N):
     """Emit one matmul C[M,N]=A[M,K]@B[K,N] into an existing asm at the given
     G-buffer offsets, via the TIR+tensorize+walker path (T1 input reuse).
-    codegen.py calls this so a whole-graph compile can route matmul here while
-    keeping elementwise/transpose on the direct path (hybrid)."""
+
+    Non-64-multiple dims (e.g. arbitrary prefill SEQ) are PADDED to 64-multiples
+    so matmul-the-op is TIR-only (no direct fallback). Padding is byte-exact vs
+    direct: padded K-terms are 0 (fresh scratch is zero-initialised by the driver),
+    and padded M/N rows/cols are sliced off. Fast path: when only M is non-64
+    (K,N already 64-multiple, the common projection case) A/B are read in place and
+    only the output is staged in scratch -> no input copy."""
+    Mp, Kp, Np = _ceil64(M), _ceil64(K), _ceil64(N)
+    if (Mp, Kp, Np) == (M, K, N):
+        _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N)
+        return
+    if Kp == K and Np == N:                       # M-only padding (cheap: no input copy)
+        cpad = mp.scratch_alloc(Mp * N)
+        _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N)   # extra A rows = garbage -> sliced
+        _copy_block(asm, c_off, cpad, M * N)                    # first M rows are contiguous
+        return
+    # general padding: stage A,B in fresh(=zero) scratch so padded K is 0, slice C out
+    apad = mp.scratch_alloc(Mp * Kp)
+    bpad = mp.scratch_alloc(Kp * Np)
+    cpad = mp.scratch_alloc(Mp * Np)
+    _copy2d(asm, apad, Kp, a_off, K, M, K)        # A[M,K] -> apad[0:M,0:K] (rest stays 0)
+    _copy2d(asm, bpad, Np, b_off, N, K, N)        # B[K,N] -> bpad[0:K,0:N]
+    _emit_tir_gemm(asm, mp, cpad, apad, bpad, Mp, Kp, Np)
+    _copy2d(asm, c_off, N, cpad, Np, M, N)        # cpad[0:M,0:N] -> C[M,N]
+
+
+def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N):
+    """Core TIR+tensorize emit for a 64-multiple matmul (no padding)."""
     for d in (M, K, N):
-        if d % TILE:
-            raise TirBackendError(f"TIR matmul needs dims % {TILE} == 0, got {M}x{K}x{N} (pad TODO)")
+        assert d % TILE == 0, f"_emit_tir_gemm needs 64-multiples, got {M}x{K}x{N}"
     bb = relax.BlockBuilder()
     x = relax.Var("x", relax.TensorStructInfo([M, K], "float16"))
     w = relax.Var("w", relax.TensorStructInfo([K, N], "float16"))
@@ -314,5 +385,7 @@ def compile_func(relax_mod, func_name="main"):
     from . import codegen, memplan
     func = relax_mod[func_name]
     mp = memplan.plan(func)
-    asm = codegen.compile_func(func, mp, mm_backend="tir")
+    # tile=64 so non-64-multiple matmuls (router fallback) use hardware-legal
+    # direct tiling, not the logical one-shot path.
+    asm = codegen.compile_func(func, mp, tile=64, mm_backend="tir")
     return asm, mp

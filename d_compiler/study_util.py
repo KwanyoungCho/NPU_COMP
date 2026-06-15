@@ -34,11 +34,13 @@ def disasm(w):
         return f"MATMUL 행렬곱 ({modes[mode]})"
     if op == 0x40:
         return f"M_ADD  행렬덧셈 ({modes[mode]})"
-    names = {0x01: "VADD ", 0x02: "VSUB ", 0x0A: "VMUL ", 0x0B: "VDIV "}
+    names = {0x01: "VADD ", 0x02: "VSUB ", 0x0A: "VMUL ", 0x0B: "VDIV ", 0x0D: "VMOVE"}
     if op in names:
         imm = (w >> 8) & 0xFFFF
         extra = f", imm={imm}" if mode != 2 else ""
         tag = "  (복사: a+0)" if (op == 0x01 and mode == 0 and imm == 0) else ""
+        if op == 0x0D and mode == 0:
+            tag = f"  (상수 {imm} 채우기)"
         return f"{names[op]} 원소별 ({modes[mode]}{extra}){tag}"
     if op == 0x0E:
         return "VSQRT  원소별 제곱근 (단항)"
