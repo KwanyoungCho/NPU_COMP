@@ -58,18 +58,126 @@
 
 ---
 
-## 3. 행렬곱의 TIR lowering (핵심, 6단계)
+## 3. 행렬곱의 TIR lowering (핵심) — 단계별 IR 예시
 
-`relax.matmul` 한 줄이 NPU 명령이 되기까지(예: `C[128,128]=A@B`, 64×64 타일 2×2×2=8개):
+`relax.matmul` 한 줄이 NPU 명령이 되기까지를 **실제 IR**과 함께 따라간다. 예시는 `C[128,128] = A[128,128] @ B[128,128]` (64×64 타일이 M·N·K 각 2개 → 2·2·2 = **8개**). 아래 IR은 가독성을 위해 `T.int64(64)`→`64`, `T.` 접두사를 생략한 것이며, `python d_compiler/walkthrough_tir.py`로 원본을 직접 볼 수 있다.
 
-1. **Relax** — `lv = R.matmul(x, w)` (무엇을).
-2. **LegalizeOps → TIR** — 스칼라 3중 루프 `for i,j,k: C[i,j]+=A[i,k]*B[k,j]`.
-3. **tir.Schedule** — `split`(64타일) → `reorder`(바깥 M,N,K / 안 64블록) → `decompose_reduction`(C=0 분리) → `tensorize`(안쪽 64³ 루프 → `call_extern("npu_gemm_acc")` 1개).
-4. **match_buffer/access_ptr** — 타일의 시작·행간격을 **심볼**로 표현.
-5. **_Walker** — 루프 펼침 + `off = 행×행폭 + 열` 로 심볼을 실주소화 + **gather**(연속화)·m_mul·누적 명령 emit. (NPU엔 루프가 없어 전부 펼침.)
-6. **NPU ISA** — 평탄한 명령 목록.
+> 큰 그림: TVM IR은 2층이다 — **Relax**(그래프, "무엇을") → **TIR**(루프, "어떻게"). 행렬곱은 Relax→TIR로 내린 뒤 **타일링(schedule)** 하고, 마지막에 **walker**가 NPU 명령으로 바꾼다.
 
-> 단계별 IR은 `python d_compiler/walkthrough_tir.py`로 직접 관찰 가능.
+### [1] Relax — "무엇을" 계산하나
+```python
+@R.function
+def main(x: R.Tensor((128,128),"float16"), w: R.Tensor((128,128),"float16")):
+    with R.dataflow():
+        lv = R.matmul(x, w)        # 아직 루프·타일 없음 — "행렬곱을 한다"는 선언
+        R.output(lv)
+    return lv
+```
+
+### [2] LegalizeOps → TIR — 숫자 단위 3중 루프
+TVM 패스가 행렬곱을 **정의 그대로의 스칼라 루프**로 내린다(`matmul`이 출력 버퍼 = C):
+```python
+@T.prim_func
+def main(x: Buffer((128,128)), w: Buffer((128,128)), matmul: Buffer((128,128))):
+    for i0, i1, k in grid(128, 128, 128):       # i0=M(행), i1=N(열), k=K(누적)
+        with block("matmul"):
+            v_i0, v_i1, v_k = axis.remap("SSR", [i0, i1, k])   # S=공간축, R=리덕션축
+            with init():
+                matmul[v_i0, v_i1] = 0.0                       # C = 0
+            matmul[v_i0, v_i1] = matmul[v_i0, v_i1] + x[v_i0, v_k] * w[v_k, v_i1]
+```
+
+### [3] tir.Schedule — 64×64 타일링 + tensorize (lowering의 심장)
+`schedule_matmul`이 변환 4개를 차례로 적용한다.
+
+**(3a) split** — 각 축 128을 `타일(2)×64블록`으로:
+```python
+for i0_0, i0_1, i1_0, i1_1, k_0, k_1 in grid(2,64, 2,64, 2,64):
+    with block("matmul"):
+        v_i0 = axis.spatial(128, i0_0*64 + i0_1)    # 진짜 행 좌표 = 타일·64 + 블록내
+        v_i1 = axis.spatial(128, i1_0*64 + i1_1)
+        v_k  = axis.reduce (128, k_0*64 + k_1)
+        ...  # 계산은 [2]와 동일, 루프만 쪼갬
+```
+
+**(3b) reorder** — 타일 인덱스(io,jo,ko)를 바깥, 64블록(ii,ji,ki)을 안으로:
+```python
+for i0_0, i1_0, k_0,  i0_1, i1_1, k_1 in grid(2,2,2,  64,64,64):
+    ...   # 바깥 3중 = 어느 타일을 계산할지(M,N,K), 안쪽 3중 = 그 64×64 타일 내부
+```
+→ 안쪽 64×64×64가 정확히 PE 하나가 하는 일이 됨. 이게 M-N-K 루프 순서를 확정.
+
+**(3c) decompose_reduction** — "C=0 초기화"를 K루프 밖의 별도 블록으로 분리:
+```python
+for i0_0, i1_0 in grid(2, 2):                        # 출력 타일 (M,N)
+    for i0_1_init, i1_1_init in grid(64, 64):        # ── 블록1: 초기화
+        with block("matmul_init"):  matmul[v_i0,v_i1] = 0.0
+    for k_0, i0_1, i1_1, k_1 in grid(2, 64, 64, 64): # ── 블록2: 누적 (k_0 = K타일)
+        with block("matmul_update"): matmul[v_i0,v_i1] += x[v_i0,v_k]*w[v_k,v_i1]
+```
+→ "출력 타일마다 한 번 0으로 + K타일마다 누적" 구조(우리 NPU 흐름: fill 1회 + gemm 여러 번).
+
+**(3d) tensorize** — 안쪽 64×64×64 루프를 **명령 1개로 치환**. 먼저 매칭할 패턴(desc):
+```python
+@T.prim_func
+def _gemm_desc(a, b, c):                              # "64×64 C += A·B" 패턴
+    A = match_buffer(a, (64,64), "float16", strides=("A_s0", 1))
+    B = match_buffer(b, (64,64), "float16", strides=("B_s0", 1))
+    C = match_buffer(c, (64,64), "float16", strides=("C_s0", 1))
+    for i, j, k in grid(64, 64, 64):
+        C[vi,vj] = C[vi,vj] + A[vi,vk]*B[vk,vj]
+```
+`tensorize`가 일치하는 안쪽 루프를 desc의 대체물(impl=`call_extern` 마커)로 바꾼 **최종 스케줄 TIR**:
+```python
+for i0_0, i1_0 in grid(2, 2):                         # 출력 타일 (M×N = 2×2)
+    with block("matmul_init_o"):
+        C = match_buffer(matmul[i0_0*64 : i0_0*64+64,  i1_0*64 : i1_0*64+64],
+                         (64,64), strides=("C_s0", 1))
+        call_extern("npu_fill_zero", C.access_ptr, C.strides[0])   # 이 타일 0초기화
+    for k_0 in range(2):                              # K 타일 (누적)
+        with block("matmul_update_o"):
+            A = match_buffer(x[i0_0*64:+64, k_0*64:+64], (64,64), strides=("A_s0",1))
+            B = match_buffer(w[k_0*64:+64, i1_0*64:+64], (64,64), strides=("B_s0",1))
+            C = match_buffer(matmul[i0_0*64:+64, i1_0*64:+64], (64,64), strides=("C_s0",1))
+            call_extern("npu_gemm_acc", C.access_ptr,C_s0, A.access_ptr,A_s0, B.access_ptr,B_s0)
+```
+→ 안쪽 64³ 루프가 사라지고 **`call_extern` 8개(=2·2·2)** 가 남았다. 이게 PE 명령이 될 자리.
+
+### [4] match_buffer / access_ptr — '심볼릭 타일 뷰'
+위 결과의 `A = match_buffer(x[i0_0*64:+64, k_0*64:+64], (64,64), strides=("A_s0",1))`는 큰 x의 **64×64 부분뷰**를 선언하되, **시작 위치(elem_offset)와 행간격(`A_s0`)을 심볼**로 둔다(아직 `i0_0,k_0`가 숫자가 아니므로). `call_extern(..., A.access_ptr, A_s0, ...)`이 그 포인터·stride를 호출에 넘긴다. **이 심볼을 실제 숫자로 푸는 게 다음 단계.**
+
+### [5] _Walker — 심볼을 실주소로 풀고 명령 emit ("TIR→ISA codegen")
+walker는 스케줄 TIR을 **컴파일 타임에 해석**하며 명령을 받아 적는다. NPU엔 루프가 없으니 **모든 `for`를 펼친다**.
+- **루프 펼침**: `for i0_0 in range(2)` → i0_0=0,1 각각 처리.
+- **주소 공식**: `off = (행 시작) × (행 폭) + (열 시작)`, 절대주소 = 버퍼 시작 + off.
+
+`x@0, w@16384, out@32768`에 배치된 경우의 **실제 walker 추적**(verbose):
+```
+[walker] gemm_acc  C@32768(s128) += A@0(s128)     · B@16384(s128)   # i0_0=0,i1_0=0,k_0=0
+   gather NEW   @0(s128)     -> scratch@53248 (copy 64 rows)        # A타일을 연속으로 모음
+   gather NEW   @16384(s128) -> scratch@57344
+[walker] gemm_acc  C@32768   += A@64(s128)         · B@24576(s128)  # k_0=1: A off=0·128+64=64
+[walker] gemm_acc  C@32832   += A@0                · B@16448        # i1_0=1: C off=+64
+   gather REUSE @0           -> scratch@53248 (memoized)            # A@0 재사용 (input reuse!)
+```
+- `A@8192`처럼 보이는 주소는 `off = i0_0·64·128 + k_0·64` (예: i0_0=1,k_0=0 → 64·128 = 8192).
+- **gather**가 필요한 이유: 행렬 폭이 128이라 64×64 타일은 메모리에서 행간격 128로 흩어져 있는데, NPU `load`는 연속만 읽으므로 연속 스크래치로 복사한다. 같은 타일은 **한 번만**(REUSE).
+
+그 첫 gather가 실제로 만든 **명령어**(한 행 복사):
+```
+0  VLEN 64                  # 64개 복사
+1  ADDR 입력1 = 0           # 원본 행 시작 (r=0)
+3  LOAD
+4  VADD a+0  (복사)
+5  ADDR 출력 = 53248        # 스크래치
+7  SAVE
+8  VLEN 64
+9  ADDR 입력1 = 128         # r=1 → 원본을 stride 128로 띄엄띄엄 읽음
+...                         # 출력은 +64씩 연속 (strided→contiguous)
+```
+
+### [6] 결과 = NPU ISA
+`relax.matmul` → (스칼라 루프) → (타일+tensorize, `call_extern` 8개) → (walker: 펼침 + `off=행·폭+열` 실주소화 + gather/m_mul/누적) → **평탄한 NPU 명령 목록**. 주소는 walker의 `_bind_match`, 재사용은 `_gather_cached`(메모이제이션)에서 나온다.
 
 ---
 
