@@ -30,13 +30,15 @@ class CodegenError(Exception):
     pass
 
 
-def compile_func(func, mp, tile=None, mm_backend="direct"):
+def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None):
     """Emit an Asm for a planned Relax function. Returns Asm (ending in halt).
 
     tile=None  -> B0 logical matmul (single m_mul, dims<=255, simulator-only).
     tile=64    -> B0.5/B1 hardware-legal direct tiling (gather/scatter, contiguous-skip).
     mm_backend="tir" -> route matmul to the TIR+tensorize path (T1 input reuse);
                   elementwise/transpose still emitted directly here (hybrid).
+    emit_log -> if a list, append (op_name, dst_shape, arg_shapes, start, end) per binding
+                for per-OP command attribution (used by the HF-graph overhead analysis).
     """
     a = Asm()
     off = mp.offset
@@ -274,6 +276,7 @@ def compile_func(func, mp, tile=None, mm_backend="direct"):
             if not isinstance(call, relax.Call):
                 raise CodegenError(f"unsupported binding value {type(call)}")
             name = _opname(call)
+            _start = len(a.words)
             if name == "relax.matmul":
                 emit_matmul(dst, call.args[0], call.args[1])   # roles tagged inside (walker)
             elif name == "relax.sum":
@@ -308,5 +311,8 @@ def compile_func(func, mp, tile=None, mm_backend="direct"):
                     emit_ew(dst, EW1[name], [call.args[0]], n)
             else:
                 raise CodegenError(f"unsupported op for B0 codegen: {name}")
+            if emit_log is not None:
+                argshapes = [mp.shape.get(ar) for ar in call.args if ar in mp.shape]
+                emit_log.append((name, mp.shape.get(dst), argshapes, _start, len(a.words)))
     a.halt()
     return a
