@@ -12,10 +12,11 @@
 > 신경망(Llama 레이어)을 **TVM Relax 그래프**로 받아 → NPU가 못 하는 연산을 가능한 연산 조합으로 바꾸고 → 행렬곱을 **64×64 타일**로 쪼개 → **NPU 명령어**로 생성 → `mysim`에서 돌려 정답과 대조하는 **컴파일러**다.
 
 핵심 결과(실제 HF Llama 3.2 3B 레이어 1개, frontend import 그래프 기준):
-- 한 레이어 명령의 **유효 행렬곱은 prefill 5.7% / decode 3.4%뿐**, 나머지는 데이터 이동·우회 오버헤드.
-- **gather(입력 타일을 연속으로 모으는 복사)가 prefill 78.2% / decode 84.1%** 로 압도적.
-- 미지원 ISA(특히 strided load/save) 추가 시 명령을 **현실적으로 prefill −92.6% / decode −96.2%** 감축 가능.
-- **decode는 토큰당 명령이 prefill의 100배** — GEMV(M=1)+가중치 재적재의 구조적 비효율.
+- **패킹 전**: 유효 행렬곱이 prefill 5.7% / decode 3.4%뿐, **gather가 78.2% / 84.1%** 로 압도(나머지는 데이터이동·우회 오버헤드).
+- **가중치 사전패킹(소프트웨어, ISA 불필요)** 으로 가중치 gather 제거 → **총 명령 prefill −65.5%(19.2M→6.6M) / decode −78.3%(15.1M→3.3M)**, 유효 비율 **5.7%→16.6% / 3.4%→15.8%** (§6.1, byte-exact).
+- 패킹 후 남은 오버헤드는 **활성화 gather + scatter + K^T transpose**. 특히 **K^T transpose가 새 주요 비용**(prefill 15.8%, decode 32.1%).
+- 추가 ISA(strided load/save, transpose unit) 시 **추가로 prefill −79.3% / decode −83.8%** 감축 가능.
+- **decode는 토큰당 명령이 prefill의 63배**(패킹 전 100배에서 개선) — GEMV(M=1)+가중치 통과의 구조적 비효율.
 
 ---
 
@@ -190,8 +191,9 @@ walker는 스케줄 TIR을 **컴파일 타임에 해석**하며 명령을 받아
 | 3 | **contiguous-skip** | 이미 연속(차원=64)이면 gather 생략 | 불필요 복사 제거 |
 | 4 | **reduce/broadcast 전용 op 분리** | mean/softmax의 reduce·broadcast를 `relax.sum`/`relax.broadcast_to`로 → 모든 `relax.matmul`은 진짜 GEMM → TIR 단독 | matmul 경로 단일화 |
 | 5 | **비-64 패딩(fallback 제거)** | 비-64배수 차원을 TIR 경로가 직접 패딩(byte-exact) | direct fallback 제거 |
+| 6 | **가중치 사전패킹(weight pre-packing)** | matmul 상수 가중치를 **tile-blocked `[Kt,Nt,64,64]`** 로 호스트에서 미리 배치(memplan) → walker가 가중치 타일을 연속으로 직접 read | **가중치 gather 제거: prefill −65.5%, decode −78.3%** (§6.1, ISA 불필요, byte-exact) |
 
-미구현(최대 잠재 절감): **가중치 사전패킹** — 가중치는 상수이므로 tile-blocked 연속 배치로 미리 깔면 §6의 gather 대부분을 ISA 없이 제거 가능.
+남은 잠재 최적화: 활성화 gather/scatter(→ strided load/save 또는 활성화 타일레이아웃), **K^T 전치**(패킹 후 최대 비용 → transpose ISA / Kᵀ-전치 캐시), input reuse를 schedule(cache_read)로 이전.
 
 ---
 
@@ -218,93 +220,98 @@ walker는 스케줄 TIR을 **컴파일 타임에 해석**하며 명령을 받아
 
 두 시나리오: **prefill**(S=128 토큰 동시), **decode**(M=1 토큰 생성, KV 캐시 길이 L=128; NPU 특성상 M=1은 64로 패딩).
 
-### 6.1 Prefill (S=128) — 구성요소별 (총 19,211,527 명령)
+> **가중치 사전패킹이 기본 적용됨**: matmul의 상수 가중치는 memplan이 **tile-blocked `[Kt,Nt,64,64]`** 로 호스트에서 미리 배치하므로(§4), walker가 가중치 타일을 **연속으로 직접 read(가중치 gather 없음)**. 아래 §6.1이 그 전/후를, §6.2~6.5는 **패킹 적용 후(현재 기본)** 수치를 보여준다.
+
+### 6.1 가중치 사전패킹 효과 (전/후) — ISA 없는 소프트웨어 최적화
+
+가중치 gather를 호스트 사전패킹으로 제거한 결과(연산·정확성 불변, byte-exact):
+
+| 지표 | prefill 전 | **prefill 후** | decode 전 | **decode 후** |
+|---|---:|---:|---:|---:|
+| 총 명령 | 19,211,527 | **6,628,615 (−65.5%)** | 15,066,897 | **3,270,417 (−78.3%)** |
+| gather | 78.2% (15.0M) | **36.8% (2.44M)** | 84.1% (12.7M) | **26.8% (0.88M)** |
+| 유효(matmul+누적) | 5.7% | **16.6%** | 3.4% | **15.8%** |
+
+![G7](figs/g7_packing_effect.png)
+*G7: 가중치 사전패킹 전/후 — (좌) 총 명령·gather 급감, (우) 유효 연산 비율 3배 상승. ISA 변경 없이 소프트웨어(memplan)만으로 달성.*
+
+→ **가중치 gather는 ISA 없이 사라졌다.** 남은 오버헤드는 **활성화 gather(A) + scatter(출력) + transpose**이며, 이들이 다음 최적화 대상이다.
+
+### 6.2 Prefill (S=128, 패킹 후) — 총 6,628,615 명령
 
 | OP | 레이어 합 | % | 비고 |
 |---|---:|---:|---|
-| gate/up proj | 7,211,520 | 37.5% | 거의 gather |
-| Q/K/V proj | 4,188,960 | 21.8% | 거의 gather |
-| down proj | 3,607,520 | 18.8% | 거의 gather |
-| O proj | 2,489,088 | 13.0% | gather+scatter |
-| K^T transpose | 1,048,576 | 5.5% | 전치 |
-| attn matmul (scores+ctx) | 301,632 | 1.6% | gather+scatter |
-| reduce (norm/softmax) | 153,716 | 0.8% | ones-mm |
-| RoPE (slice/concat) | 131,072 | 0.7% | layout(HF식) |
-| broadcast (norm/softmax) | 50,496 | 0.3% | ones-mm |
-| elementwise (norm/resid/SiLU/softmax) | ~28,946 | 0.2% | |
+| Q/K/V proj | 2,222,880 | 33.5% | A-gather+scatter+accum (B-gather 제거됨) |
+| O proj | 1,309,440 | 19.8% | gather+scatter |
+| **K^T transpose** | 1,048,576 | **15.8%** | 전치(패킹 무관) → 새 주요 비용 |
+| gate/up proj | 920,064 | 13.9% | |
+| down proj | 461,792 | 7.0% | |
+| attn matmul (scores+ctx) | 301,632 | 4.6% | 활성화@활성화(미패킹) |
+| reduce (norm/softmax) | 153,716 | 2.3% | |
+| RoPE (slice/concat) | 131,072 | 2.0% | layout(HF식) |
+| broadcast / elementwise | ~80,000 | 1.2% | |
 
-**role 분포**: gather **78.2%**, scatter 8.7%, transpose 5.5%, K-accumulate 3.4%, **matmul(유효) 2.4%**, reduce 0.8%, layout 0.7%, broadcast 0.3%, elementwise 0.2%.
-**유효 연산(matmul+누적) = 5.7%**, 나머지 94.3%가 오버헤드.
+**role 분포(후)**: gather **36.8%**, scatter 25.2%, transpose 15.8%, K-accumulate 9.8%, **matmul(유효) 6.9%**, reduce 2.3%, layout 2.0%, broadcast 0.8%. **유효 16.6%**.
 
 ![G1 prefill](figs/g1_per_op_hf_prefill.png)
-*G1[HF prefill]: 구성요소별 명령 수(크기 tier별 선형). 큰 projection은 막대 대부분이 빨강(gather), 초록(matmul)은 바닥의 얇은 띠.*
+*G1[HF prefill, 패킹 후]: projection의 빨강(gather)이 크게 줄고, K^T transpose(갈색)·scatter(주황)·accum(보라)이 상대적으로 커짐.*
 
 ![G5 prefill](figs/g5_share_and_mix_hf_prefill.png)
-*G5[HF prefill]: (좌) OP별 레이어 비중 — 상위 4개 projection이 ~91%. (우) OP별 role 구성(100%) — projection ~90% gather, O proj 절반 scatter, K^T 100% transpose, RoPE 100% layout, reduce/broadcast/elementwise 각각.*
-
-![G2 prefill](figs/g2_role_dist_hf_prefill.png)
-*G2[HF prefill]: gather 78.2% 압도, 유효 matmul 2.4%.*
+*G5[HF prefill, 패킹 후]: (좌) OP 비중 — Q/K/V·O proj·K^T transpose가 상위. (우) OP별 role 구성.*
 
 ![G4 prefill](figs/g4_useful_vs_overhead_hf_prefill.png)
-*G4[HF prefill]: 유효 5.7% vs 오버헤드 94.3%.*
+*G4[HF prefill, 패킹 후]: 유효 16.6% vs 오버헤드 83.4%.*
 
-### 6.2 Decode (M=1, L=128) — 구성요소별 (총 15,066,897 명령)
+### 6.3 Decode (M=1, L=128, 패킹 후) — 총 3,270,417 명령
 
 | OP | 레이어 합 | % |
 |---|---:|---:|
-| gate/up proj | 6,751,504 | 44.8% |
-| down proj | 3,376,632 | 22.4% |
-| Q/K/V proj | 1,846,704 | 12.3% |
-| O proj | 1,834,560 | 12.2% |
-| K^T transpose | 1,048,576 | 7.0% |
-| attn matmul (scores+ctx) | 200,352 | 1.3% |
-| reduce/broadcast/elementwise | ~8,000 | 0.0% |
+| **K^T transpose** | 1,048,576 | **32.1%** |
+| Q/K/V proj | 667,056 | 20.4% |
+| O proj | 654,912 | 20.0% |
+| gate/up proj | 460,048 | 14.1% |
+| down proj | 230,904 | 7.1% |
+| attn matmul (scores+ctx) | 200,352 | 6.1% |
+| reduce/broadcast/RoPE/elementwise | ~8,500 | 0.3% |
 
-**role 분포**: gather **84.1%**, transpose 7.0%, scatter 5.4%, K-accumulate 2.0%, **matmul(유효) 1.4%**, 나머지 ~0%.
-**유효 연산 = 3.4%**(prefill보다 더 낮음).
-
-**decode 특징**: M에 의존하는 부분(RMSNorm/softmax/A-gather)은 급감하지만 **가중치 gather는 M과 무관**해 거의 그대로 → gather 비중이 84.1%로 더 커진다. K^T transpose(캐시 [L,HD] 전치)는 prefill과 동일(1.05M)해 상대 비중이 7.0%로 상승.
+**role 분포(후)**: **transpose 32.1%**, gather 26.8%, scatter 25.0%, K-accumulate 9.3%, **matmul(유효) 6.5%**. **유효 15.8%**.
+**decode 핵심**: 가중치 gather 제거 후 **K^T transpose(캐시 [L,HD] 전치)가 단일 최대 비용(32.1%)** 으로 부상 — 패킹이 손대지 못하는 부분. 다음 타깃은 transpose(전용 ISA 또는 Kᵀ-전치 캐시).
 
 ![G1 decode](figs/g1_per_op_hf_decode.png)
-*G1[HF decode]: projection의 gather가 더욱 지배. softmax/RMSNorm은 거의 소멸(M=1).*
-
 ![G4 decode](figs/g4_useful_vs_overhead_hf_decode.png)
-*G4[HF decode]: 유효 3.4% vs 오버헤드 96.6%, gather가 prefill보다 더 큼.*
+*G1/G4[HF decode, 패킹 후]: K^T transpose가 지배, 유효 15.8%.*
 
-### 6.3 Prefill vs Decode — 토큰당 비용
+### 6.4 Prefill vs Decode — 토큰당 비용 (패킹 후)
 
 ![G6](figs/g6_prefill_vs_decode_hf.png)
-*G6[HF]: (좌) 토큰당 명령 — decode가 prefill의 **100배**. (우) 유효 비율 — decode 3.4% < prefill 5.7%.*
+*G6[HF, 패킹 후]: (좌) 토큰당 명령 — decode가 prefill의 **63배**(패킹 전 100배에서 개선). (우) 유효 비율 16.6% vs 15.8%.*
 
-| 지표 | prefill (128토큰 동시) | decode (1토큰) |
+| 지표 | prefill (128토큰) | decode (1토큰) |
 |---|---:|---:|
-| 레이어 총 명령 | 19,211,527 | 15,066,897 |
-| **토큰당 명령** | **150,090** | **15,066,897 (100×)** |
-| 유효 연산 비율 | 5.7% | 3.4% |
-| gather 비율 | 78.2% | 84.1% |
+| 레이어 총 명령 | 6,628,615 | 3,270,417 |
+| **토큰당 명령** | **51,786** | **3,270,417 (63×)** |
+| 유효 연산 비율 | 16.6% | 15.8% |
 
-**왜 decode가 토큰당 100배인가**: 토큰 1개를 만들려고 **가중치 전체를 한 번 읽어야** 한다(projection의 gather는 M과 무관). 게다가 M=1이 **64로 패딩**되어 64×64 PE의 **1/64 행만 유효**. GEMV(행렬×벡터)를 행렬 엔진에 태우는 구조적 비효율. (배칭·KV캐시·양자화로 완화하는 영역. 우리 컴파일러엔 decode 전용 경로가 없어 동일 primitive로 추정한 per-token 비용이다.)
+**decode가 여전히 토큰당 63배인 이유**: 가중치 gather는 사라졌지만 ① 토큰 1개에도 **가중치 행렬 전체를 m_mul에 통과**시켜야 하고(이제 contiguous read지만 여전히 전부 읽음), ② M=1이 **64로 패딩**되어 PE의 1/64만 유효. → 근본 완화는 **배칭(M=B)** + KV캐시 + 양자화.
 
-### 6.4 미지원 ISA 추가 시 절감 (상한 vs 현실)
+### 6.5 미지원 ISA 추가 시 절감 (패킹 후 기준, 상한 vs 현실)
 
-각 미지원 연산을 전용 ISA로 대체할 때 줄어드는 명령. **상한** = 우회 role을 0으로 가정. **현실** = 대체 ISA가 새로 내는 명령(replacement)을 차감.
+패킹으로 가중치 gather가 이미 빠졌으므로, ISA의 추가 절감은 **남은 활성화 gather + scatter + transpose** 대상이다.
 
 | 추가 ISA | 없애는 우회 | prefill 현실 절감 |
 |---|---|---:|
-| **strided load/save** | gather/scatter 복사 | **−86.6%** |
-| transpose unit | Kᵀ 원소복사 | −5.5% |
-| row-reduce(sum) | reduce=ones-mm | −0.4% |
-| broadcast | broadcast=ones-mm | −0.15% |
-| native activation | SiLU 체인 | −0.0% |
-| **누적(현실)** | | **−92.6%** (남음 1,424,538) |
+| **strided load/save** | 남은 gather(A)/scatter 복사 | 큼(남은 62%의 데이터이동) |
+| **transpose unit** | K^T 전치 | −15.8% (패킹 후 비중 큼) |
+| row-reduce / broadcast / activation | 우회 연산 | 소폭 |
+| **누적(현실)** | | **−79.3%** (남음 1,375,386) |
 
 ![G3 prefill](figs/g3_isa_waterfall_hf_prefill.png)
-*G3[HF prefill]: 현실 절감 워터폴 — strided load/save 하나로 절벽(19.2M→2.6M).*
+*G3[HF prefill, 패킹 후]: 남은 명령 6.63M에 대한 ISA 절감 워터폴(−79.3%).*
 
 ![G3 decode](figs/g3_isa_waterfall_hf_decode.png)
-*G3[HF decode]: gather 비중이 더 커 현실 절감 누적 **−96.2%**(→575,417).*
+*G3[HF decode, 패킹 후]: −83.8%(→529,337). transpose 비중이 커 transpose ISA의 가치 상승.*
 
-**실행 시사점**: gather의 대부분은 **가중치 타일 gather**다. 가중치는 컴파일 타임 상수이므로 **호스트 사전패킹(소프트웨어, ISA 불필요)** 만으로도 이 86%의 큰 몫을 제거할 수 있다 — "−86%"는 ISA 없이도 상당 부분 달성 가능한 목표.
+**정리**: 가중치 사전패킹(SW)으로 **prefill −65.5% / decode −78.3%** 를 ISA 없이 달성했고, 남은 오버헤드(활성화 gather·scatter·transpose)는 strided load/save·transpose ISA로 추가 제거 가능하다.
 
 > reduce-max ISA는 절감이 아니라 안정 softmax(정확성)용이며 커맨드는 오히려 증가한다.
 
@@ -313,14 +320,16 @@ walker는 스케줄 TIR을 **컴파일 타임에 해석**하며 명령을 받아
 ## 7. 결론 및 다음 단계
 
 ### 결론 (실제 HF 그래프 기준)
-1. 명령의 **~94%(decode ~97%)가 데이터 이동·우회 오버헤드**, 유효 행렬곱은 prefill 5.7% / decode 3.4%뿐.
-2. 근본 원인은 **NPU의 contiguous 전용 load/save** — 넓은 행렬 타일을 들어올 때(gather)·나갈 때(scatter) 복사. **strided load/save가 단일 최대 개선(−86%)**.
-3. gather의 대부분이 **가중치**이므로 **가중치 사전패킹(소프트웨어)** 으로 ISA 없이도 큰 폭 절감 가능.
-4. **decode는 토큰당 100배** — GEMV(M=1)+가중치 재적재. 배칭·KV캐시·사전패킹·양자화로 완화 대상.
-5. 한계: literal 4D HF는 우리 2D 컴파일러로 import 불가 → **검증된 동등 2D 그래프**로 분석.
+1. **패킹 전**: 명령의 ~94%(decode ~97%)가 데이터이동·우회 오버헤드, 유효 행렬곱 5.7%/3.4%. 근본 원인은 **NPU의 contiguous 전용 load/save**(넓은 행렬 타일을 gather/scatter 복사).
+2. **가중치 사전패킹(소프트웨어, ISA 불필요)으로 가중치 gather를 제거**해 **prefill −65.5% / decode −78.3%** 달성, 유효 비율 ~3배 상승(5.7%→16.6% / 3.4%→15.8%). byte-exact.
+3. 패킹 후 남은 오버헤드는 **활성화 gather + scatter + K^T transpose**. 특히 **K^T transpose가 새 최대 비용**(decode 32.1%) → 다음 타깃은 **transpose ISA / Kᵀ-전치 캐시**와 **strided load/save**(추가 −79~84%).
+4. **decode는 토큰당 63배**(패킹 전 100배) — GEMV(M=1) 1/64 활용 + 가중치 통과. 배칭·KV캐시·양자화로 완화 대상.
+5. 한계: literal 4D HF는 우리 2D 컴파일러로 import 불가 → **transformers와 rel 4.3e-7로 검증된 동등 2D 그래프**로 분석.
 
 ### 다음 단계
-- **(SW) 가중치 사전패킹** 구현 → "ISA 없는 절감" 막대 추가.
+- ~~(SW) 가중치 사전패킹~~ → **완료**(§4 #6, §6.1: prefill −65.5% / decode −78.3%).
+- **(SW/HW) K^T transpose 제거** — 패킹 후 최대 비용(decode 32.1%). Kᵀ-전치 캐시(SW) 또는 transpose ISA.
+- **(SW) 활성화 gather/scatter 제거** — 활성화 타일레이아웃 전파(SW) 또는 strided load/save(HW).
 - **(기능) 2D-batched 어텐션 지원** 또는 4D import 경로 → literal HF 직접 컴파일.
 - **(SW) input reuse를 schedule(cache_read)로** + weight-stationary dataflow(PE 입력버퍼 재사용).
 - **(분석) SEQ 스윕**(128→2048→4096) → attention(SEQ²) vs projection(SEQ) 역전 지점.

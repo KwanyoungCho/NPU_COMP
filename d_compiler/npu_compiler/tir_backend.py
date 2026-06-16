@@ -129,6 +129,7 @@ class _Walker:
         self.gather_cache = {}             # (src_off, stride) -> scratch offset (gather once)
         self.zeroed = set()                # C-tile offsets currently == 0 (fill not yet materialized)
         self.cbuf = {}                     # strided C-tile addr -> (contiguous accum scratch, stride)
+        self.packed_src = {}               # buffer.data -> (packed_base, Nt) for tile-blocked weights
 
     # ---- expression / pointer evaluation ----
     def ev(self, expr):
@@ -184,6 +185,17 @@ class _Walker:
         sbuf = src.buffer
         if sbuf.data not in self.base:
             raise TirBackendError(f"match_buffer source not a root param: {sbuf.name}")
+        if sbuf.data in self.packed_src:                     # tile-blocked weight: tile is contiguous
+            packed_base, Nt = self.packed_src[sbuf.data]
+            rt = self.ev(src.region[0].min) // TILE          # row tile index (ko)
+            ct = self.ev(src.region[1].min) // TILE          # col tile index (jo)
+            off = (rt * Nt + ct) * TILE * TILE               # blocked offset
+            self.base[buf.data] = packed_base
+            if isinstance(buf.elem_offset, tir.Var):
+                self._bind(buf.elem_offset, off)
+            if len(buf.strides) and isinstance(buf.strides[0], tir.Var):
+                self._bind(buf.strides[0], TILE)             # stride==64 -> _gather_cached skips gather
+            return
         row_stride = int(sbuf.shape[1])                       # compact 2D
         off = self.ev(src.region[0].min) * row_stride + self.ev(src.region[1].min)
         self.base[buf.data] = self.base[sbuf.data]            # alias to root base
@@ -322,7 +334,7 @@ def _copy_block(asm, dst_off, src_off, n, CH=8192):
 
 
 # ============================ single-matmul emit (hybrid entry) ============================
-def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N):
+def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None):
     """Emit one matmul C[M,N]=A[M,K]@B[K,N] into an existing asm at the given
     G-buffer offsets, via the TIR+tensorize+walker path (T1 input reuse).
 
@@ -331,17 +343,21 @@ def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N):
     direct: padded K-terms are 0 (fresh scratch is zero-initialised by the driver),
     and padded M/N rows/cols are sliced off. Fast path: when only M is non-64
     (K,N already 64-multiple, the common projection case) A/B are read in place and
-    only the output is staged in scratch -> no input copy."""
+    only the output is staged in scratch -> no input copy.
+
+    b_pack_nt: if set, B is a tile-blocked (pre-packed) weight stored at b_off as
+    [Kt,Nt,64,64] (Nt=b_pack_nt); the walker reads each B tile contiguously (no gather)."""
     Mp, Kp, Np = _ceil64(M), _ceil64(K), _ceil64(N)
     if (Mp, Kp, Np) == (M, K, N):
-        _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N)
+        _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=b_pack_nt)
         return
     if Kp == K and Np == N:                       # M-only padding (cheap: no input copy)
         cpad = mp.scratch_alloc(Mp * N)
-        _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N)   # extra A rows = garbage -> sliced
+        _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt)
         _copy_block(asm, c_off, cpad, M * N)                    # first M rows are contiguous
         return
     # general padding: stage A,B in fresh(=zero) scratch so padded K is 0, slice C out
+    # (B packing not applied here — only triggers when N or K non-64, never for weights)
     apad = mp.scratch_alloc(Mp * Kp)
     bpad = mp.scratch_alloc(Kp * Np)
     cpad = mp.scratch_alloc(Mp * Np)
@@ -351,7 +367,7 @@ def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N):
     _copy2d(asm, c_off, N, cpad, Np, M, N)        # cpad[0:M,0:N] -> C[M,N]
 
 
-def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N):
+def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None):
     """Core TIR+tensorize emit for a 64-multiple matmul (no padding)."""
     for d in (M, K, N):
         assert d % TILE == 0, f"_emit_tir_gemm needs 64-multiples, got {M}x{K}x{N}"
@@ -374,6 +390,8 @@ def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N):
                  pf.buffer_map[pf.params[1]].data: b_off,
                  pf.buffer_map[pf.params[2]].data: c_off}
     wk = _Walker(asm, mp, data_base)
+    if b_pack_nt is not None:                               # B is tile-blocked weight -> no gather
+        wk.packed_src[pf.buffer_map[pf.params[1]].data] = (b_off, b_pack_nt)
     wk.walk(pf.body)
     wk.flush()
 

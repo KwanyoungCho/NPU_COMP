@@ -34,6 +34,7 @@ class MemPlan:
         self.const_data = {}  # Constant -> numpy array
         self.tuple_of = {}    # tuple-typed Var -> [field vars] (torch import outputs)
         self.output = None    # returned Var
+        self.packed_meta = {} # Constant -> Nt (tile-blocked weight: stored [Kt,Nt,64,64])
 
     def alloc(self, var):
         shape, dtype = _shape_dtype(var.struct_info)
@@ -63,8 +64,31 @@ class MemPlan:
         self.constants.append(c)
         self.const_data[c] = data
 
+    def alloc_const_packed(self, c, T=64):
+        """Weight pre-packing: store a matmul weight constant [K,N] in tile-blocked
+        layout [Kt,Nt,T,T] (flattened) so the matmul backend reads each TxT tile
+        contiguously (stride T -> NO gather). Logical shape [K,N] is preserved;
+        only the data byte-order is reordered (host-side, offline). Requires 64-mult."""
+        shape, dtype = _shape_dtype(c.struct_info)
+        K, N = shape
+        data = np.asarray(c.data.numpy())                      # [K,N] row-major
+        Kt, Nt = K // T, N // T
+        packed = data.reshape(Kt, T, Nt, T).transpose(0, 2, 1, 3).reshape(-1)  # [Kt,Nt,T,T]
+        self.offset[c] = self.top
+        self.shape[c] = shape                                  # logical shape unchanged
+        self.dtype[c] = dtype
+        self.top += K * N
+        self.constants.append(c)
+        self.const_data[c] = packed
+        self.packed_meta[c] = Nt
 
-def plan(func):
+
+def _packable(c):
+    shp = [int(d) for d in c.struct_info.shape]
+    return len(shp) == 2 and shp[0] % 64 == 0 and shp[1] % 64 == 0
+
+
+def plan(func, pack=True):
     """Plan a Relax function: assign G-buffer offsets to params, constants, and
     every binding var. Returns a MemPlan. Assumes one dataflow block returning a Var."""
     mp = MemPlan()
@@ -87,11 +111,15 @@ def plan(func):
             if isinstance(val, relax.Call):
                 # elementwise ops may broadcast a smaller constant operand (e.g. bias)
                 # -> host-expand that constant to the output shape.
-                is_ew = getattr(val.op, "name", "") in _EW_OPS
+                opname = getattr(val.op, "name", "")
+                is_ew = opname in _EW_OPS
                 bsh = [int(d) for d in binding.var.struct_info.shape] if is_ew else None
-                for arg in val.args:
+                for idx, arg in enumerate(val.args):
                     if isinstance(arg, relax.Constant) and arg not in mp.offset:
-                        mp.alloc_const(arg, broadcast_to=bsh)
+                        if pack and opname == "relax.matmul" and idx == 1 and _packable(arg):
+                            mp.alloc_const_packed(arg)        # weight pre-packing (tile-blocked)
+                        else:
+                            mp.alloc_const(arg, broadcast_to=bsh)
             mp.alloc(binding.var)
     out = seq.body
     while out in mp.tuple_of:                         # unwrap 1-tuple output

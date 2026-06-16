@@ -64,7 +64,8 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None):
         # byte-exact oracle for the direct/tir-comparison tests (backend="direct").
         if mm_backend == "tir":
             from . import tir_backend
-            tir_backend.emit_matmul_into(a, mp, off[dst], off[x], off[w], M, K, N)
+            nt = mp.packed_meta.get(w)        # tile-blocked weight (no B-gather) if pre-packed
+            tir_backend.emit_matmul_into(a, mp, off[dst], off[x], off[w], M, K, N, b_pack_nt=nt)
             return
         if tile is None:
             if max(M, K, N) > 255:

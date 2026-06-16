@@ -143,47 +143,46 @@ def op_bucket(name, dshape, ashapes):
     return "elementwise (attn/softmax)", "attn"
 
 
-def run_mode(tag, module, example_inputs, ntokens):
-    print(f"\n========== HF {tag} ==========")
-    mod = frontend.import_torch(module, example_inputs)
-    mp = memplan.plan(mod["main"])
+def analyze_once(mod, ntokens, pack):
+    mp = memplan.plan(mod["main"], pack=pack)
     log = []
     asm = codegen.compile_func(mod["main"], mp, tile=64, mm_backend="tir", emit_log=log)
     st = cost.analyze(asm, mp)
     tags = asm.tags
-    # per-OP 집계 (op_bucket으로 그룹)
     ops = {}
     for name, dshape, ashapes, s0, s1 in log:
         label, cls = op_bucket(name, dshape, ashapes)
-        roles = {}
-        for t in tags[s0:s1]:
-            roles[t or "untagged"] = roles.get(t or "untagged", 0) + 1
         e = ops.setdefault(label, dict(label=label, cls=cls, count=0, total=0, roles={}))
         e["count"] += 1; e["total"] += (s1 - s0)
-        for k, v in roles.items():
-            e["roles"][k] = e["roles"].get(k, 0) + v
-    layer_total = st["total"]
-    by_role = st["by_role"]; g = lambda k: by_role.get(k, 0)
+        for t in tags[s0:s1]:
+            e["roles"][t or "untagged"] = e["roles"].get(t or "untagged", 0) + 1
+    layer_total = st["total"]; by_role = st["by_role"]; g = lambda k: by_role.get(k, 0)
     useful = g("mmul") + g("accum")
     silu = ops.get("elementwise F (SiLU/FFN)", {}).get("total", 0)
-    n_tr = g("transpose") / 32768.0
-    n_gs = (g("gather") + g("scatter") + g("pad")) / 512.0
-    feats = [("strided load/save", g("gather") + g("scatter") + g("pad"), n_gs * 2),
-             ("transpose unit", g("transpose"), n_tr * 7),
-             ("row-reduce(sum)", g("reduce"), g("reduce") * 0.5),
-             ("broadcast", g("broadcast"), g("broadcast") * 0.5),
-             ("native activation", silu, silu * 0.2)]
+    feats = [("strided load/save", g("gather") + g("scatter") + g("pad"), (g("gather")+g("scatter")+g("pad"))/512.0*2),
+             ("transpose unit", g("transpose"), g("transpose")/32768.0*7),
+             ("row-reduce(sum)", g("reduce"), g("reduce")*0.5),
+             ("broadcast", g("broadcast"), g("broadcast")*0.5),
+             ("native activation", silu, silu*0.2)]
     savings = [(n, up, max(0.0, up - rep)) for (n, up, rep) in feats]
-    real_total = sum(s[2] for s in savings)
-    print(f"  총 명령 = {layer_total:,}  (토큰당 {layer_total/ntokens:,.0f})")
-    print(f"  유효(matmul+accum) {useful:,} ({100*useful/layer_total:.1f}%)  gather {g('gather'):,} ({100*g('gather')/layer_total:.1f}%)")
-    print("  role:", {k: f"{100*v/layer_total:.1f}%" for k, v in sorted(by_role.items(), key=lambda x: -x[1])})
-    print(f"  ISA 5종 현실 절감 {100*real_total/layer_total:.1f}% -> 남음 {layer_total-int(real_total):,}")
-    rows = [(o["label"], o["count"], o["total"] // max(o["count"], 1), o["total"], o["roles"], o["cls"])
+    rows = [(o["label"], o["count"], o["total"]//max(o["count"],1), o["total"], o["roles"], o["cls"])
             for o in ops.values()]
-    _graphs(rows, by_role, savings, layer_total, useful, f"hf_{tag}")
-    return dict(tag=tag, layer_total=layer_total, by_role=by_role, useful=useful,
-                per_token=layer_total / ntokens, rows=rows, savings=savings)
+    return dict(layer_total=layer_total, by_role=by_role, useful=useful,
+                per_token=layer_total/ntokens, rows=rows, savings=savings)
+
+
+def run_mode(tag, module, example_inputs, ntokens):
+    print(f"\n========== HF {tag} ==========")
+    mod = frontend.import_torch(module, example_inputs)
+    before = analyze_once(mod, ntokens, pack=False)     # 패킹 전 (row-major weights)
+    after = analyze_once(mod, ntokens, pack=True)       # 패킹 후 (tile-blocked weights) = 현재 기본
+    for nm, st in [("BEFORE pack", before), ("AFTER  pack", after)]:
+        g = lambda k: st["by_role"].get(k, 0)
+        print(f"  [{nm}] 총={st['layer_total']:,} (토큰당 {st['per_token']:,.0f})  "
+              f"유효 {100*st['useful']/st['layer_total']:.1f}%  gather {100*g('gather')/st['layer_total']:.1f}%")
+    # 상세 그래프(G1~G5)는 현재 기본(=AFTER pack) 기준
+    _graphs(after["rows"], after["by_role"], after["savings"], after["layer_total"], after["useful"], f"hf_{tag}")
+    return before, after
 
 
 def _graphs(rows, by_role, savings, layer_total, useful, tag):
@@ -277,26 +276,55 @@ def compare_graph(pf, dc):
     plt.tight_layout(); plt.savefig(f"{FIGDIR}/g6_prefill_vs_decode_hf.png", dpi=120); plt.close()
 
 
+def pack_compare_graph(pf_b, pf_a, dc_b, dc_a):
+    """G7: weight pre-packing 효과 — 전/후 총 명령 + gather + 유효비율."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
+    grp = ["prefill\nbefore", "prefill\nafter", "decode\nbefore", "decode\nafter"]
+    tot = [pf_b["layer_total"], pf_a["layer_total"], dc_b["layer_total"], dc_a["layer_total"]]
+    gat = [s["by_role"].get("gather", 0) for s in (pf_b, pf_a, dc_b, dc_a)]
+    x = np.arange(4); w = 0.4
+    ax1.bar(x - w/2, tot, w, label="total commands", color="#1f77b4")
+    ax1.bar(x + w/2, gat, w, label="gather", color="#d62728")
+    for i in range(4):
+        ax1.text(x[i]-w/2, tot[i], f"{tot[i]/1e6:.1f}M", ha="center", va="bottom", fontsize=8)
+    ax1.set_xticks(x); ax1.set_xticklabels(grp); ax1.set_ylabel("commands"); ax1.legend()
+    ax1.set_title("G7a. Weight pre-packing effect (total & gather)")
+    uf = [100*s["useful"]/s["layer_total"] for s in (pf_b, pf_a, dc_b, dc_a)]
+    ax2.bar(x, uf, color=["#9ac","#2ca02c","#9ac","#2ca02c"])
+    for i in range(4):
+        ax2.text(x[i], uf[i], f"{uf[i]:.1f}%", ha="center", va="bottom", fontsize=9)
+    ax2.set_xticks(x); ax2.set_xticklabels(grp); ax2.set_ylabel("useful (matmul+accum) %")
+    ax2.set_title("G7b. Useful-compute share (before vs after pack)")
+    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g7_packing_effect.png", dpi=120); plt.close()
+
+
 def main():
     S, L = 128, 128
     cos, sin, _ = LG.rope_tables(S, HD, base=500000.0, llama3_scaling=True)
-    # prefill
     xt = torch.randn(S, D) * 0.3
     ct = torch.tensor(cos, dtype=torch.float32); stt = torch.tensor(sin, dtype=torch.float32)
     mk = torch.tensor(LG.causal_mask(S), dtype=torch.float32)
-    pf = run_mode("prefill", PrefillLayer().eval(), (xt, ct, stt, mk), ntokens=S)
-    # decode
+    pf_b, pf_a = run_mode("prefill", PrefillLayer().eval(), (xt, ct, stt, mk), ntokens=S)
     cos1, sin1, _ = LG.rope_tables(1, HD, base=500000.0, llama3_scaling=True)
     xd = torch.randn(1, D) * 0.3
     c1 = torch.tensor(cos1, dtype=torch.float32); s1 = torch.tensor(sin1, dtype=torch.float32)
     Kc = tuple(torch.randn(L, HD) * 0.1 for _ in range(KV))
     Vc = tuple(torch.randn(L, HD) * 0.1 for _ in range(KV))
-    dc = run_mode("decode", DecodeLayer().eval(), (xd, c1, s1, Kc, Vc), ntokens=1)
-    compare_graph(pf, dc)
-    print(f"\n== HF prefill vs decode ==  per-token: {pf['per_token']:,.0f} vs {dc['per_token']:,.0f} "
-          f"({dc['per_token']/pf['per_token']:.0f}x);  useful {100*pf['useful']/pf['layer_total']:.1f}% vs "
-          f"{100*dc['useful']/dc['layer_total']:.1f}%")
-    print(f"figs -> {FIGDIR}")
+    dc_b, dc_a = run_mode("decode", DecodeLayer().eval(), (xd, c1, s1, Kc, Vc), ntokens=1)
+    compare_graph(pf_a, dc_a)
+    pack_compare_graph(pf_b, pf_a, dc_b, dc_a)
+    print("\n== weight packing 전/후 ==")
+    for nm, b, a in [("prefill", pf_b, pf_a), ("decode", dc_b, dc_a)]:
+        print(f"  {nm}: 총 {b['layer_total']:,} -> {a['layer_total']:,} "
+              f"(-{100*(1-a['layer_total']/b['layer_total']):.1f}%);  "
+              f"유효 {100*b['useful']/b['layer_total']:.1f}% -> {100*a['useful']/a['layer_total']:.1f}%")
+    print("\n== AFTER-pack per-OP (prefill) ==")
+    for r in sorted(pf_a["rows"], key=lambda r: -r[3]):
+        print(f"  {r[0]:<26} {r[3]:>10,}  ({100*r[3]/pf_a['layer_total']:.1f}%)")
+    print("\n== AFTER-pack per-OP (decode) ==")
+    for r in sorted(dc_a["rows"], key=lambda r: -r[3]):
+        print(f"  {r[0]:<26} {r[3]:>10,}  ({100*r[3]/dc_a['layer_total']:.1f}%)")
+    print(f"\nfigs -> {FIGDIR}")
 
 
 if __name__ == "__main__":
