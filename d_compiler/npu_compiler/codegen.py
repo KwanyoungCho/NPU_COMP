@@ -30,7 +30,89 @@ class CodegenError(Exception):
     pass
 
 
-def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None):
+def _detect_oproj_groups(seq):
+    """Find maximal add-trees whose leaves are all same-shape matmuls
+    (the per-head attention output projection sum_h ctx_h @ Wo_h).
+
+    Returns (fused_root, consumed):
+      fused_root: {root_add_var -> [leaf matmul var, ...] in fold order}
+      consumed:   set of every binding var folded away (tree adds + leaf matmuls).
+    Only fuses when each leaf/intermediate is single-use, so skipping its own
+    emit is safe (the root add var is still produced by the group)."""
+    val = {b.var: b.value for blk in seq.blocks for b in blk.bindings}
+    uses = {}
+    def _count(x):
+        if isinstance(x, relax.Var):
+            uses[x] = uses.get(x, 0) + 1
+        elif isinstance(x, relax.Tuple):
+            for f in x.fields:
+                _count(f)
+    for blk in seq.blocks:
+        for b in blk.bindings:
+            c = b.value
+            if isinstance(c, relax.Call):
+                for ar in c.args:
+                    _count(ar)
+            else:
+                _count(c)
+
+    def _op(v, opn):
+        c = val.get(v)
+        return c if (isinstance(c, relax.Call) and _opname(c) == opn) else None
+
+    def _leaves(v, shp):
+        ad = _op(v, "relax.add")
+        if ad is not None:
+            l = _leaves(ad.args[0], shp); r = _leaves(ad.args[1], shp)
+            return None if (l is None or r is None) else (l + r)
+        mm = _op(v, "relax.matmul")
+        if mm is not None and tuple(v.struct_info.shape) == shp:
+            return [v]
+        return None
+
+    def _legal_term(v):                             # leaf matmul with 64-multiple K, N
+        mm = val[v]
+        K = int(mm.args[0].struct_info.shape[1]); N = int(mm.args[1].struct_info.shape[1])
+        return K % 64 == 0 and N % 64 == 0
+
+    cand = {}
+    for blk in seq.blocks:
+        for b in blk.bindings:
+            if _op(b.var, "relax.add") is None:
+                continue
+            shp = tuple(b.var.struct_info.shape)
+            lv = _leaves(b.var, shp)
+            if lv is not None and len(lv) >= 2 and all(_legal_term(x) for x in lv):
+                cand[b.var] = lv
+    used_by_cand = set()
+    for v in cand:
+        ad = _op(v, "relax.add")
+        for ar in (ad.args[0], ad.args[1]):
+            if ar in cand:
+                used_by_cand.add(ar)
+
+    fused_root, consumed = {}, set()
+    for v, leaves in cand.items():
+        if v in used_by_cand:                       # not the maximal root
+            continue
+        nodes, stack, ok = set(), [v], True
+        while stack:                                # collect tree adds + leaves
+            x = stack.pop(); nodes.add(x)
+            ad = _op(x, "relax.add")
+            if ad is not None:
+                stack += [ad.args[0], ad.args[1]]
+        # safety: every folded node except the root must be single-use
+        for x in nodes:
+            if x is not v and uses.get(x, 0) != 1:
+                ok = False; break
+        if ok:
+            fused_root[v] = leaves
+            consumed |= nodes
+    return fused_root, consumed
+
+
+def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_act=True,
+                 fuse_oproj=True):
     """Emit an Asm for a planned Relax function. Returns Asm (ending in halt).
 
     tile=None  -> B0 logical matmul (single m_mul, dims<=255, simulator-only).
@@ -42,6 +124,10 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None):
     """
     a = Asm()
     off = mp.offset
+    # shared across all matmuls so a read-only activation tile (e.g. xn read by every
+    # Q/K/V proj) is gathered ONCE for the whole layer, not per-matmul. (SSA + bump
+    # allocator => (off,stride) uniquely identifies write-once data, so reuse is safe.)
+    mm_gather_cache = {} if reuse_act else None
 
     def copy2d(dst_off, dst_stride, src_off, src_stride, rows, cols):
         """Copy a [rows,cols] block; one side may be strided. Per-row copy
@@ -65,7 +151,8 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None):
         if mm_backend == "tir":
             from . import tir_backend
             nt = mp.packed_meta.get(w)        # tile-blocked weight (no B-gather) if pre-packed
-            tir_backend.emit_matmul_into(a, mp, off[dst], off[x], off[w], M, K, N, b_pack_nt=nt)
+            tir_backend.emit_matmul_into(a, mp, off[dst], off[x], off[w], M, K, N,
+                                         b_pack_nt=nt, gather_cache=mm_gather_cache)
             return
         if tile is None:
             if max(M, K, N) > 255:
@@ -268,10 +355,38 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None):
     EW1 = {"relax.sqrt": a.v_sqrt, "relax.exp": a.v_exp}
 
     seq = func.body
+    # ---- detect per-head O-proj add-tree: attn = sum_h (ctx_h @ Wo_h) ----------
+    # H separate same-shape matmuls feeding one left-folded add chain. Fuse them
+    # so the wide [M,N] result is scattered ONCE (shared accumulator) instead of
+    # once per head. TIR-only optimisation (uses the accumulate-group emit).
+    fused_root, consumed = _detect_oproj_groups(seq) if (fuse_oproj and mm_backend == "tir") \
+        else ({}, set())
+
+    def emit_oproj_group(root_var, leaves):
+        from . import tir_backend
+        terms = []
+        for lv in leaves:
+            mm = val_of[lv]                                  # relax.matmul call
+            av, bv = mm.args[0], mm.args[1]
+            M, K = mp.shape[av]; _, N = mp.shape[bv]
+            terms.append((off[av], off[bv], M, K, N, mp.packed_meta.get(bv)))
+        tir_backend.emit_matmul_accumulate_group(a, mp, off[root_var], terms,
+                                                 gather_cache=mm_gather_cache)
+        return terms[0]                                      # (.,.,M,K,N,.) for logging
+
+    val_of = {b.var: b.value for blk in seq.blocks for b in blk.bindings}
     for block in seq.blocks:
         for binding in block.bindings:
             dst = binding.var
             call = binding.value
+            if dst in consumed:                              # folded into an O-proj group
+                if dst in fused_root:
+                    _start = len(a.words)
+                    _, _, M, K, N, _ = emit_oproj_group(dst, fused_root[dst])
+                    if emit_log is not None:                 # attribute to the matmul (O proj)
+                        emit_log.append(("relax.matmul", mp.shape.get(dst),
+                                         [(M, K), (K, N)], _start, len(a.words)))
+                continue
             if isinstance(call, (relax.Var, relax.Tuple)):  # alias / tuple output: no emit
                 continue
             if not isinstance(call, relax.Call):

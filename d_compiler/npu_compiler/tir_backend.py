@@ -117,7 +117,7 @@ class _Walker:
     """Interpret scheduled TIR: unroll For loops, bind block/match-buffer vars,
     evaluate index expressions to constants, emit ISA for intrinsic calls."""
 
-    def __init__(self, asm, mp, data_base, verbose=False):
+    def __init__(self, asm, mp, data_base, verbose=False, gather_cache=None):
         self.a = asm
         self.mp = mp
         self.base = dict(data_base)        # buffer-data Var -> G-buffer base offset
@@ -125,11 +125,14 @@ class _Walker:
         self.ana = arith.Analyzer()
         self.verbose = verbose             # learning hook: trace each intrinsic/gather
         self.sP = mp.scratch_alloc(TILE * TILE)   # matmul partial
-        # T1 input-reuse state:
-        self.gather_cache = {}             # (src_off, stride) -> scratch offset (gather once)
+        # T1 input-reuse state; gather_cache may be SHARED across matmuls (write-once
+        # sources => same (off,stride) = same data) so a shared activation tile (e.g.
+        # xn read by all Q/K/V projs) is gathered ONCE for the whole layer.
+        self.gather_cache = gather_cache if gather_cache is not None else {}  # (src_off,stride)->scratch
         self.zeroed = set()                # C-tile offsets currently == 0 (fill not yet materialized)
         self.cbuf = {}                     # strided C-tile addr -> (contiguous accum scratch, stride)
         self.packed_src = {}               # buffer.data -> (packed_base, Nt) for tile-blocked weights
+        self.suppress_fill = False         # group-accumulate: keep prior C accumulator across matmuls
 
     # ---- expression / pointer evaluation ----
     def ev(self, expr):
@@ -226,7 +229,11 @@ class _Walker:
 
     def emit_fill(self, c, sc):
         """T1: don't materialize the zero fill — just mark the C tile as zero.
-        The first accumulate stores the partial directly (fp16(0+x)==fp16(x))."""
+        The first accumulate stores the partial directly (fp16(0+x)==fp16(x)).
+        In group-accumulate mode (suppress_fill) the C tile keeps the running
+        cross-matmul sum, so the re-init from a later matmul is skipped."""
+        if self.suppress_fill:
+            return
         self.zeroed.add(c)
 
     def _gather_cached(self, off, stride):
@@ -334,7 +341,7 @@ def _copy_block(asm, dst_off, src_off, n, CH=8192):
 
 
 # ============================ single-matmul emit (hybrid entry) ============================
-def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None):
+def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None):
     """Emit one matmul C[M,N]=A[M,K]@B[K,N] into an existing asm at the given
     G-buffer offsets, via the TIR+tensorize+walker path (T1 input reuse).
 
@@ -349,11 +356,11 @@ def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None):
     [Kt,Nt,64,64] (Nt=b_pack_nt); the walker reads each B tile contiguously (no gather)."""
     Mp, Kp, Np = _ceil64(M), _ceil64(K), _ceil64(N)
     if (Mp, Kp, Np) == (M, K, N):
-        _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=b_pack_nt)
+        _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=b_pack_nt, gather_cache=gather_cache)
         return
     if Kp == K and Np == N:                       # M-only padding (cheap: no input copy)
         cpad = mp.scratch_alloc(Mp * N)
-        _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt)
+        _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt, gather_cache=gather_cache)
         _copy_block(asm, c_off, cpad, M * N)                    # first M rows are contiguous
         return
     # general padding: stage A,B in fresh(=zero) scratch so padded K is 0, slice C out
@@ -367,10 +374,9 @@ def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None):
     _copy2d(asm, c_off, N, cpad, Np, M, N)        # cpad[0:M,0:N] -> C[M,N]
 
 
-def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None):
-    """Core TIR+tensorize emit for a 64-multiple matmul (no padding)."""
-    for d in (M, K, N):
-        assert d % TILE == 0, f"_emit_tir_gemm needs 64-multiples, got {M}x{K}x{N}"
+def _scheduled_gemm(M, K, N):
+    """Legalize+schedule a [M,K]@[K,N] matmul; return the scheduled prim_func
+    (params: A_in, B_in, C_out). Pure shape function -> safe to cache/reuse."""
     bb = relax.BlockBuilder()
     x = relax.Var("x", relax.TensorStructInfo([M, K], "float16"))
     w = relax.Var("w", relax.TensorStructInfo([K, N], "float16"))
@@ -385,15 +391,62 @@ def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None):
             if isinstance(bd.value, relax.Call) and bd.value.op.name == "relax.call_tir":
                 gvar = bd.value.args[0]
     sched = schedule_matmul(mod, gvar.name_hint)
-    pf = sched[gvar.name_hint]                              # params: A_in, B_in, C_out
-    data_base = {pf.buffer_map[pf.params[0]].data: a_off,
-                 pf.buffer_map[pf.params[1]].data: b_off,
-                 pf.buffer_map[pf.params[2]].data: c_off}
-    wk = _Walker(asm, mp, data_base)
+    return sched[gvar.name_hint]
+
+
+def _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt=None):
+    """Point a (reused) walker's root buffers at this matmul's G-buffer offsets."""
+    wk.base[pf.buffer_map[pf.params[0]].data] = a_off
+    wk.base[pf.buffer_map[pf.params[1]].data] = b_off
+    wk.base[pf.buffer_map[pf.params[2]].data] = c_off
+    wk.packed_src = {}
     if b_pack_nt is not None:                               # B is tile-blocked weight -> no gather
         wk.packed_src[pf.buffer_map[pf.params[1]].data] = (b_off, b_pack_nt)
+
+
+def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None):
+    """Core TIR+tensorize emit for a 64-multiple matmul (no padding)."""
+    for d in (M, K, N):
+        assert d % TILE == 0, f"_emit_tir_gemm needs 64-multiples, got {M}x{K}x{N}"
+    pf = _scheduled_gemm(M, K, N)
+    wk = _Walker(asm, mp, {}, gather_cache=gather_cache)
+    _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt)
     wk.walk(pf.body)
     wk.flush()
+
+
+def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None):
+    """Emit  C[M,N] = sum_t (A_t[M,K_t] @ B_t[K_t,N])  with a SINGLE output flush.
+
+    Used for the per-head attention output projection: instead of materialising
+    each head's full [M,N] product (one strided scatter per head) and adding them,
+    all head products accumulate in one shared set of contiguous C-tile buffers
+    (in-G-buffer 'accum'), scattered to the strided output exactly once. Turns
+    H output scatters into 1.
+
+    terms: list of (a_off, b_off, M, K, N, b_pack_nt) sharing the same (M, N).
+    M may be non-64 (decode, M=1): computed padded then the first M rows copied out.
+    K, N must be 64-multiples (true for o_proj: K=head_dim=128, N=hidden)."""
+    M, N = terms[0][2], terms[0][4]
+    Mp = _ceil64(M)
+    assert N % TILE == 0, f"group N must be 64-multiple, got {N}"
+    out = c_off
+    cpad = None
+    if Mp != M:                                            # decode: pad M, copy valid rows out
+        cpad = mp.scratch_alloc(Mp * N); out = cpad
+    wk = _Walker(asm, mp, {}, gather_cache=gather_cache)
+    sched_cache = {}
+    for i, (a_off, b_off, M_t, K_t, N_t, nt) in enumerate(terms):
+        assert K_t % TILE == 0 and N_t == N, f"bad group term {M_t}x{K_t}x{N_t}"
+        pf = sched_cache.get((Mp, K_t, N))
+        if pf is None:
+            pf = _scheduled_gemm(Mp, K_t, N); sched_cache[(Mp, K_t, N)] = pf
+        _bind_gemm(wk, pf, a_off, b_off, out, nt)
+        wk.suppress_fill = (i > 0)                         # only the first term zero-inits C
+        wk.walk(pf.body)
+    wk.flush()                                             # ONE scatter for the whole sum
+    if cpad is not None:
+        _copy_block(asm, c_off, cpad, M * N)
 
 
 # ============================ compile entry ============================

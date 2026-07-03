@@ -18,6 +18,10 @@ sys.path.insert(0, HERE)
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+plt.rcParams.update({                          # 글씨 최소 크기 키우기
+    "font.size": 14, "axes.titlesize": 16, "axes.labelsize": 14,
+    "xtick.labelsize": 12, "ytick.labelsize": 12, "legend.fontsize": 13,
+})
 import torch, torch.nn as nn
 
 from npu_compiler import frontend, codegen, memplan, cost, legalize as LG
@@ -27,6 +31,7 @@ D, H, KV, HD, F = 3072, 24, 8, 128, 8192
 GPK = H // KV
 FIGDIR = os.path.join(os.path.dirname(HERE), "report", "figs")
 os.makedirs(FIGDIR, exist_ok=True)
+ROLES_VIS = [r for r in ROLE_ORDER if r != "untagged"]   # "other"(halt 1개) 그래프에서 제외
 
 
 def _f16(x):
@@ -143,10 +148,11 @@ def op_bucket(name, dshape, ashapes):
     return "elementwise (attn/softmax)", "attn"
 
 
-def analyze_once(mod, ntokens, pack):
+def analyze_once(mod, ntokens, pack, reuse=True, fuse=True):
     mp = memplan.plan(mod["main"], pack=pack)
     log = []
-    asm = codegen.compile_func(mod["main"], mp, tile=64, mm_backend="tir", emit_log=log)
+    asm = codegen.compile_func(mod["main"], mp, tile=64, mm_backend="tir", emit_log=log,
+                               reuse_act=reuse, fuse_oproj=fuse)
     st = cost.analyze(asm, mp)
     tags = asm.tags
     ops = {}
@@ -161,6 +167,7 @@ def analyze_once(mod, ntokens, pack):
     silu = ops.get("elementwise F (SiLU/FFN)", {}).get("total", 0)
     feats = [("strided load/save", g("gather") + g("scatter") + g("pad"), (g("gather")+g("scatter")+g("pad"))/512.0*2),
              ("transpose unit", g("transpose"), g("transpose")/32768.0*7),
+             ("m_mul accumulate", g("accum"), 0.0),       # C+=A@B 누산기로 K-accum 흡수(완전 제거)
              ("row-reduce(sum)", g("reduce"), g("reduce")*0.5),
              ("broadcast", g("broadcast"), g("broadcast")*0.5),
              ("native activation", silu, silu*0.2)]
@@ -174,128 +181,143 @@ def analyze_once(mod, ntokens, pack):
 def run_mode(tag, module, example_inputs, ntokens):
     print(f"\n========== HF {tag} ==========")
     mod = frontend.import_torch(module, example_inputs)
-    before = analyze_once(mod, ntokens, pack=False)     # 패킹 전 (row-major weights)
-    after = analyze_once(mod, ntokens, pack=True)       # 패킹 후 (tile-blocked weights) = 현재 기본
-    for nm, st in [("BEFORE pack", before), ("AFTER  pack", after)]:
+    base = analyze_once(mod, ntokens, pack=False, reuse=False, fuse=False)  # 진짜 baseline
+    packed = analyze_once(mod, ntokens, pack=True, reuse=False, fuse=False)  # +가중치 패킹
+    reused = analyze_once(mod, ntokens, pack=True, reuse=True, fuse=False)   # +활성화 gather 재사용
+    best = analyze_once(mod, ntokens, pack=True, reuse=True, fuse=True)      # +O-proj head 융합 (현재 기본)
+    for nm, st in [("baseline   ", base), ("+pack      ", packed),
+                   ("+pack+reuse", reused), ("+oproj fuse", best)]:
         g = lambda k: st["by_role"].get(k, 0)
-        print(f"  [{nm}] 총={st['layer_total']:,} (토큰당 {st['per_token']:,.0f})  "
-              f"유효 {100*st['useful']/st['layer_total']:.1f}%  gather {100*g('gather')/st['layer_total']:.1f}%")
-    # 상세 그래프(G1~G5)는 현재 기본(=AFTER pack) 기준
-    _graphs(after["rows"], after["by_role"], after["savings"], after["layer_total"], after["useful"], f"hf_{tag}")
-    return before, after
+        print(f"  [{nm}] 총={st['layer_total']:>10,} (토큰당 {st['per_token']:>12,.0f})  "
+              f"유효 {100*st['useful']/st['layer_total']:4.1f}%  gather {100*g('gather')/st['layer_total']:4.1f}%"
+              f"  scatter {100*g('scatter')/st['layer_total']:4.1f}%")
+    # 상세 그래프는 현재 기본(=+pack+reuse+fuse) 기준
+    _graphs(best["rows"], best["by_role"], best["savings"], best["layer_total"], best["useful"], f"hf_{tag}")
+    return base, packed, reused, best
 
 
 def _graphs(rows, by_role, savings, layer_total, useful, tag):
-    # G1 tier
-    tiers = [(">1M", 1e6, float("inf")), ("10K-1M", 1e4, 1e6), ("<10K", 0, 1e4)]
-    fig, axes = plt.subplots(1, 3, figsize=(17, 6))
+    # G1 tier (transpose(>1M)을 두 번째 tier와 합쳐 ≥10K 한 묶음으로)
+    tiers = [("≥10K", 1e4, float("inf")), ("<10K", 0, 1e4)]
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
     for ax, (tn, lo, hi) in zip(axes, tiers):
         grp = sorted([r for r in rows if lo <= r[3] < hi], key=lambda r: -r[3])
         bottoms = np.zeros(len(grp)); labels = [r[0] for r in grp]
-        for role in ROLE_ORDER:
+        for role in ROLES_VIS:
             vals = np.array([r[4].get(role, 0) for r in grp], float)
             if vals.sum() == 0:
                 continue
             ax.bar(labels, vals, bottom=bottoms, color=ROLE_COLORS.get(role)); bottoms += vals
         ax.set_title(f"{tn} cmds/OP"); ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
-        plt.setp(ax.get_xticklabels(), rotation=40, ha="right", fontsize=7)
+        plt.setp(ax.get_xticklabels(), rotation=40, ha="right", fontsize=12)
     axes[0].set_ylabel("commands (linear)")
-    present = [r for r in ROLE_ORDER if any(row[4].get(r, 0) for row in rows)]
+    present = [r for r in ROLES_VIS if any(row[4].get(r, 0) for row in rows)]
     fig.legend(handles=[Patch(color=ROLE_COLORS.get(r), label=ROLE_EN.get(r, r)) for r in present],
-               loc="upper center", ncol=len(present), fontsize=8, bbox_to_anchor=(0.5, 1.02))
-    fig.suptitle(f"G1[{tag}]. Commands per OP — LINEAR by magnitude (real HF graph)", y=0.96)
+               loc="lower center", ncol=min(len(present), 6), fontsize=13, bbox_to_anchor=(0.5, -0.06))
+    fig.suptitle(f"G1[{tag}]. Commands per OP — LINEAR by magnitude (real HF graph)", y=0.99)
     plt.tight_layout(); plt.savefig(f"{FIGDIR}/g1_per_op_{tag}.png", dpi=120, bbox_inches="tight"); plt.close()
 
-    # G2 role dist
-    items = sorted(by_role.items(), key=lambda x: x[1])
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.barh([ROLE_EN.get(k, k) for k, _ in items], [v for _, v in items],
-            color=[ROLE_COLORS.get(k, "#888") for k, _ in items])
-    for i, (k, v) in enumerate(items):
-        ax.text(v, i, f" {v:,} ({100*v/layer_total:.1f}%)", va="center", fontsize=8)
-    ax.set_xscale("log"); ax.set_xlabel("commands"); ax.set_title(f"G2[{tag}]. Role distribution (real HF graph)")
-    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g2_role_dist_{tag}.png", dpi=120); plt.close()
-
-    # G3 realistic waterfall
-    stages = ["baseline"] + [s[0] for s in savings]; vals = [float(layer_total)]; cur = float(layer_total)
+    # G2+G3 통합: (좌) role 분포 — 무엇이 오버헤드인가, (우) ISA waterfall — 그 role을 없애는 절감
+    items = sorted([(k, v) for k, v in by_role.items() if k != "untagged"], key=lambda x: x[1])
+    stages = ["baseline"] + [s[0] for s in savings]; wf = [float(layer_total)]; cur = float(layer_total)
     for _n, _u, real in savings:
-        cur -= real; vals.append(cur)
-    fig, ax = plt.subplots(figsize=(11, 6.5))
-    ax.bar(range(len(stages)), vals, color=["#1f77b4"] + ["#2ca02c"] * len(savings))
-    for i, v in enumerate(vals):
-        ax.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=8)
+        cur -= real; wf.append(cur)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6.5))
+    # 좌: G2 role distribution (linear, 값+% 라벨이라 작은 role도 가독)
+    ax1.barh([ROLE_EN.get(k, k) for k, _ in items], [v for _, v in items],
+             color=[ROLE_COLORS.get(k, "#888") for k, _ in items])
+    for i, (k, v) in enumerate(items):
+        ax1.text(v, i, f" {v:,} ({100*v/layer_total:.1f}%)", va="center", fontsize=12)
+    ax1.set_xlabel("commands"); ax1.set_xlim(0, max(v for _, v in items) * 1.22)
+    ax1.set_title(f"G2[{tag}]. Role distribution (after SW opt)")
+    # 우: G3 realistic ISA waterfall
+    ax2.bar(range(len(stages)), wf, color=["#1f77b4"] + ["#2ca02c"] * len(savings))
+    for i, v in enumerate(wf):
+        ax2.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=11)
         if i > 0:
-            ax.text(i, v + layer_total * 0.04, f"-{100*(vals[i-1]-v)/layer_total:.1f}%", ha="center", va="bottom", fontsize=8, color="#2ca02c")
-    ax.set_xticks(range(len(stages))); ax.set_xticklabels(stages, rotation=20, ha="right")
-    ax.set_ylabel("remaining commands"); ax.set_ylim(0, layer_total * 1.12)
-    ax.set_title(f"G3[{tag}]. Realistic ISA savings: {layer_total:,} -> {vals[-1]:,.0f} (-{100*(1-vals[-1]/layer_total):.1f}%)")
-    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g3_isa_waterfall_{tag}.png", dpi=120); plt.close()
+            ax2.text(i, v + layer_total * 0.04, f"-{100*(wf[i-1]-v)/layer_total:.1f}%",
+                     ha="center", va="bottom", fontsize=11, color="#2ca02c")
+    ax2.set_xticks(range(len(stages))); ax2.set_xticklabels(stages, rotation=20, ha="right")
+    ax2.set_ylabel("remaining commands"); ax2.set_ylim(0, layer_total * 1.12)
+    ax2.set_title(f"G3[{tag}]. Realistic ISA savings: {layer_total:,} -> {wf[-1]:,.0f} "
+                  f"(-{100*(1-wf[-1]/layer_total):.1f}%)")
+    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g23_role_and_isa_{tag}.png", dpi=120, bbox_inches="tight"); plt.close()
 
-    # G4 useful vs overhead
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
+    # G4 useful vs overhead ("other" 제외) — G4b를 log + linear 두 버전
     oh_tot = layer_total - useful
-    ax1.pie([useful, oh_tot], labels=[f"useful\n{useful:,}", f"overhead\n{oh_tot:,}"], autopct="%1.1f%%",
-            colors=["#2ca02c", "#d62728"], startangle=90); ax1.set_title(f"G4a[{tag}]. Useful vs overhead")
-    oh = {ROLE_EN.get(k, k): v for k, v in by_role.items() if k not in ("mmul", "accum")}
+    oh = {ROLE_EN.get(k, k): v for k, v in by_role.items() if k not in ("mmul", "accum", "untagged")}
     oh = dict(sorted(oh.items(), key=lambda x: -x[1]))
-    ax2.bar(list(oh.keys()), list(oh.values()), color="#d62728"); ax2.set_yscale("log")
-    ax2.set_title(f"G4b[{tag}]. Overhead breakdown"); plt.xticks(rotation=35, ha="right")
-    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g4_useful_vs_overhead_{tag}.png", dpi=120); plt.close()
+    for scale in ("log", "linear"):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
+        ax1.pie([useful, oh_tot], labels=[f"useful\n{useful:,}", f"overhead\n{oh_tot:,}"], autopct="%1.1f%%",
+                colors=["#2ca02c", "#d62728"], startangle=90); ax1.set_title(f"G4a[{tag}]. Useful vs overhead")
+        ax2.bar(list(oh.keys()), list(oh.values()), color="#d62728"); ax2.set_yscale(scale)
+        ax2.set_title(f"G4b[{tag}]. Overhead breakdown ({scale})"); plt.setp(ax2.get_xticklabels(), rotation=35, ha="right")
+        sfx = "" if scale == "log" else "_linear"
+        plt.tight_layout(); plt.savefig(f"{FIGDIR}/g4_useful_vs_overhead_{tag}{sfx}.png", dpi=120); plt.close()
 
-    # G5 share + mix
-    rr = list(reversed(sorted(rows, key=lambda r: -r[3]))); labels = [r[0] for r in rr]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-    shares = [100 * r[3] / layer_total for r in rr]
-    ax1.barh(labels, shares, color="#1f77b4")
-    for i, v in enumerate(shares):
-        ax1.text(v, i, f" {v:.1f}% ({rr[i][3]:,})", va="center", fontsize=8)
-    ax1.set_xlabel("% of layer"); ax1.set_title(f"G5a[{tag}]. Each OP share"); ax1.set_xlim(0, max(shares) * 1.35)
-    bottoms = np.zeros(len(rr))
-    for role in ROLE_ORDER:
-        fr = np.array([100 * r[4].get(role, 0) / r[3] for r in rr], float)
-        if fr.sum() == 0:
-            continue
-        ax2.barh(labels, fr, left=bottoms, color=ROLE_COLORS.get(role), label=ROLE_EN.get(role, role)); bottoms += fr
-    ax2.set_xlim(0, 100); ax2.set_xlabel("% within OP"); ax2.set_title(f"G5b[{tag}]. Role mix per OP (100%)")
-    ax2.legend(fontsize=7, ncol=2, loc="lower right")
-    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g5_share_and_mix_{tag}.png", dpi=120); plt.close()
+    # G5 share + mix (보고서는 prefill만 사용 → prefill에서만 생성)
+    if "prefill" in tag:
+        rr = list(reversed(sorted(rows, key=lambda r: -r[3]))); labels = [r[0] for r in rr]
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+        shares = [100 * r[3] / layer_total for r in rr]
+        ax1.barh(labels, shares, color="#1f77b4")
+        for i, v in enumerate(shares):
+            ax1.text(v, i, f" {v:.1f}% ({rr[i][3]:,})", va="center", fontsize=12)
+        ax1.set_xlabel("% of layer"); ax1.set_title(f"G5a[{tag}]. Each OP share"); ax1.set_xlim(0, max(shares) * 1.35)
+        bottoms = np.zeros(len(rr))
+        for role in ROLES_VIS:
+            fr = np.array([100 * r[4].get(role, 0) / r[3] for r in rr], float)
+            if fr.sum() == 0:
+                continue
+            ax2.barh(labels, fr, left=bottoms, color=ROLE_COLORS.get(role), label=ROLE_EN.get(role, role)); bottoms += fr
+        ax2.set_xlim(0, 100); ax2.set_xlabel("% within OP"); ax2.set_title(f"G5b[{tag}]. Role mix per OP (100%)")
+        ax2.legend(fontsize=12, ncol=5, loc="upper center", bbox_to_anchor=(0.5, -0.10))
+        plt.tight_layout(); plt.savefig(f"{FIGDIR}/g5_share_and_mix_{tag}.png", dpi=120, bbox_inches="tight"); plt.close()
 
 
 def compare_graph(pf, dc):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
     names = ["prefill (S=128)", "decode (M=1)"]; pt = [pf["per_token"], dc["per_token"]]
-    ax1.bar(names, pt, color=["#1f77b4", "#d62728"]); ax1.set_yscale("log")
-    for i, v in enumerate(pt):
-        ax1.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
-    ax1.set_ylabel("commands PER TOKEN"); ax1.set_title(f"G6. Commands/token ({pt[1]/pt[0]:.0f}x for decode) [real HF]")
     uf = [100 * pf["useful"] / pf["layer_total"], 100 * dc["useful"] / dc["layer_total"]]
-    ax2.bar(names, uf, color="#2ca02c")
-    for i, v in enumerate(uf):
-        ax2.text(i, v, f"{v:.1f}%", ha="center", va="bottom", fontsize=9)
-    ax2.set_ylabel("useful %"); ax2.set_title("G6b. Useful-compute share")
-    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g6_prefill_vs_decode_hf.png", dpi=120); plt.close()
+    for scale in ("log", "linear"):                       # G6a를 log + linear 두 버전
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
+        ax1.bar(names, pt, color=["#1f77b4", "#d62728"]); ax1.set_yscale(scale)
+        for i, v in enumerate(pt):
+            ax1.text(i, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=13)
+        ax1.set_ylabel("commands PER TOKEN")
+        ax1.set_title(f"G6. Commands/token ({pt[1]/pt[0]:.0f}x for decode, {scale}) [real HF]")
+        ax2.bar(names, uf, color="#2ca02c")
+        for i, v in enumerate(uf):
+            ax2.text(i, v, f"{v:.1f}%", ha="center", va="bottom", fontsize=13)
+        ax2.set_ylabel("useful %"); ax2.set_title("G6b. Useful-compute share")
+        sfx = "" if scale == "log" else "_linear"
+        plt.tight_layout(); plt.savefig(f"{FIGDIR}/g6_prefill_vs_decode_hf{sfx}.png", dpi=120); plt.close()
 
 
-def pack_compare_graph(pf_b, pf_a, dc_b, dc_a):
-    """G7: weight pre-packing 효과 — 전/후 총 명령 + gather + 유효비율."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
-    grp = ["prefill\nbefore", "prefill\nafter", "decode\nbefore", "decode\nafter"]
-    tot = [pf_b["layer_total"], pf_a["layer_total"], dc_b["layer_total"], dc_a["layer_total"]]
-    gat = [s["by_role"].get("gather", 0) for s in (pf_b, pf_a, dc_b, dc_a)]
-    x = np.arange(4); w = 0.4
-    ax1.bar(x - w/2, tot, w, label="total commands", color="#1f77b4")
-    ax1.bar(x + w/2, gat, w, label="gather", color="#d62728")
-    for i in range(4):
-        ax1.text(x[i]-w/2, tot[i], f"{tot[i]/1e6:.1f}M", ha="center", va="bottom", fontsize=8)
-    ax1.set_xticks(x); ax1.set_xticklabels(grp); ax1.set_ylabel("commands"); ax1.legend()
-    ax1.set_title("G7a. Weight pre-packing effect (total & gather)")
-    uf = [100*s["useful"]/s["layer_total"] for s in (pf_b, pf_a, dc_b, dc_a)]
-    ax2.bar(x, uf, color=["#9ac","#2ca02c","#9ac","#2ca02c"])
-    for i in range(4):
-        ax2.text(x[i], uf[i], f"{uf[i]:.1f}%", ha="center", va="bottom", fontsize=9)
-    ax2.set_xticks(x); ax2.set_xticklabels(grp); ax2.set_ylabel("useful (matmul+accum) %")
-    ax2.set_title("G7b. Useful-compute share (before vs after pack)")
-    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g7_packing_effect.png", dpi=120); plt.close()
+def pack_compare_graph(pf, dc):
+    """G7: SW 최적화 단계별 효과 — baseline → +pack → +act reuse → +o_proj fuse.
+    pf/dc = (base, packed, reused, best)."""
+    stages = ["baseline", "+weight\npack", "+act\nreuse", "+oproj\nfuse"]
+    n = len(stages)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    x = np.arange(n); w = 0.38
+    for off, (lab, series, c) in [(-w/2, ("prefill", pf, "#1f77b4")), (w/2, ("decode", dc, "#d62728"))]:
+        tot = [s["layer_total"] for s in series]
+        ax1.bar(x + off, tot, w, label=lab, color=c)
+        for i in range(n):
+            ax1.text(x[i] + off, tot[i], f"{tot[i]/1e6:.1f}M", ha="center", va="bottom", fontsize=11)
+    ax1.set_xticks(x); ax1.set_xticklabels(stages); ax1.set_ylabel("total commands")
+    ax1.set_title("G7a. SW optimization steps (total commands)")
+    ax1.legend(loc="upper center", bbox_to_anchor=(0.5, -0.10), ncol=2)
+    for off, (lab, series, c) in [(-w/2, ("prefill", pf, "#1f77b4")), (w/2, ("decode", dc, "#d62728"))]:
+        uf = [100*s["useful"]/s["layer_total"] for s in series]
+        ax2.bar(x + off, uf, w, label=lab, color=c)
+        for i in range(n):
+            ax2.text(x[i] + off, uf[i], f"{uf[i]:.1f}%", ha="center", va="bottom", fontsize=11)
+    ax2.set_xticks(x); ax2.set_xticklabels(stages); ax2.set_ylabel("useful (matmul+accum) %")
+    ax2.set_title("G7b. Useful-compute share")
+    ax2.legend(loc="upper center", bbox_to_anchor=(0.5, -0.10), ncol=2)
+    plt.tight_layout(); plt.savefig(f"{FIGDIR}/g7_packing_effect.png", dpi=120, bbox_inches="tight"); plt.close()
 
 
 def main():
@@ -304,26 +326,29 @@ def main():
     xt = torch.randn(S, D) * 0.3
     ct = torch.tensor(cos, dtype=torch.float32); stt = torch.tensor(sin, dtype=torch.float32)
     mk = torch.tensor(LG.causal_mask(S), dtype=torch.float32)
-    pf_b, pf_a = run_mode("prefill", PrefillLayer().eval(), (xt, ct, stt, mk), ntokens=S)
+    pf = run_mode("prefill", PrefillLayer().eval(), (xt, ct, stt, mk), ntokens=S)   # (base,pack,reuse,best)
     cos1, sin1, _ = LG.rope_tables(1, HD, base=500000.0, llama3_scaling=True)
     xd = torch.randn(1, D) * 0.3
     c1 = torch.tensor(cos1, dtype=torch.float32); s1 = torch.tensor(sin1, dtype=torch.float32)
     Kc = tuple(torch.randn(L, HD) * 0.1 for _ in range(KV))
     Vc = tuple(torch.randn(L, HD) * 0.1 for _ in range(KV))
-    dc_b, dc_a = run_mode("decode", DecodeLayer().eval(), (xd, c1, s1, Kc, Vc), ntokens=1)
-    compare_graph(pf_a, dc_a)
-    pack_compare_graph(pf_b, pf_a, dc_b, dc_a)
-    print("\n== weight packing 전/후 ==")
-    for nm, b, a in [("prefill", pf_b, pf_a), ("decode", dc_b, dc_a)]:
-        print(f"  {nm}: 총 {b['layer_total']:,} -> {a['layer_total']:,} "
-              f"(-{100*(1-a['layer_total']/b['layer_total']):.1f}%);  "
-              f"유효 {100*b['useful']/b['layer_total']:.1f}% -> {100*a['useful']/a['layer_total']:.1f}%")
-    print("\n== AFTER-pack per-OP (prefill) ==")
-    for r in sorted(pf_a["rows"], key=lambda r: -r[3]):
-        print(f"  {r[0]:<26} {r[3]:>10,}  ({100*r[3]/pf_a['layer_total']:.1f}%)")
-    print("\n== AFTER-pack per-OP (decode) ==")
-    for r in sorted(dc_a["rows"], key=lambda r: -r[3]):
-        print(f"  {r[0]:<26} {r[3]:>10,}  ({100*r[3]/dc_a['layer_total']:.1f}%)")
+    dc = run_mode("decode", DecodeLayer().eval(), (xd, c1, s1, Kc, Vc), ntokens=1)
+    compare_graph(pf[-1], dc[-1])         # G6: final(=+pack+reuse+fuse)
+    pack_compare_graph(pf, dc)            # G7: baseline→+pack→+reuse→+oproj fuse 4단계
+    print("\n== SW 최적화 단계별 (baseline → +pack → +reuse → +oproj fuse) ==")
+    for nm, t in [("prefill", pf), ("decode", dc)]:
+        b, p, r, f = t
+        tot = lambda s: s['layer_total']
+        print(f"  {nm}: {tot(b):,} → +pack {tot(p):,} (-{100*(1-tot(p)/tot(b)):.1f}%)"
+              f" → +reuse {tot(r):,} (-{100*(1-tot(r)/tot(b)):.1f}%)"
+              f" → +fuse {tot(f):,} (전체 -{100*(1-tot(f)/tot(b)):.1f}%); 유효 "
+              f"{100*b['useful']/tot(b):.1f}%→{100*f['useful']/tot(f):.1f}%")
+    print("\n== final(+oproj fuse) per-OP (prefill) ==")
+    for r in sorted(pf[-1]["rows"], key=lambda r: -r[3]):
+        print(f"  {r[0]:<26} {r[3]:>10,}  ({100*r[3]/pf[-1]['layer_total']:.1f}%)")
+    print("\n== final(+oproj fuse) per-OP (decode) ==")
+    for r in sorted(dc[-1]["rows"], key=lambda r: -r[3]):
+        print(f"  {r[0]:<26} {r[3]:>10,}  ({100*r[3]/dc[-1]['layer_total']:.1f}%)")
     print(f"\nfigs -> {FIGDIR}")
 
 

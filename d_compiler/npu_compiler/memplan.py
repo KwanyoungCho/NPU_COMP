@@ -88,10 +88,18 @@ def _packable(c):
     return len(shp) == 2 and shp[0] % 64 == 0 and shp[1] % 64 == 0
 
 
-def plan(func, pack=True):
+def plan(func, pack=True, pack_params=False):
     """Plan a Relax function: assign G-buffer offsets to params, constants, and
-    every binding var. Returns a MemPlan. Assumes one dataflow block returning a Var."""
+    every binding var. Returns a MemPlan. Assumes one dataflow block returning a Var.
+
+    pack=True        : pre-pack matmul weight CONSTANTS (tile-blocked) — automatic.
+    pack_params=True : ALSO mark matmul weight PARAMS (name starts 'W', static model
+                       weights) as packed. The param's byte-size is unchanged (same
+                       K*N); only packed_meta is recorded so codegen reads it packed
+                       (no gather) and run_compiled packs the fed data. Cache params
+                       (Kt*/Vc*, filled at runtime) are NOT weights -> not packed."""
     mp = MemPlan()
+    param_set = set(func.params)
     for p in func.params:
         mp.params.append(p)
         mp.alloc(p)
@@ -120,6 +128,10 @@ def plan(func, pack=True):
                             mp.alloc_const_packed(arg)        # weight pre-packing (tile-blocked)
                         else:
                             mp.alloc_const(arg, broadcast_to=bsh)
+                    elif (pack_params and opname == "relax.matmul" and idx == 1
+                          and arg in param_set and arg not in mp.packed_meta
+                          and arg.name_hint.startswith("W") and _packable(arg)):
+                        mp.packed_meta[arg] = int(arg.struct_info.shape[1]) // 64   # static weight param
             mp.alloc(binding.var)
     out = seq.body
     while out in mp.tuple_of:                         # unwrap 1-tuple output

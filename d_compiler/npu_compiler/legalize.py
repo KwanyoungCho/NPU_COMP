@@ -40,8 +40,10 @@ def rms_norm(bb, x, w, seq, d, eps=0.0):
     eps (e.g. 1e-5) added as a constant tensor (immediate can't encode it).
     """
     sq = bb.emit(relax.op.multiply(x, x))                       # [seq,d]
-    ssum = reduce_sum_lastdim(bb, sq, seq, d)                   # [seq,1]
-    mean = bb.emit(relax.op.multiply(ssum, _c(np.full((seq, 1), 1.0 / d))))  # /d
+    # scale by 1/d BEFORE reducing so the running sum stays near mean(x^2): sum(x^2)
+    # over large d (e.g. 3072) otherwise overflows FP16 (max 65504) -> inf -> 0 output.
+    sq = bb.emit(relax.op.multiply(sq, _c(np.full((seq, d), 1.0 / d))))
+    mean = reduce_sum_lastdim(bb, sq, seq, d)                   # = mean(x^2), overflow-safe
     if eps:
         mean = bb.emit(relax.op.add(mean, _c(np.full((seq, 1), eps))))       # + eps
     rms = bb.emit(relax.op.sqrt(mean))                         # [seq,1]
