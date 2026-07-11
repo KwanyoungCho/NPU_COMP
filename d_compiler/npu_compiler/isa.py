@@ -52,12 +52,17 @@ def enc_tile(sel, d1, d2):
     # sel: 0 = first(A), 1 = second(B). d1 -> tA [15:8], d2 -> tB [23:16]
     return ((sel & 1) << 31) | ((d2 & 0xFF) << 16) | ((d1 & 0xFF) << 8) | 0x88
 
-def enc_load(matrix, operand):
-    # operand 0 -> PE_in_1, 1 -> PE_in_2
-    return ((matrix & 1) << 31) | ((operand & 1) << 30) | 0x90
+def enc_load(matrix, operand, strided=0, ncols=0, start=0):
+    # operand 0 -> PE_in_1, 1 -> PE_in_2. strided (0710): [29] enable,
+    # ncols [23:16] = #columns to load, start [15:8] = start column (row-stride
+    # = matrix width) -> loads a strided column-block tile directly (no gather).
+    return (((matrix & 1) << 31) | ((operand & 1) << 30) | ((strided & 1) << 29)
+            | ((ncols & 0xFF) << 16) | ((start & 0xFF) << 8) | 0x90)
 
-def enc_save(matrix):
-    return ((matrix & 1) << 31) | 0x98
+def enc_save(matrix, strided=0, ncols=0, start=0):
+    # strided (0710): [29] enable, ncols [23:16], start col [15:8] (no scatter).
+    return (((matrix & 1) << 31) | ((strided & 1) << 29)
+            | ((ncols & 0xFF) << 16) | ((start & 0xFF) << 8) | 0x98)
 
 # Vector / matrix compute
 def _enc_simple(op, mode, imm):
@@ -87,13 +92,22 @@ def enc_minmax(is_max, mode=VECTOR, imm=0):
 def enc_convert(direction):
     return ((direction & 1) << 31) | 0x13
 
-def _enc_matrix(op, mode, imm, act):
-    return ((mode & 3) << 30) | ((1 if act else 0) << 29) | (_u16(imm) << 8) | (op & 0xFF)
+# ---- 0710 new SIMD ops ----
+def enc_reduce_sum():                    return 0x14            # reduce loaded vector -> scalar sum
+def enc_broadcast(mode=SCALAR, imm=0):   return ((mode & 3) << 30) | (_u16(imm) << 8) | 0x15
+def enc_sign_inv():                      return 0x16            # y = -x
+def enc_copy():                          return 0x17            # memory-to-memory vector copy
+def enc_cossin(is_sin):                  return ((1 if is_sin else 0) << 27) | 0x18   # [27] 0=cos,1=sin
 
-def enc_m_add(mode=VECTOR, imm=0, act=False):  return _enc_matrix(0x40, mode, imm, act)
-def enc_m_sub(mode=VECTOR, imm=0, act=False):  return _enc_matrix(0x41, mode, imm, act)
-def enc_m_mul(mode=VECTOR, imm=0, act=False):  return _enc_matrix(0x42, mode, imm, act)
-def enc_m_move(mode=VECTOR, imm=0, act=False): return _enc_matrix(0x43, mode, imm, act)
+def _enc_matrix(op, mode, imm, act, mac=False):
+    # 0710: matmul carries activation [29] and MAC(C+=A@B) [28].
+    return (((mode & 3) << 30) | ((1 if act else 0) << 29) | ((1 if mac else 0) << 28)
+            | (_u16(imm) << 8) | (op & 0xFF))
+
+def enc_m_add(mode=VECTOR, imm=0, act=False):           return _enc_matrix(0x40, mode, imm, act)
+def enc_m_sub(mode=VECTOR, imm=0, act=False):           return _enc_matrix(0x41, mode, imm, act)
+def enc_m_mul(mode=VECTOR, imm=0, act=False, mac=False): return _enc_matrix(0x42, mode, imm, act, mac)
+def enc_m_move(mode=VECTOR, imm=0, act=False):          return _enc_matrix(0x43, mode, imm, act)
 
 
 # ============================ assembler builder ============================
@@ -134,8 +148,10 @@ class Asm:
         return self._emit(enc_addr_hi(operand, value))
     def vlen(self, n):             return self._emit(enc_vlen(n))
     def tile(self, sel, d1, d2):   return self._emit(enc_tile(sel, d1, d2))
-    def load(self, matrix, operand): return self._emit(enc_load(matrix, operand))
-    def save(self, matrix):        return self._emit(enc_save(matrix))
+    def load(self, matrix, operand, strided=0, ncols=0, start=0):
+        return self._emit(enc_load(matrix, operand, strided, ncols, start))
+    def save(self, matrix, strided=0, ncols=0, start=0):
+        return self._emit(enc_save(matrix, strided, ncols, start))
 
     # vector compute
     def v_add(self, mode=VECTOR, imm=0):     return self._emit(enc_add(mode, imm))
@@ -152,11 +168,18 @@ class Asm:
     def v_min(self, mode=VECTOR, imm=0):     return self._emit(enc_minmax(False, mode, imm))
     def v_max(self, mode=VECTOR, imm=0):     return self._emit(enc_minmax(True, mode, imm))
     def v_convert(self, direction):          return self._emit(enc_convert(direction))
+    # 0710 new SIMD
+    def v_reduce_sum(self):                  return self._emit(enc_reduce_sum())
+    def v_broadcast(self, mode=SCALAR, imm=0): return self._emit(enc_broadcast(mode, imm))
+    def v_sign_inv(self):                    return self._emit(enc_sign_inv())
+    def v_copy(self):                        return self._emit(enc_copy())
+    def v_cos(self):                         return self._emit(enc_cossin(False))
+    def v_sin(self):                         return self._emit(enc_cossin(True))
 
     # matrix compute
     def m_add(self, mode=VECTOR, imm=0, act=False):  return self._emit(enc_m_add(mode, imm, act))
     def m_sub(self, mode=VECTOR, imm=0, act=False):  return self._emit(enc_m_sub(mode, imm, act))
-    def m_mul(self, mode=VECTOR, imm=0, act=False):  return self._emit(enc_m_mul(mode, imm, act))
+    def m_mul(self, mode=VECTOR, imm=0, act=False, mac=False): return self._emit(enc_m_mul(mode, imm, act, mac))
     def m_move(self, mode=VECTOR, imm=0, act=False): return self._emit(enc_m_move(mode, imm, act))
 
     def to_bytes(self):
@@ -185,9 +208,9 @@ def reencode(w):
     if op == 0x88:
         return enc_tile((w >> 31) & 1, (w >> 8) & 0xFF, (w >> 16) & 0xFF)
     if op == 0x90:
-        return enc_load((w >> 31) & 1, (w >> 30) & 1)
+        return enc_load((w >> 31) & 1, (w >> 30) & 1, (w >> 29) & 1, (w >> 16) & 0xFF, (w >> 8) & 0xFF)
     if op == 0x98:
-        return enc_save((w >> 31) & 1)
+        return enc_save((w >> 31) & 1, (w >> 29) & 1, (w >> 16) & 0xFF, (w >> 8) & 0xFF)
     mode = (w >> 30) & 3; imm = (w >> 8) & 0xFFFF
     if op in (0x01, 0x02, 0x0A, 0x0B, 0x0C, 0x0D, 0x11):
         return _enc_simple(op, mode, imm)
@@ -201,8 +224,18 @@ def reencode(w):
         return enc_minmax((w >> 28) & 1, mode, imm)
     if op == 0x13:
         return enc_convert((w >> 31) & 1)
+    if op == 0x14:
+        return enc_reduce_sum()
+    if op == 0x15:
+        return enc_broadcast(mode, imm)
+    if op == 0x16:
+        return enc_sign_inv()
+    if op == 0x17:
+        return enc_copy()
+    if op == 0x18:
+        return enc_cossin((w >> 27) & 1)
     if op in (0x40, 0x41, 0x42, 0x43):
-        return _enc_matrix(op, mode, (w >> 8) & 0xFFFF, (w >> 29) & 1)
+        return _enc_matrix(op, mode, (w >> 8) & 0xFFFF, (w >> 29) & 1, (w >> 28) & 1)
     return None
 
 

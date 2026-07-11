@@ -37,7 +37,7 @@ static inline uint16_t f2h(float x){
 }
 static inline float fp16(float x){ return h2f(f2h(x)); }
 static inline float sigmoid(float x){ return 1.0f/(1.0f+expf(-x)); }
-static inline float act(float x){ return x*x*sigmoid(x); }   // w_act: x^2 * sigmoid(x)
+static inline float act(float x){ return x*sigmoid(x); }   // 0710 standard activation: SiLU = x*sigmoid(x)
 
 int main(int argc, char** argv){
     long maxRun=30, gn=-1, gbufCap=1<<16;
@@ -93,26 +93,47 @@ int main(int argc, char** argv){
             if(hi) bhi[o]=v; else blo[o]=v; }
         else if(op==0x82){ vlen=(instr>>8)&0xFFFF; }
         else if(op==0x88){ int m=(instr>>31)&1; tA[m]=(instr>>8)&0xFF; tB[m]=(instr>>16)&0xFF; }
-        else if(op==0x90){ int matrix=(instr>>31)&1, o=(instr>>30)&1; long b=base(o);
-            long n=matrix? tA[o]*tB[o] : vlen;
-            vector<float>& d=(o==0)?pin1:pin2; d.assign(n,0.f);
-            for(long i=0;i<n;i++){ ensureG(b+i); d[i]=G[b+i]; }
+        else if(op==0x90){ int matrix=(instr>>31)&1, o=(instr>>30)&1, strided=(instr>>29)&1; long b=base(o);
+            vector<float>& d=(o==0)?pin1:pin2;
+            if(matrix && strided){    // 0710: load ncols columns [start..] COLUMN-major (= transpose)
+                int ncols=(instr>>16)&0xFF, start=(instr>>8)&0xFF, R0=(int)tA[o], R1=(int)tB[o];
+                d.assign((long)R0*ncols,0.f); long k=0;
+                for(int c=start;c<start+ncols;c++) for(int r=0;r<R0;r++){ long g=b+(long)r*R1+c; ensureG(g); d[k++]=G[g]; }
+            } else {
+                long n=matrix? tA[o]*tB[o] : vlen; d.assign(n,0.f);
+                for(long i=0;i<n;i++){ ensureG(b+i); d[i]=G[b+i]; }
+            }
             const char* lbl=(o==0)?"PE_in_data_1_array :  ":"PE_in_data_2_array :  ";
-            for(long i=0;i<n;i++) cout<<lbl<<d[i]<<"\n"; }
-        else if(op==0x98){ long b=base(2),n=(long)pout.size();
-            for(long i=0;i<n;i++){ ensureG(b+i); G[b+i]=fp16(pout[i]); }   // FP16 round on store
-            for(long i=0;i<n;i++) cout<<"PE_out_array :  "<<pout[i]<<"\n"; }
+            for(size_t i=0;i<d.size();i++) cout<<lbl<<d[i]<<"\n"; }
+        else if(op==0x98){ int strided=(instr>>29)&1; long b=base(2);
+            if(strided){              // 0710: write pout (COLUMN-major) into dest columns [start..]
+                int ncols=(instr>>16)&0xFF, start=(instr>>8)&0xFF, R0=(int)tA[0], Wd=(int)tB[0];
+                for(int c=0;c<ncols;c++) for(int r=0;r<R0;r++){ long g=b+(long)r*Wd+(start+c); ensureG(g); G[g]=fp16(pout[(long)c*R0+r]); }
+            } else {
+                for(long i=0;i<(long)pout.size();i++){ ensureG(b+i); G[b+i]=fp16(pout[i]); }   // FP16 round on store
+            }
+            for(size_t i=0;i<pout.size();i++) cout<<"PE_out_array :  "<<pout[i]<<"\n"; }
+        else if(op==0x14){ // 0710 reduce-sum: pout = [ sum(pin1) ]
+            float s=0; for(float x:pin1) s+=x; pout.assign(1,s); emit(pout); }
+        else if(op==0x15){ // 0710 broadcast: fill vlen with scalar/immediate
+            int cst=(instr>>8)&0xFFFF; float val=(mode==0)?(float)(int16_t)cst:(float)cst;
+            pout.assign(vlen,val); emit(pout); }
+        else if(op==0x18){ // 0710 cos/sin
+            int fn=(instr>>27)&1; pout.assign((long)pin1.size(),0.f);
+            for(size_t i=0;i<pin1.size();i++) pout[i]= fn? sinf(pin1[i]) : cosf(pin1[i]);
+            emit(pout); }
         else { // ---- compute (float32 internally; FP16 only at store) ----
             bool matrix = (op>=0x40 && op<=0x43);
             int cst=(instr>>8)&0xFFFF;
             auto B=[&](long i)->float{ return (mode==2)? pin2[i] : (float)cst; };
             if(matrix && op==0x42 && mode==2){          // real matrix multiply
-                long rA=tA[0],cA=tB[0],cB=tB[1]; pout.assign(rA*cB,0.f);
+                long rA=tA[0],cA=tB[0],cB=tB[1]; bool mac=(instr>>28)&1;   // 0710: MAC (C += A@B)
+                if(!mac || (long)pout.size()!=rA*cB) pout.assign(rA*cB,0.f);
                 for(long i=0;i<rA;i++)for(long j=0;j<cB;j++){ float a=0;
-                    for(long k=0;k<cA;k++) a+=pin1[i*cA+k]*pin2[k*cB+j]; pout[i*cB+j]=a; }
+                    for(long k=0;k<cA;k++) a+=pin1[i*cA+k]*pin2[k*cB+j]; pout[i*cB+j]+=a; }
                 if(actf) for(auto&v:pout) v=act(v);
             } else {
-                long n = matrix ? tA[0]*tB[0] : vlen;
+                long n = matrix ? (long)pin1.size() : vlen;   // strided-aware (loaded tile size)
                 if((long)pout.size()!=n) pout.assign(n,0.f);
                 for(long i=0;i<n;i++){
                     float a=pin1[i], r=a;
@@ -128,6 +149,8 @@ int main(int argc, char** argv){
                         case 0x11: r=(a==B(i))?1.f:0.f; break;
                         case 0x12: { float b=B(i); int mx=(instr>>28)&1; r=mx?(a>b?a:b):(a<b?a:b);} break;
                         case 0x13: r=(float)(long)a; break;
+                        case 0x16: r=-a; break;                 // 0710 sign inversion
+                        case 0x17: r=a; break;                  // 0710 vector copy
                         case 0x09: { int16_t s=(int16_t)cst; if(mode==2) s=(int16_t)(int)pin2[i];
                                      r=a*powf(2.f,(float)s);} break;
                         case 0x08: { int sub=(instr>>27)&0x7; long ia=(long)a, ib=(long)B(i);
