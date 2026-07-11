@@ -256,6 +256,41 @@ float32 누산, 저장 시에만 반올림) 테스트 레퍼런스 `tiled_fp16_r
 
 ---
 
+## 7.7 Phase 3 — 재측정(3B 실제 커널) & 최적화 재평가
+
+`analyze_kernels.py`로 **3B 실제 생성 커널**(kv_proj·attn_ffn·prefill layer·lm_head,
+packed·fused·reuse·전치캐시)을 재컴파일해 role별 명령 분해를 측정했다.
+
+**Prefill layer(S=128), 총 14,818,383 cmds — useful(mmul+accum) 5.7% / overhead 94.3%**
+
+| role | 명령 수 | 비중 | 비고 |
+|---|---:|---:|---|
+| gather | 13,058,048 | **88.1%** | ← 지배적 |
+| mmul+accum(useful) | 840,544 | 5.7% | |
+| scatter | 606,208 | 4.1% | |
+| broadcast | 203,514 | 1.4% | col-broadcast(ones-matmul) |
+| reduce | 63,608 | 0.4% | native reduce-sum/max |
+| **transpose** | **16,672** | **0.1%** | ← strided load로 흡수(과거 최대 병목) |
+| layout/elementwise | ~30k | 0.2% | |
+
+lm_head: gather **94.9%**, useful 3.1%. decode step(/layer): useful 3.1%.
+
+**핵심 결론 — 병목이 이동했다**:
+- **2a/2b 재타겟이 비-matmul 오버헤드를 사실상 제거**: transpose 0.1%, reduce 0.4%,
+  broadcast 1.4%, SiLU는 matmul 밖 elementwise가 1 pass로. 과거 "transpose가 K^T에서
+  프로그램의 수백 %" 추정은 이제 **0.1%**.
+- **이제 유일한 지배 오버헤드는 gather(88~95%)**. MAC이 명령수를 못 줄인 것도 이 때문
+  (gather가 mmul·accum보다 훨씬 큼). **strided load/save는 전치 전용이라 행-major gather를
+  못 없앤다** → gather 제거가 다음 최대 과제(활성화 타일 상주/재사용 강화, 혹은 HW의
+  행-major strided 지원 요청).
+
+**최적화 재평가(측정 기반)**:
+- **가중치 패킹**: B-gather 제거용 → gather가 여전히 지배적이므로 **유지 필수**.
+- **O-proj 융합**(scatter 4.1%)·**전치 KV캐시**(decode K^T 회피)·**활성화 gather 재사용**:
+  **유지**. 이들은 gather/scatter를 직접 겨냥 → 새 ISA로도 대체 불가(전치-전용 한계).
+
+---
+
 ## 8. 결론
 
 - **Phase 1(우리 소스 반영) 완료·검증**: `isa.py`·`mysim.cpp`가 새 ISA를 지원하고,
@@ -263,8 +298,11 @@ float32 누산, 저장 시에만 반올림) 테스트 레퍼런스 `tiled_fp16_r
 - **Phase 2 완료·검증**: (2a) reduce-sum·transpose·row-broadcast 네이티브 + stable
   softmax(reduce-max는 vector-max fold 우회); (2b) K-accum **MAC 비트**, 활성화 **native SiLU**.
   전체 테스트·byte-exact(63/63) 통과, 3B vs torch rel≤0.0031, decode 토큰열 불변.
+- **Phase 3 재측정**: 재타겟이 transpose/reduce/broadcast/activation 오버헤드를 **거의 소거**
+  (각 ≤1.4%). 3B prefill layer useful 5.7%, **gather 88.1%** — **병목이 gather로 단일화**.
 - **핵심 교훈들**:
   1) native broadcast(0x15) SCALAR 소스는 **16-bit 즉치 주소** → >64K 버퍼 불가(col-broadcast는 ones-matmul 유지).
   2) strided load/save는 **전치(열-major) 전용** → 행-major gather/scatter 대체 불가(K^T에만 유효).
-  3) **비용은 gather가 지배** → MAC 명령수 이득 미미. **진짜 레버 = gather 제거**(가중치 패킹 유지 가치 확인).
-- 남는 순수 SW 과제: **명령 수 최소화(HW 루프 부재)**, gather 제거(strided는 전치뿐이라 별도 방안 필요).
+  3) **비용은 gather가 지배(88~95%)** → MAC 명령수 이득 미미. **진짜 레버 = gather 제거**.
+- 남는 과제: **gather 제거**(활성화 타일 상주/재사용, 혹은 HW 행-major strided 요청) +
+  **명령 수 최소화(HW 루프 부재)**. 가중치 패킹·O-proj 융합·전치 캐시는 gather/scatter 직격이라 **유지**.
