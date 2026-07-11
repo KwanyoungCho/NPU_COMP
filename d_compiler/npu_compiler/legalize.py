@@ -140,16 +140,11 @@ def attention_singlehead_causal(bb, q, k, v, seq, hd):
 
 
 def silu(bb, z, rows, cols):
-    """SiLU(z) = z * sigmoid(z) = z / (1 + exp(-z)).  z is [rows,cols].
-    HW activation (x^2*sigmoid) is unusable, so build from exp/add/div/mul.
-    negate via zeros-subtract; +1 via ones-add; reciprocal via ones-divide."""
-    zeros = _c(np.zeros((rows, cols)))
-    ones = _c(np.ones((rows, cols)))
-    neg = bb.emit(relax.op.subtract(zeros, z))                 # -z
-    den = bb.emit(relax.op.exp(neg))                           # exp(-z)
-    den = bb.emit(relax.op.add(den, ones))                     # 1+exp(-z)
-    sig = bb.emit(relax.op.divide(ones, den))                  # sigmoid(z)
-    return bb.emit(relax.op.multiply(z, sig))                  # z*sigmoid(z)
+    """SiLU(z) = z * sigmoid(z).  z is [rows,cols].
+    0710: the standard HW activation IS SiLU, exposed on any matrix op's
+    activation bit — codegen lowers relax.nn.silu to a single m_add(+0, act=SiLU)
+    per chunk, replacing the old 5-op exp/add/div/mul decomposition."""
+    return bb.emit(relax.op.nn.silu(z))
 
 
 def swiglu(bb, x, Wg, Wu, Wd, seq, d, f):

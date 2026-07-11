@@ -361,7 +361,9 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
 
     EW2 = {"relax.add": a.v_add, "relax.subtract": a.v_sub,
            "relax.multiply": a.v_mul, "relax.divide": a.v_div}
-    EW1 = {"relax.sqrt": a.v_sqrt, "relax.exp": a.v_exp}
+    # SiLU: 0710 native activation on a matrix op (m_add(+0) with act bit = SiLU)
+    EW1 = {"relax.sqrt": a.v_sqrt, "relax.exp": a.v_exp,
+           "relax.nn.silu": lambda: a.m_add(mode=IMM, imm=0, act=True)}
 
     seq = func.body
     # ---- detect per-head O-proj add-tree: attn = sum_h (ctx_h @ Wo_h) ----------
