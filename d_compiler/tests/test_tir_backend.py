@@ -53,9 +53,9 @@ def make_chain_mod(M, K, N, P):
 def tiled_fp16_ref(A, B, T=64):
     K = A.shape[1]
     C = None
-    for kk in range(0, K, T):
-        part = _fp16(A[:, kk:kk + T].astype(np.float32) @ B[kk:kk + T, :].astype(np.float32))
-        C = part if C is None else _fp16(C + part)
+    for kk in range(0, K, T):                                  # 0710 MAC: f32 accumulate,
+        part = A[:, kk:kk + T].astype(np.float32) @ B[kk:kk + T, :].astype(np.float32)
+        C = _fp16(part) if C is None else _fp16(C + part)      # FP16 round on store only
     return C
 
 

@@ -35,15 +35,16 @@ def make_matmul_mod(M, K, N):
 
 
 def tiled_fp16_ref(A, B, T=64):
-    """Model mysim's tiled execution: each tile partial and each accumulation is
-    rounded to FP16 on save (mysim.cpp stores FP16)."""
+    """Model mysim's tiled execution under the 0710 MAC accumulation: each k-tile
+    accumulates into the PE (float32), and only the running accumulator is stored
+    (FP16-rounded) — the partial is NOT separately rounded (no intermediate save)."""
     M, K = A.shape; _, N = B.shape
     A = A.astype(np.float32); B = B.astype(np.float32)
     C = None
     for kk in range(0, K, T):
         kt = min(T, K - kk)
-        part = _fp16(A[:, kk:kk + kt] @ B[kk:kk + kt, :])     # FP16 round on save
-        C = part if C is None else _fp16(C + part)            # FP16 round on accumulate
+        part = A[:, kk:kk + kt] @ B[kk:kk + kt, :]            # f32 MAC, no partial round
+        C = _fp16(part) if C is None else _fp16(C + part)     # FP16 round on store only
     return C
 
 

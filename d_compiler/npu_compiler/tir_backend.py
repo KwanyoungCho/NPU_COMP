@@ -124,7 +124,6 @@ class _Walker:
         self.env = {}                      # tir Var -> IntImm (current binding)
         self.ana = arith.Analyzer()
         self.verbose = verbose             # learning hook: trace each intrinsic/gather
-        self.sP = mp.scratch_alloc(TILE * TILE)   # matmul partial
         # T1 input-reuse state; gather_cache may be SHARED across matmuls (write-once
         # sources => same (off,stride) = same data) so a shared activation tile (e.g.
         # xn read by all Q/K/V projs) is gathered ONCE for the whole layer.
@@ -264,42 +263,32 @@ class _Walker:
         return dst
 
     def emit_acc(self, c, sc, aoff, sa, boff, sb):
-        """C[64,64] += A[64,64] @ B[64,64]  (each save FP16-rounds, matching mysim)."""
+        """C[64,64] += A[64,64] @ B[64,64]. 0710: K-accumulation uses the matmul MAC
+        bit (pout += A@B) instead of a save/load/add round-trip — the running
+        accumulator is copied into pout, then m_mul(mac) adds this k-tile in place.
+        (Each k-tile still FP16-rounds on store; both matmul paths use the identical
+        sequence so direct==tir stays byte-exact.)"""
         a = self.a
         asrc = self._gather_cached(aoff, sa)
         bsrc = self._gather_cached(boff, sb)
         first = c in self.zeroed
         self.zeroed.discard(c)
-        with a.role("mmul"):                          # the real 64x64 matrix multiply
+        if sc == TILE:                               # C contiguous -> accumulate in place
+            acc = c
+        else:                                        # strided C -> contiguous accumulator, scatter at flush
+            if first:
+                self.cbuf[c] = (self.mp.scratch_alloc(TILE * TILE), sc)
+            acc = self.cbuf[c][0]
+        if not first:                                # preload running sum into pout for MAC
+            with a.role("accum"):
+                a.vlen(TILE * TILE)
+                a.addr(SRC1, acc); a.load(0, 0); a.v_copy()
+        with a.role("mmul"):                         # 64x64 matmul (MAC-accumulate if not first)
             a.tile(0, TILE, TILE); a.tile(1, TILE, TILE)
             a.addr(SRC1, asrc); a.load(1, 0)
             a.addr(SRC2, bsrc); a.load(1, 1)
-            a.m_mul(mode=VECTOR)
-        if sc == TILE:                               # C contiguous
-            if first:
-                with a.role("mmul"):
-                    a.addr(DST, c); a.save(1)        # store partial directly (no add)
-            else:
-                with a.role("accum"):                # K-accumulation add
-                    a.addr(DST, self.sP); a.save(1)
-                    a.vlen(TILE * TILE)
-                    a.addr(SRC1, c); a.load(0, 0)
-                    a.addr(SRC2, self.sP); a.load(0, 1); a.v_add(mode=VECTOR)
-                    a.addr(DST, c); a.save(0)
-        else:                                        # strided C: accumulate in a
-            if first:                                # contiguous tile buffer, scatter at flush
-                ctile = self.mp.scratch_alloc(TILE * TILE)
-                self.cbuf[c] = (ctile, sc)
-                with a.role("mmul"):
-                    a.addr(DST, ctile); a.save(1)    # partial -> contiguous accumulator
-            else:
-                ctile = self.cbuf[c][0]
-                with a.role("accum"):
-                    a.addr(DST, self.sP); a.save(1)
-                    a.vlen(TILE * TILE)              # accumulator += partial (one shot)
-                    a.addr(SRC1, ctile); a.load(0, 0)
-                    a.addr(SRC2, self.sP); a.load(0, 1); a.v_add(mode=VECTOR)
-                    a.addr(DST, ctile); a.save(0)
+            a.m_mul(mode=VECTOR, mac=not first)
+            a.addr(DST, acc); a.save(1)
 
     def flush(self):
         """Scatter finished contiguous C-accumulators to their strided locations."""

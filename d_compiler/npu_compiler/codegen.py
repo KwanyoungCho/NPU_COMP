@@ -170,7 +170,6 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
         ax, aw, ac = off[x], off[w], off[dst]
         sA = mp.scratch_alloc(T * T)      # gathered A tile  [mt, kt]
         sB = mp.scratch_alloc(T * T)      # gathered B tile  [kt, nt]
-        sP = mp.scratch_alloc(T * T)      # partial product  [mt, nt]
         sC = mp.scratch_alloc(T * T)      # output-tile accumulator [mt, nt]
 
         for mi in range(0, M, T):                         # output row tiles
@@ -192,18 +191,14 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
                         b_src = aw + kk * N
                     else:
                         copy2d(sB, nt, aw + kk * N + nj, N, kt, nt); b_src = sB
+                    if ti != 0:                       # preload running sum into pout for MAC
+                        a.vlen(mt * nt)
+                        a.addr(SRC1, cdst); a.load(0, 0); a.v_copy()
                     a.tile(0, mt, kt); a.tile(1, kt, nt)
                     a.addr(SRC1, a_src); a.load(1, 0)
                     a.addr(SRC2, b_src); a.load(1, 1)
-                    a.m_mul(mode=VECTOR)
-                    if ti == 0:
-                        a.addr(DST, cdst); a.save(1)      # accumulator = first partial
-                    else:
-                        a.addr(DST, sP); a.save(1)        # partial -> sP (FP16 round)
-                        a.vlen(mt * nt)                   # acc = acc + partial (FP16 round)
-                        a.addr(SRC1, cdst); a.load(0, 0)
-                        a.addr(SRC2, sP); a.load(0, 1); a.v_add(mode=VECTOR)
-                        a.addr(DST, cdst); a.save(0)
+                    a.m_mul(mode=VECTOR, mac=(ti != 0))   # 0710 MAC: acc += A@B in place
+                    a.addr(DST, cdst); a.save(1)
                 # scatter only when the output tile is NOT contiguous (nt<N)
                 if nt != N:
                     copy2d(ac + mi * N + nj, N, sC, nt, mt, nt)
