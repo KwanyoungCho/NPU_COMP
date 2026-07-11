@@ -101,10 +101,15 @@ def rope(bb, q, cos_c, sin_c, rot_c):
     return bb.emit(relax.op.add(a, b))
 
 
-def softmax_lastdim(bb, s, rows, cols):
-    """softmax over last dim of s[rows,cols]. NO max-subtraction (ISA has no
-    reduce-max) -> safe only when scores are small (report.md §6.1).
-    exp -> rowsum(relax.sum) -> broadcast(relax.broadcast_to) -> divide."""
+def softmax_lastdim(bb, s, rows, cols, stable=True):
+    """softmax over last dim of s[rows,cols]. 0710: stable via max-subtraction —
+    reduce-max is still not a native op, so codegen folds it with vector-max
+    (emit_row_max, 0x12) over strided column loads. exp -> rowsum -> broadcast ->
+    divide. stable=False keeps the legacy no-max path (report.md §6.1)."""
+    if stable:
+        m = bb.emit(relax.op.max(s, axis=[-1], keepdims=True))          # [rows,1] row max
+        mb = bb.emit(relax.op.broadcast_to(m, relax.ShapeExpr([rows, cols])))
+        s = bb.emit(relax.op.subtract(s, mb))                          # s - rowmax
     e = bb.emit(relax.op.exp(s))                                # [rows,cols]
     rowsum = bb.emit(relax.op.sum(e, axis=[-1], keepdims=True))  # [rows,1]
     denom = bb.emit(relax.op.broadcast_to(rowsum, relax.ShapeExpr([rows, cols])))  # [rows,cols]

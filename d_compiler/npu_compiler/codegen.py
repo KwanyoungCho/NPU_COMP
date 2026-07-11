@@ -209,71 +209,74 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
                     copy2d(ac + mi * N + nj, N, sC, nt, mt, nt)
 
     def emit_row_sum(dst, src):
-        """Row reduction src[R,C] -> dst[R,1] (sum over last dim). The NPU has no
-        reduce instruction, so the *efficient* lowering on this matrix engine is
-        a ones-matmul: dst = src @ ones[C,1] (degenerate N=1, hardware-legal,
-        no 64x padding -> same m_mul count as a true GEMM's K reduction).
-        This keeps `relax.sum` out of the matmul-the-op path (which is TIR-only)."""
+        """Row reduction src[R,C] -> dst[R,1] (sum over last dim). 0710 ISA has a
+        NATIVE reduce-sum (0x14): for each row, load the contiguous row (C elems)
+        and reduce to one scalar. Replaces the old ones-matmul lowering."""
         R, C = mp.shape[src]
         assert mp.shape[dst][-1] == 1, f"emit_row_sum expects [R,1] dst, got {mp.shape[dst]}"
-        T = tile or 64
         ssrc, sd = off[src], off[dst]
-        ones = mp.scratch_alloc(T)          # ones[kt,1] column, filled once
-        sA = mp.scratch_alloc(T * T)        # gathered A tile
-        sP = mp.scratch_alloc(T)            # partial column [mt,1]
-        a.vlen(T); a.addr(SRC1, ssrc); a.load(0, 0)          # load T valid elems -> pin1
-        a.v_move(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)   # ones = 1.0
-        for mi in range(0, R, T):
-            mt = min(T, R - mi)
-            cdst = sd + mi                                    # dst[R,1]: row mi at +mi
-            for ti, kk in enumerate(range(0, C, T)):
-                kt = min(T, C - kk)
-                if kt == C:
-                    a_src = ssrc + mi * C
-                else:
-                    copy2d(sA, kt, ssrc + mi * C + kk, C, mt, kt); a_src = sA
-                a.tile(0, mt, kt); a.tile(1, kt, 1)          # A[mt,kt] @ ones[kt,1]
-                a.addr(SRC1, a_src); a.load(1, 0)
-                a.addr(SRC2, ones); a.load(1, 1)
-                a.m_mul(mode=VECTOR)                          # -> [mt,1]
-                if ti == 0:
-                    a.addr(DST, cdst); a.save(1)
-                else:
-                    a.addr(DST, sP); a.save(1)               # partial -> sP (FP16 round)
-                    a.vlen(mt)
-                    a.addr(SRC1, cdst); a.load(0, 0)
-                    a.addr(SRC2, sP); a.load(0, 1); a.v_add(mode=VECTOR)
-                    a.addr(DST, cdst); a.save(0)
+        for r in range(R):
+            a.vlen(C)
+            a.addr(SRC1, ssrc + r * C); a.load(0, 0)     # contiguous row [C]
+            a.v_reduce_sum()                              # -> [sum]
+            a.addr(DST, sd + r); a.save(0)                # dst[r,0] = sum
+
+    def emit_row_max(dst, src):
+        """Row reduction src[R,C] -> dst[R,1] (max over last dim). 0710 ISA still has
+        NO reduce-max, so fold it with vector max (0x12 bit[28]): strided-load each
+        column j (all R rows at once, 0710 strided load) and v_max into a running
+        accumulator. O(C) vector-max ops (over R lanes) — not O(R*C). Enables the
+        max-subtraction of a *stable* softmax."""
+        R, C = mp.shape[src]
+        assert mp.shape[dst][-1] == 1, f"emit_row_max expects [R,1] dst, got {mp.shape[dst]}"
+        s0, d0 = off[src], off[dst]
+        acc = mp.scratch_alloc(R)
+        a.tile(0, R, C); a.addr(SRC1, s0)
+        a.load(1, 0, strided=1, ncols=1, start=0)         # pin1 = column 0 [R]
+        a.vlen(R); a.v_copy(); a.addr(DST, acc); a.save(0)  # acc = col0
+        for j in range(1, C):
+            a.tile(0, R, C); a.addr(SRC1, s0)
+            a.load(1, 0, strided=1, ncols=1, start=j)     # pin1 = column j [R]
+            a.vlen(R); a.addr(SRC2, acc); a.load(0, 1)    # pin2 = acc
+            a.v_max(mode=VECTOR)                           # pout = max(colj, acc)
+            a.addr(DST, acc); a.save(0)
+        a.vlen(R); a.addr(SRC1, acc); a.load(0, 0)
+        a.v_copy(); a.addr(DST, d0); a.save(0)             # dst[R,1] = row max
 
     def emit_broadcast(dst, src):
-        """Broadcast src -> dst[R,C], either [R,1]->[R,C] (col) or [1,C]->[R,C]
-        (row). No broadcast instruction either, so lower via ones-matmul (outer
-        product), degenerate K=1: col = src[R,1] @ ones[1,C]; row = ones[R,1] @ src[1,C].
-        Keeps `relax.broadcast_to` out of the matmul-the-op (TIR) path."""
+        """Broadcast src -> dst[R,C].
+        Row-broadcast ([1,C]->[R,C]): replicate the source row via native copy
+        (0x17) — a full-address load, so any offset is fine.
+        Col-broadcast ([R,1]->[R,C]): the 0710 native broadcast (0x15) addresses
+        its scalar source with a 16-bit IMMEDIATE (no set-addr), so it can't reach
+        offsets >64K. A per-row-varying scalar therefore stays on the matrix engine:
+        col[R,1] @ ones[1,C] outer product (full addressing, degenerate K=1)."""
         Rd, Cd = mp.shape[dst]
         sshape = list(mp.shape[src]) + [1, 1]
         sr, sc = sshape[0], sshape[1]
-        T = tile or 64
         ssrc, sd = off[src], off[dst]
         col_bcast = (sc == 1 and sr == Rd)                   # [R,1] -> [R,C]
         row_bcast = (sr == 1 and sc == Cd)                   # [1,C] -> [R,C]
         if not (col_bcast or row_bcast):
             raise CodegenError(f"broadcast {sshape[:2]} -> {[Rd,Cd]} unsupported")
+        if row_bcast:
+            for r in range(Rd):
+                a.vlen(Cd)
+                a.addr(SRC1, ssrc); a.load(0, 0); a.v_copy()  # replicate source row [1,C]
+                a.addr(DST, sd + r * Cd); a.save(0)
+            return
+        # col-broadcast: ones-matmul outer product (full addressing)
+        T = tile or 64
         ones = mp.scratch_alloc(T)
         sP = mp.scratch_alloc(T * T)
-        a.vlen(T); a.addr(SRC1, ssrc); a.load(0, 0)
-        a.v_move(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)   # ones = 1.0
+        a.vlen(T); a.v_move(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)   # ones = 1.0
         for mi in range(0, Rd, T):
             mt = min(T, Rd - mi)
             for nj in range(0, Cd, T):
                 nt = min(T, Cd - nj)
                 a.tile(0, mt, 1); a.tile(1, 1, nt)           # K=1 outer product
-                if col_bcast:
-                    a.addr(SRC1, ssrc + mi); a.load(1, 0)    # src column [mt,1]
-                    a.addr(SRC2, ones); a.load(1, 1)         # ones row  [1,nt]
-                else:
-                    a.addr(SRC1, ones); a.load(1, 0)         # ones col  [mt,1]
-                    a.addr(SRC2, ssrc + nj); a.load(1, 1)    # src row   [1,nt]
+                a.addr(SRC1, ssrc + mi); a.load(1, 0)        # src column [mt,1]
+                a.addr(SRC2, ones); a.load(1, 1)             # ones row  [1,nt]
                 a.m_mul(mode=VECTOR)                          # -> [mt,nt] (= broadcast)
                 if nt == Cd:
                     a.addr(DST, sd + mi * Cd); a.save(1)
@@ -282,20 +285,31 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
                     copy2d(sd + mi * Cd + nj, Cd, sP, nt, mt, nt)
 
     def emit_transpose(dst, src):
-        """2D transpose [R,C]->[C,R] via per-element copy (no transpose/strided ISA).
-        copy = load 1 elem, add immediate 0, save. O(R*C) -> instruction-heavy
-        (this overhead is exactly what we measure for 'is a transpose ISA needed')."""
+        """2D transpose [R,C]->[C,R] via the 0710 native strided load (0x90 bit[29]).
+        A strided load of a [rt,C] block reads columns [0,ct) COLUMN-major, i.e. the
+        transposed block [ct,rt] in row-major order, in ONE instruction (was O(R*C)
+        per-element copies). v_copy moves it pin1->pout; when the tile spans the full
+        src-row dimension (rt==R) the dst block is contiguous (single save)."""
         shp = mp.shape[src]
         if len(shp) != 2:
             raise CodegenError(f"transpose expects 2D, got {shp}")
         R, C = shp
         s0, d0 = off[src], off[dst]
-        for r in range(R):
-            for c in range(C):
-                a.vlen(1)
-                a.addr(SRC1, s0 + r * C + c); a.load(0, 0)
-                a.v_add(mode=IMM, imm=0)                 # identity copy (a + 0)
-                a.addr(DST, d0 + c * R + r); a.save(0)
+        T = tile or 64
+        scr = mp.scratch_alloc(T * T)
+        for ci in range(0, C, T):                        # tile dst rows (= src cols)
+            ct = min(T, C - ci)
+            for ri in range(0, R, T):                    # tile dst cols (= src rows)
+                rt = min(T, R - ri)
+                a.tile(0, rt, C)                         # R0=rt rows read, R1=C src stride
+                a.addr(SRC1, s0 + ri * C + ci)
+                a.load(1, 0, strided=1, ncols=ct, start=0)   # pin1[c*rt+r]=src[ri+r,ci+c]
+                a.vlen(ct * rt); a.v_copy()              # pin1 -> pout (dst block row-major)
+                if rt == R:                              # block = full dst rows -> contiguous
+                    a.addr(DST, d0 + ci * R); a.save(0)
+                else:
+                    a.addr(DST, scr); a.save(0)
+                    copy2d(d0 + ci * R + ri, R, scr, rt, ct, rt)
 
     def emit_strided_slice(dst, call):
         """2D last-axis slice x[:, b:e] -> contiguous dst (per-row copy)."""
@@ -401,6 +415,12 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
                     raise CodegenError(f"sum: only last-axis keepdims supported (axis={axis})")
                 with a.role("reduce"):
                     emit_row_sum(dst, call.args[0])
+            elif name == "relax.max":
+                axis = [int(x) % len(mp.shape[call.args[0]]) for x in call.attrs.axis]
+                if axis != [len(mp.shape[call.args[0]]) - 1]:
+                    raise CodegenError(f"max: only last-axis keepdims supported (axis={axis})")
+                with a.role("reduce"):
+                    emit_row_max(dst, call.args[0])
             elif name == "relax.broadcast_to":
                 with a.role("broadcast"):
                     emit_broadcast(dst, call.args[0])

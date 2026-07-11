@@ -12,7 +12,9 @@
 NPU 하드웨어가 대규모 업데이트(strided load/save, matmul MAC/activation, native
 reduce/broadcast 등)됐고, 그 새 명령어들을 **우리 시뮬레이터·인코더(`isa.py`,
 `mysim.cpp`)에 완벽 반영해 벤더 시뮬레이터와 전체 예제 byte-exact 일치까지 검증**했다
-(Phase 1 완료). 다음은 **컴파일러를 새 ISA로 재타겟**(Phase 2)이다.
+(Phase 1 완료). 이어 **컴파일러 재타겟(Phase 2)** 에서 reduce-sum·transpose·row-broadcast를
+네이티브 명령으로, softmax를 (reduce-max 우회 fold-max 기반) **stable softmax**로 바꿨고,
+전체 테스트·byte-exact 회귀를 통과했다. (§7.5)
 
 ---
 
@@ -180,10 +182,62 @@ emit**하도록 바꾼다. 매핑:
 
 ---
 
+## 7.5 Phase 2 — 진행 상황 (컴파일러 재타겟, 완료분)
+
+계획대로 `codegen.py`/`legalize.py`를 새 명령으로 재타겟했다. **완료·검증된 항목**:
+
+**(a) reduce-sum 네이티브화** — `emit_row_sum`을 ones-matmul → **네이티브 reduce-sum(0x14)**
+로 교체. 행마다 `vlen(C); load(행); v_reduce_sum; save`. RMSNorm의 `mean(x²)`와
+softmax의 rowsum이 이 경로를 탄다.
+
+**(b) transpose 네이티브화** — `emit_transpose`를 per-element 복사(O(R·C)) →
+**strided load(0x90 bit[29])** 로 교체. `[rt,C]` 블록을 열-major로 읽으면 전치 블록
+`[ct,rt]`가 **명령 1개**로 나온다(`v_copy`로 pin1→pout 이동, `rt==R`이면 dst가 연속이라
+save 1회). K^T가 여기서 흡수된다.
+
+**(c) stable softmax + reduce-max 우회** — `softmax_lastdim(stable=True)`로 **max 차감**
+추가. 하드웨어에 **reduce-max가 여전히 없어**, `emit_row_max`를 **vector-max(0x12)
+fold**로 구현: 각 열 j를 strided load로 (전체 R행 동시에) 읽어 running acc에 `v_max`.
+→ O(C) 벡터-max(누산은 R lane 병렬)로, O(R·C) 아님. `s−rowmax`로 exp 오버플로 제거.
+
+**(d) row-broadcast 네이티브화** — `[1,C]→[R,C]`는 **native copy(0x17)** 로 소스 행을
+full-address load 후 복제.
+
+### ★ 중요한 함정 — 네이티브 broadcast의 16-bit 주소 한계
+
+**col-broadcast(`[R,1]→[R,C]`)에 native broadcast(0x15, SCALAR)를 처음 썼다가
+MEDIUM 레이어에서 NaN**이 났다. 원인: **SCALAR 피연산자 주소는 명령의 16-bit
+즉치(immediate) 필드**로 인코딩된다(`cst=(instr>>8)&0xFFFF`). load/save는 set-addr(0x80,
+lo+hi)로 **full 32-bit** 주소를 쓰지만, **scalar-즉치 연산은 하위 64K만** 가리킨다.
+MEDIUM에서 `off[rowmax]=143872 > 65535`라 주소가 잘려 **엉뚱한 값을 broadcast** →
+max 차감이 무력화 → exp 오버플로 → NaN.
+
+→ **결론**: native broadcast(0x15)는 **즉치 상수 채우기**엔 유용하나, 큰 버퍼(>64K)에
+있는 **텐서 값의 per-row broadcast엔 부적합**. col-broadcast는 full-address를 쓰는
+**ones-matmul 외적(col[R,1]@ones[1,C], degenerate K=1)** 으로 유지했다. reduce-sum/
+reduce-max/transpose는 전부 load/save(full-address)만 쓰므로 이 한계와 무관.
+
+### 검증
+- **전체 테스트 통과**: `test_isa/matmul/rmsnorm/swiglu/elementwise/tiling/runtime/layer/
+  tir_backend/import/attention/real_layer/decode(M1~M6)` — MEDIUM/REDUCED 정합, 3B 컴파일 성공.
+- **byte-exact 회귀 유지**: `validate_isa_0710.sh` = **PASS=63 FAIL=0**.
+- NaN 원인(위 함정)은 **디버깅으로 최초 NaN 바인딩(broadcast 출력)까지 추적**해 확정.
+
+### 남은 Phase 2 항목 (미착수)
+- **gather/scatter → strided load/save**, **K-accumulate → matmul MAC 비트**,
+  **활성화 → matmul activation 비트**(SiLU), **RoPE rotate_half → sign-inv+copy(+cos/sin)**.
+  이들은 TIR matmul 백엔드(`tir_backend.py`) 변경이 필요해 별도로 진행한다.
+- 기존 최적화(가중치 패킹·O-proj 융합·전치 캐시) **재측정 후 제거/유지 결정**.
+
+---
+
 ## 8. 결론
 
 - **Phase 1(우리 소스 반영) 완료·검증**: `isa.py`·`mysim.cpp`가 새 ISA를 지원하고,
   벤더 c-model과 **전체 63개 예제 byte-exact 일치**.
-- 새 하드웨어가 우리가 힘들게 만든 SW 우회의 상당수를 **직접 지원**하므로, 다음
-  단계(컴파일러 재타겟)에서 코드가 **더 단순해지고 명령 수가 크게 줄** 전망이다.
-- 남는 순수 SW 과제는 **stable softmax(fold-max)** 와 **명령 수 최소화(HW 루프 부재)**.
+- **Phase 2 일부 완료·검증**: reduce-sum·transpose·row-broadcast 네이티브화 + **stable
+  softmax(reduce-max는 vector-max fold로 우회)**. 전체 테스트·byte-exact 회귀 통과.
+- **얻은 교훈**: native broadcast(0x15)의 SCALAR 소스는 **16-bit 즉치 주소**라 >64K
+  버퍼엔 못 쓴다 → col-broadcast는 full-address ones-matmul 유지. (load/save만 full 32-bit)
+- 남은 Phase 2: gather/scatter→strided, K-accum→MAC, 활성화→matmul act, RoPE→sign-inv
+  (모두 TIR 백엔드 변경). 남는 순수 SW 과제는 **명령 수 최소화(HW 루프 부재)**.
