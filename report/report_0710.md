@@ -223,11 +223,36 @@ reduce-max/transpose는 전부 load/save(full-address)만 쓰므로 이 한계�
 - **byte-exact 회귀 유지**: `validate_isa_0710.sh` = **PASS=63 FAIL=0**.
 - NaN 원인(위 함정)은 **디버깅으로 최초 NaN 바인딩(broadcast 출력)까지 추적**해 확정.
 
-### 남은 Phase 2 항목 (미착수)
-- **gather/scatter → strided load/save**, **K-accumulate → matmul MAC 비트**,
-  **활성화 → matmul activation 비트**(SiLU), **RoPE rotate_half → sign-inv+copy(+cos/sin)**.
-  이들은 TIR matmul 백엔드(`tir_backend.py`) 변경이 필요해 별도로 진행한다.
-- 기존 최적화(가중치 패킹·O-proj 융합·전치 캐시) **재측정 후 제거/유지 결정**.
+## 7.6 Phase 2b — matmul 백엔드 재타겟 (MAC · 활성화) + 아키텍처 한계 규명
+
+**(e) K-accumulate → matmul MAC 비트** — `emit_acc`(TIR) + 직접타일 경로(`emit_matmul`)의
+K-누산을 **save-partial/load/add/save 왕복 → m_mul MAC 비트**(`pout += A@B`)로 교체. 누산기를
+`v_copy`로 pout에 적재한 뒤 이 k-타일을 제자리 누산·1회 저장. **두 경로에 동일 시퀀스**를 써서
+`direct==tir` byte-exact 유지. 수치 계약이 바뀌므로(부분곱을 따로 FP16 반올림하지 않고 PE에서
+float32 누산, 저장 시에만 반올림) 테스트 레퍼런스 `tiled_fp16_ref`도 이 모델로 갱신.
+- ★**중요 발견 — MAC의 명령수 이득은 미미(≈0.1%)**. 3B projection(q_proj 128×3072×128)에서
+  103,712→103,596. 이유: **비용을 지배하는 건 per-tile gather(64행×3op)** 이지 누산이 아니다.
+  MAC의 "풀-K PE 누산(끝에 1회 반올림)"은 **gather가 매 k-타일 pout을 덮어써** 불가 →
+  per-k-타일 MAC(2op/타일 절감)에 그친다. **진짜 레버는 gather 제거**.
+
+**(f) 활성화(SiLU) → native activation** — mysim이 **모든 matrix op에 act 비트 적용**
+(`actf && matrix`)하므로 `m_add(mode=IMM, imm=0, act=True)` = **단일 명령 SiLU**. `legalize.silu`를
+`relax.nn.silu`로, codegen이 이를 native activation으로 lower. 기존 5-op(sub/exp/add/div/mul)
+분해 → **1 pass**. `[128,8192]`에서 **1,025 vs ~5,125 instrs (~5× 감소)**. 3B FFN vs torch rel=0.0031.
+
+### ★ 아키텍처 한계 규명 (적용 불가/보류 항목)
+- **gather/scatter → strided load/save: 적용 불가**. 0710 strided load/save는 **열-major(전치)**
+  전용이다(`d[c*R0+r]`). 우리 gather/scatter는 **행-major 재배치**라 strided로 대체하면 전치가
+  섞여 틀린다. → strided는 **K^T(전치)에만** 유효(2a에서 이미 활용). gather/scatter는 유지.
+- **활성화 matmul 융합(마지막 k-타일에 act)은 보류**. native standalone SiLU(1 pass)로 이득
+  대부분 확보. matmul 최종 k-타일 판별이 walker 구조상 번거로워 잔여 1 pass 절감은 미채택.
+- **RoPE rotate_half → sign-inv+copy: 보류(횡보)**. 현재 [hd,hd] 순열-matmul은 팀이 slice/concat을
+  피하려 **의도적으로 택한** 방식. sign-inv(0x16)+slice+concat은 명령수가 비슷하고 회피했던
+  slice/concat을 다시 들인다 → 명확한 이득 없어 유지.
+
+### 재평가(잠정): 기존 SW 최적화
+- **가중치 패킹**: gather가 여전히 비용 지배 → **유지 가치 큼**(B-gather 제거).
+- **O-proj 융합·전치 KV캐시**: 유지(융합은 scatter 횟수, 전치캐시는 decode K^T 회피). Phase 3에서 재측정.
 
 ---
 
@@ -235,9 +260,11 @@ reduce-max/transpose는 전부 load/save(full-address)만 쓰므로 이 한계�
 
 - **Phase 1(우리 소스 반영) 완료·검증**: `isa.py`·`mysim.cpp`가 새 ISA를 지원하고,
   벤더 c-model과 **전체 63개 예제 byte-exact 일치**.
-- **Phase 2 일부 완료·검증**: reduce-sum·transpose·row-broadcast 네이티브화 + **stable
-  softmax(reduce-max는 vector-max fold로 우회)**. 전체 테스트·byte-exact 회귀 통과.
-- **얻은 교훈**: native broadcast(0x15)의 SCALAR 소스는 **16-bit 즉치 주소**라 >64K
-  버퍼엔 못 쓴다 → col-broadcast는 full-address ones-matmul 유지. (load/save만 full 32-bit)
-- 남은 Phase 2: gather/scatter→strided, K-accum→MAC, 활성화→matmul act, RoPE→sign-inv
-  (모두 TIR 백엔드 변경). 남는 순수 SW 과제는 **명령 수 최소화(HW 루프 부재)**.
+- **Phase 2 완료·검증**: (2a) reduce-sum·transpose·row-broadcast 네이티브 + stable
+  softmax(reduce-max는 vector-max fold 우회); (2b) K-accum **MAC 비트**, 활성화 **native SiLU**.
+  전체 테스트·byte-exact(63/63) 통과, 3B vs torch rel≤0.0031, decode 토큰열 불변.
+- **핵심 교훈들**:
+  1) native broadcast(0x15) SCALAR 소스는 **16-bit 즉치 주소** → >64K 버퍼 불가(col-broadcast는 ones-matmul 유지).
+  2) strided load/save는 **전치(열-major) 전용** → 행-major gather/scatter 대체 불가(K^T에만 유효).
+  3) **비용은 gather가 지배** → MAC 명령수 이득 미미. **진짜 레버 = gather 제거**(가중치 패킹 유지 가치 확인).
+- 남는 순수 SW 과제: **명령 수 최소화(HW 루프 부재)**, gather 제거(strided는 전치뿐이라 별도 방안 필요).
