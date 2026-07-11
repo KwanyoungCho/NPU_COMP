@@ -115,8 +115,9 @@ int main(int argc, char** argv){
             for(size_t i=0;i<pout.size();i++) cout<<"PE_out_array :  "<<pout[i]<<"\n"; }
         else if(op==0x14){ // 0710 reduce-sum: pout = [ sum(pin1) ]
             float s=0; for(float x:pin1) s+=x; pout.assign(1,s); emit(pout); }
-        else if(op==0x15){ // 0710 broadcast: fill vlen with scalar/immediate
-            int cst=(instr>>8)&0xFFFF; float val=(mode==0)?(float)(int16_t)cst:(float)cst;
+        else if(op==0x15){ // 0710 broadcast: fill vlen with scalar(buffer)/immediate
+            int cst=(instr>>8)&0xFFFF;
+            float val=(mode==1)?(ensureG(cst),G[cst]):(float)(int16_t)cst;   // scalar = G[addr]
             pout.assign(vlen,val); emit(pout); }
         else if(op==0x18){ // 0710 cos/sin
             int fn=(instr>>27)&1; pout.assign((long)pin1.size(),0.f);
@@ -125,7 +126,9 @@ int main(int argc, char** argv){
         else { // ---- compute (float32 internally; FP16 only at store) ----
             bool matrix = (op>=0x40 && op<=0x43);
             int cst=(instr>>8)&0xFFFF;
-            auto B=[&](long i)->float{ return (mode==2)? pin2[i] : (float)cst; };
+            // mode: 2=vector(pin2), 1=scalar(buffer G[addr]), 0=immediate(signed 16b)
+            auto B=[&](long i)->float{ if(mode==2) return pin2[i];
+                if(mode==1){ ensureG(cst); return G[cst]; } return (float)(int16_t)cst; };
             if(matrix && op==0x42 && mode==2){          // real matrix multiply
                 long rA=tA[0],cA=tB[0],cB=tB[1]; bool mac=(instr>>28)&1;   // 0710: MAC (C += A@B)
                 if(!mac || (long)pout.size()!=rA*cB) pout.assign(rA*cB,0.f);
