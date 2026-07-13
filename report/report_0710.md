@@ -258,36 +258,39 @@ float32 누산, 저장 시에만 반올림) 테스트 레퍼런스 `tiled_fp16_r
 
 ## 7.7 Phase 3 — 재측정(3B 실제 커널) & 최적화 재평가
 
-`analyze_kernels.py`로 **3B 실제 생성 커널**(kv_proj·attn_ffn·prefill layer·lm_head,
-packed·fused·reuse·전치캐시)을 재컴파일해 role별 명령 분해를 측정했다.
+`analyze_kernels.py`로 3B prefill layer(S=128)를 role별로 분해했다. **주의: 기본
+`analyze_kernels`는 가중치를 패킹하지 않는다(`pack_params=False`)** — 이 경우 가중치
+gather가 껴서 총 14.8M cmds, gather 88.1%로 나온다. 하지만 **실제 생성 경로는 가중치를
+패킹해서 돌린다(`pack_params=True`)**. 두 경우를 모두 측정해 비교한다:
 
-**Prefill layer(S=128), 총 14,818,383 cmds — useful(mmul+accum) 5.7% / overhead 94.3%**
+| | 총 cmds | useful | gather | scatter | broadcast |
+|---|---:|---:|---:|---:|---:|
+| 미패킹(analyze 기본값) | 14,818,383 | 5.7% | 88.1% | 4.1% | 1.4% |
+| **패킹(실제 생성 경로)** | **2,235,471** | **37.6%** | **21.3%** | **27.1%** | **9.1%** |
 
-| role | 명령 수 | 비중 | 비고 |
-|---|---:|---:|---|
-| gather | 13,058,048 | **88.1%** | ← 지배적 |
-| mmul+accum(useful) | 840,544 | 5.7% | |
-| scatter | 606,208 | 4.1% | |
-| broadcast | 203,514 | 1.4% | col-broadcast(ones-matmul) |
-| reduce | 63,608 | 0.4% | native reduce-sum/max |
-| **transpose** | **16,672** | **0.1%** | ← strided load로 흡수(과거 최대 병목) |
-| layout/elementwise | ~30k | 0.2% | |
+→ **가중치 패킹이 총량을 6.6× 줄이고 gather의 대부분(=가중치 gather)을 제거**한다.
+실제로 도는 프로파일에서 useful은 **37.6%**, 남는 오버헤드 순위는:
 
-lm_head: gather **94.9%**, useful 3.1%. decode step(/layer): useful 3.1%.
+| role(패킹) | 비중 | 정체 |
+|---|---:|---|
+| **scatter** | **27.1%** | 출력을 strided 위치로 per-row 기록(전치 KV/헤드 결합) |
+| **gather** | **21.3%** | **활성화(A)** 타일 압축(가중치 gather는 이미 소멸) |
+| broadcast | 9.1% | col-broadcast ones-matmul (RMSNorm scale·softmax denom) |
+| reduce/transpose/layout/ew | ~5% | 전부 native화되어 소액 |
 
-**핵심 결론 — 병목이 이동했다**:
-- **2a/2b 재타겟이 비-matmul 오버헤드를 사실상 제거**: transpose 0.1%, reduce 0.4%,
-  broadcast 1.4%, SiLU는 matmul 밖 elementwise가 1 pass로. 과거 "transpose가 K^T에서
-  프로그램의 수백 %" 추정은 이제 **0.1%**.
-- **이제 유일한 지배 오버헤드는 gather(88~95%)**. MAC이 명령수를 못 줄인 것도 이 때문
-  (gather가 mmul·accum보다 훨씬 큼). **strided load/save는 전치 전용이라 행-major gather를
-  못 없앤다** → gather 제거가 다음 최대 과제(활성화 타일 상주/재사용 강화, 혹은 HW의
-  행-major strided 지원 요청).
+**핵심 결론(정정)**:
+- **2a/2b 재타겟이 비-matmul 오버헤드를 실제로 제거**: transpose 0.7%, reduce 2.8% 등
+  소액. 과거 "transpose가 K^T에서 수백 %" 추정 → 이제 **<1%**.
+- **가중치 gather는 이미 패킹으로 소멸**(88%→sub-percent). 남는 **scatter(27%)+gather(21%)=48%
+  = 행-major strided ↔ 연속 이동**인데, **strided load/save가 전치 전용이라 둘 다 못 없앤다**.
+  이게 최대 잔여 과제이며, **행-major strided HW 모드 하나면 48% 동시 해결**.
+- **broadcast(9.1%)** 는 native broadcast의 16-bit 주소 한계로 ones-matmul 유지 중 →
+  하위 64K stage 또는 HW full-addr broadcast로 개선 여지.
 
 **최적화 재평가(측정 기반)**:
-- **가중치 패킹**: B-gather 제거용 → gather가 여전히 지배적이므로 **유지 필수**.
-- **O-proj 융합**(scatter 4.1%)·**전치 KV캐시**(decode K^T 회피)·**활성화 gather 재사용**:
-  **유지**. 이들은 gather/scatter를 직접 겨냥 → 새 ISA로도 대체 불가(전치-전용 한계).
+- **가중치 패킹**: **필수**(총량 6.6×↓, 가중치 gather 소멸).
+- **O-proj 융합**(scatter↓)·**전치 KV캐시**(decode K^T 회피)·**활성화 gather 재사용**: **유지**.
+  scatter/gather 직격 → 전치-전용 strided로는 대체 불가.
 
 ---
 
@@ -298,11 +301,12 @@ lm_head: gather **94.9%**, useful 3.1%. decode step(/layer): useful 3.1%.
 - **Phase 2 완료·검증**: (2a) reduce-sum·transpose·row-broadcast 네이티브 + stable
   softmax(reduce-max는 vector-max fold 우회); (2b) K-accum **MAC 비트**, 활성화 **native SiLU**.
   전체 테스트·byte-exact(63/63) 통과, 3B vs torch rel≤0.0031, decode 토큰열 불변.
-- **Phase 3 재측정**: 재타겟이 transpose/reduce/broadcast/activation 오버헤드를 **거의 소거**
-  (각 ≤1.4%). 3B prefill layer useful 5.7%, **gather 88.1%** — **병목이 gather로 단일화**.
+- **Phase 3 재측정(패킹 실경로)**: prefill layer **useful 37.6%**, 남는 오버헤드는
+  **scatter 27.1% + gather 21.3%(=행-major strided 이동) + broadcast 9.1%**. 재타겟으로
+  transpose/reduce 등은 <3%로 소멸. (미패킹 측정의 "gather 88%"는 가중치 gather 포함값이라 실경로와 다름)
 - **핵심 교훈들**:
   1) native broadcast(0x15) SCALAR 소스는 **16-bit 즉치 주소** → >64K 버퍼 불가(col-broadcast는 ones-matmul 유지).
-  2) strided load/save는 **전치(열-major) 전용** → 행-major gather/scatter 대체 불가(K^T에만 유효).
-  3) **비용은 gather가 지배(88~95%)** → MAC 명령수 이득 미미. **진짜 레버 = gather 제거**.
-- 남는 과제: **gather 제거**(활성화 타일 상주/재사용, 혹은 HW 행-major strided 요청) +
-  **명령 수 최소화(HW 루프 부재)**. 가중치 패킹·O-proj 융합·전치 캐시는 gather/scatter 직격이라 **유지**.
+  2) strided load/save는 **전치(열-major) 전용** → 행-major **gather/scatter 둘 다** 대체 불가(K^T에만 유효).
+  3) 가중치 gather는 **패킹으로 이미 소멸**. 남은 최대 레버 = **scatter+gather(48%)** = 행-major strided 이동.
+- 남는 과제: **행-major strided HW 모드**(scatter+gather 48% 동시 해결) + broadcast full-addr,
+  그리고 **명령 수 최소화(HW 루프 부재)**. 가중치 패킹·O-proj 융합·전치 캐시는 **유지**.
