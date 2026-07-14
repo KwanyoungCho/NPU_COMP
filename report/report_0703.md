@@ -154,10 +154,10 @@ scatter는 §0.2에서 봤듯 비싼 복사인데, 그걸 넓은 출력에 24번
 - 융합 후 **남은 최대 오버헤드는 K^T transpose**(prefill 30.1%, decode 50.9%) — SW로 못 건드리는 순수 전치. (이게 §3의 decode 설계에서 중요한 힌트가 된다.)
 - **정합성**: 융합은 더하는 순서만 다른 동등 연산. mysim에서 비융합과 ≈1~2 fp16 ULP 일치 확인.
 
-![G7 4단계](figs/g7_packing_effect.png)
+![G7 4단계](figs/prev/g7_packing_effect.png)
 *G7: SW 최적화 4단계 — (좌) 총 명령 19.2M→3.48M(prefill)/15.1M→2.06M(decode), (우) 유효 연산 비율 5.7%→32.4%/3.4%→25.7%.*
 
-![G23 prefill](figs/g23_role_and_isa_hf_prefill.png)
+![G23 prefill](figs/prev/g23_role_and_isa_hf_prefill.png)
 *G23[prefill, 최종]: (좌) 명령 종류 분포 — 융합 후 K^T transpose(30.1%)가 최대, scatter는 15.5%로 감소. (우) 새 ISA 6종 추가 시 절감 waterfall.*
 
 ### 2.5 그래프/코드 정비 (부수 작업)
@@ -375,10 +375,10 @@ V는 `Vc[MAX, HD]`로 저장하고 새 토큰은 **행 추가**(`Vc[pos, :] = v_
 
 **토큰당 비용: 437,409,244 → 35,837,404 (−91.8%)** — decode 레이어(kv+attn) 13.7M→1.16M/층, lm_head 52.5M→3.24M.
 
-![G8 packing effect](figs/g8_pack_effect.png)
+![G8 packing effect](figs/prev/g8_pack_effect.png)
 *G8: (좌) 커널별 명령 OFF(빨강)→ON(초록), 로그축. (우) 토큰당 비용 437M→35.8M(**−91.8%**). 새 ISA 없이 SW만으로.*
 
-![G9 packing role composition](figs/g9_pack_roles.png)
+![G9 packing role composition](figs/prev/g9_pack_roles.png)
 *G9: 커널별 명령 구성 OFF vs ON. 빨강(gather)이 93~94%→1~34%로 붕괴하고, 초록(useful)·보라(K-accumulate)·주황(scatter)이 드러남 — 이들이 다음 타깃(§7.4).*
 
 ### 7.4 남은 최적화 (패킹 후, 우선순위)

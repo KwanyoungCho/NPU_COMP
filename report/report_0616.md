@@ -238,7 +238,7 @@ walker는 스케줄 TIR을 **컴파일 타임에 해석**하며 명령을 받아
 | **+활성화 재사용** | 4,596,999 | **−76.1%** | 2,615,057 | **−82.6%** | 24.0% / 19.8% | 8.9% | 36.4% |
 | **+O-proj 융합** | **3,478,647** | **−81.9%** | **2,061,516** | **−86.3%** | **32.4% / 25.7%** | 11.8% | **15.5%** |
 
-![G7](figs/g7_packing_effect.png)
+![G7](figs/prev/g7_packing_effect.png)
 *G7: SW 4단계 — (좌) 총 명령이 19.2M→3.48M(prefill)/15.1M→2.06M(decode), (우) 유효 연산 비율 5.7%→32.4%/3.4%→25.7%. ISA 변경 없이 소프트웨어만으로 달성.*
 
 → 단계별 핵심: **패킹**이 가중치 gather를(78%→37%), **활성화 재사용**이 활성화 gather를(37%→9%), **O-proj 융합**이 scatter를(36%→16%) 무너뜨린다. 3단계 후 남은 최대 비용은 **K^T transpose**(패킹·재사용·융합이 못 건드림).
@@ -269,16 +269,16 @@ walker는 스케줄 TIR을 **컴파일 타임에 해석**하며 명령을 받아
 
 **role 분포(최종)**: **transpose 30.1%**, K-accumulate 19.5%, scatter 15.5%, **matmul(유효) 12.9%**, gather 11.8%, reduce 4.4%, layout 3.8%, broadcast 1.5%, elementwise 0.5%. **유효(matmul+accum) 32.4%**.
 
-![G1 prefill](figs/g1_per_op_hf_prefill.png)
+![G1 prefill](figs/prev/g1_per_op_hf_prefill.png)
 *G1[HF prefill, 최종]: K^T transpose(갈색)가 단일 최대. Q/K/V·O proj는 재사용·융합으로 크게 줄어 상대 비중이 낮아짐.*
 
-![G2+G3 prefill](figs/g23_role_and_isa_hf_prefill.png)
+![G2+G3 prefill](figs/prev/g23_role_and_isa_hf_prefill.png)
 *G2+G3[HF prefill, 최종]: **(좌 G2) 커맨드 종류** — transpose 30.1%, K-accumulate 19.5%, scatter 15.5%, 유효 matmul 12.9%, gather 11.8%(78.2%→11.8% 붕괴). **(우 G3) 그 role을 없애는 ISA 절감** — §6.5 참조(누적 −80.0%).*
 
-![G5 prefill](figs/g5_share_and_mix_hf_prefill.png)
+![G5 prefill](figs/prev/g5_share_and_mix_hf_prefill.png)
 *G5[HF prefill, 최종]: (좌) OP 비중 — K^T transpose·gate/up·down이 상위, O proj는 6위로 하락. (우) OP별 role 구성.*
 
-![G4 prefill](figs/g4_useful_vs_overhead_hf_prefill.png)
+![G4 prefill](figs/prev/g4_useful_vs_overhead_hf_prefill.png)
 *G4[HF prefill, 최종]: 유효 32.4% vs 오버헤드 67.6%.*
 
 ### 6.3 Decode (M=1, L=128, 최종) — 총 2,061,516 명령
@@ -296,14 +296,14 @@ walker는 스케줄 TIR을 **컴파일 타임에 해석**하며 명령을 받아
 **role 분포(최종)**: **transpose 50.9%**, K-accumulate 15.4%, scatter 12.3%, gather 10.7%, **matmul(유효) 10.2%**. **유효 25.7%**.
 **decode 핵심**: SW 최적화 후 **K^T transpose(캐시 `[L,HD]` 전치)가 명령의 절반(50.9%)** — 패킹·재사용·융합이 손대지 못하는 부분. 다음 타깃은 명백히 transpose(전용 ISA 또는 Kᵀ-전치 캐시).
 
-![G1 decode](figs/g1_per_op_hf_decode.png)
-![G2+G3 decode](figs/g23_role_and_isa_hf_decode.png)
-![G4 decode](figs/g4_useful_vs_overhead_hf_decode.png)
+![G1 decode](figs/prev/g1_per_op_hf_decode.png)
+![G2+G3 decode](figs/prev/g23_role_and_isa_hf_decode.png)
+![G4 decode](figs/prev/g4_useful_vs_overhead_hf_decode.png)
 *G1/G2/G4[HF decode, 최종]: K^T transpose가 절반(50.9%), K-accumulate 15.4%·scatter 12.3%·gather 10.7%, 유효 25.7%. (G2+G3 우측 패널 = ISA 절감, §6.5 누적 −89.4%.)*
 
 ### 6.4 Prefill vs Decode — 토큰당 비용 (최종)
 
-![G6](figs/g6_prefill_vs_decode_hf.png)
+![G6](figs/prev/g6_prefill_vs_decode_hf.png)
 *G6[HF, 최종]: (좌) 토큰당 명령 — decode가 prefill의 약 **76배**. (우) 유효 비율 32.4% vs 25.7%.*
 
 | 지표 | prefill (128토큰) | decode (1토큰) |

@@ -294,6 +294,38 @@ gather가 껴서 총 14.8M cmds, gather 88.1%로 나온다. 하지만 **실제 �
 
 ---
 
+## 7.8 반영 전/후 **실측** 비교 (HF 3B prefill layer)
+
+앞의 예측(구 figure G3의 −80% waterfall)이 아니라, **구 ISA로 컴파일한 실측(BEFORE)** 과
+**0710 retarget 반영 후 재컴파일한 실측(AFTER)** 을 **동일 경로(HF import, best 모드=
+pack+reuse+fuse)** 로 직접 대조한다. 두 막대 모두 실측 명령 수다(예측 아님).
+
+![before/after (measured)](figs/0710/g_before_after_hf_prefill.png)
+
+**총계: 3,478,647 → 2,028,699 (−41.7%), useful 32.4% → 41.2%**
+
+| role | BEFORE | AFTER | Δ | 원인 |
+|---|---:|---:|---:|---|
+| transpose (Kᵀ) | 1,048,576 | 16,672 | **−98%** | ✅ strided load 흡수 |
+| reduce (norm/softmax) | 153,716 | 26,624 | **−83%** | ✅ native reduce-sum |
+| matmul core (mmul+accum) | 1,127,712 | 836,832 | **−26%** | ✅ MAC이 K-accum 왕복 제거 |
+| **gather (input)** | 409,600 | 409,600 | **0%** | ❌ 전치-전용 strided로 불가 |
+| **scatter (output)** | 540,672 | 540,672 | **0%** | ❌ 동일 |
+| layout (RoPE) | 131,072 | 131,072 | 0% | RoPE 미변경 |
+| broadcast | 50,496 | 50,424 | ~0 | col은 ones-mm 유지 |
+
+> `mmul`/`accum` 태깅은 MAC 재구성에서 이동(타일 save가 accum→mmul)했으므로 **합산 비교**한다.
+
+**예측 −80% vs 실측 −41.7% — 격차의 정체**:
+- ✅ **transpose −30%** (예측 달성). 실제 절감의 **약 71%가 이 한 항목**에서 나옴 → retarget의 진짜 승리 = **K^T 전치 제거**.
+- ❌ **gather+scatter −27%(예측) → 0%(실측)**: strided load/save가 **전치 전용**이라 행-major 이동을 못 없앰. 격차의 최대 원인.
+- ⚠️ **K-accum −19.5%(예측) → −8%(실측)**: MAC이 왕복은 없앴지만 **누산기 preload용 v_copy**는 매 k-타일 잔존.
+
+→ 이 실측이 **"−80%에 도달하려면 행-major strided HW 모드가 필요하다"** 를 정량적으로 증명한다.
+(BEFORE 그래프 원본은 `figs/prev/g23_role_and_isa_hf_prefill.png` 참조.)
+
+---
+
 ## 8. 결론
 
 - **Phase 1(우리 소스 반영) 완료·검증**: `isa.py`·`mysim.cpp`가 새 ISA를 지원하고,
@@ -304,6 +336,9 @@ gather가 껴서 총 14.8M cmds, gather 88.1%로 나온다. 하지만 **실제 �
 - **Phase 3 재측정(패킹 실경로)**: prefill layer **useful 37.6%**, 남는 오버헤드는
   **scatter 27.1% + gather 21.3%(=행-major strided 이동) + broadcast 9.1%**. 재타겟으로
   transpose/reduce 등은 <3%로 소멸. (미패킹 측정의 "gather 88%"는 가중치 gather 포함값이라 실경로와 다름)
+- **반영 전/후 실측 비교(§7.8)**: HF 3B prefill layer **3,478,647 → 2,028,699 (−41.7%)**,
+  useful 32.4%→41.2%. 절감의 ~71%가 **transpose→strided**. 예측 −80% 미달은 **gather/scatter
+  (−27%)가 전치-전용 strided로 불가**하기 때문 → 정량적으로 **행-major strided HW 필요**를 입증.
 - **핵심 교훈들**:
   1) native broadcast(0x15) SCALAR 소스는 **16-bit 즉치 주소** → >64K 버퍼 불가(col-broadcast는 ones-matmul 유지).
   2) strided load/save는 **전치(열-major) 전용** → 행-major **gather/scatter 둘 다** 대체 불가(K^T에만 유효).
