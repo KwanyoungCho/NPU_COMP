@@ -334,11 +334,12 @@ pack+reuse+fuse)** 로 직접 대조한다. 두 막대 모두 실측 명령 수�
   prefill은 위치 0..S-1을 상수로 굽고, **decode는 `pos`만 런타임 입력**으로 받음 → 미래의
   autonomous decode에서 호스트는 위치 하나만 넘기면 됨. (codegen: negative→sign-inv, cos/sin→0x18)
 
-![rope before/after (measured)](figs/0710/g_rope_before_after.png)
-
 **★ 정직한 실측 결과 — 명령 수는 사실상 불변**(3B prefill layer, packed): **2,235,471 → 2,235,194 (−0.01%)**.
+(이 두 값은 둘 다 *retarget 이후* 상태 — 순열-matmul RoPE vs sign-inv RoPE — 의 격리 비교다. **0710 ISA
+업데이트 전(구 ISA) vs 후(전체 retarget) 비교는 §7.8의 그래프**(`figs/0710/g_before_after_hf_prefill.png`,
+3,478,647 → 2,028,699)를 참조하며, RoPE는 그 retarget에 포함되나 명령 중립이라 총량엔 거의 영향이 없다.)
 
-| role | BEFORE(순열-matmul) | AFTER(sign-inv) | Δ |
+| role | 순열-matmul | sign-inv | Δ |
 |---|---:|---:|---:|
 | gather | 475,136 | 409,600 | −14% |
 | scatter | 606,208 | 540,672 | −11% |

@@ -24,8 +24,10 @@ y = np.arange(len(rows))[::-1]      # top-to-bottom by magnitude
 h = 0.38
 
 fig, ax = plt.subplots(figsize=(12, 6.6))
-b1 = ax.barh(y + h/2, before, h, color="#9e9e9e", label=f"BEFORE (old ISA)  total {TB:,}")
-b2 = ax.barh(y - h/2, after,  h, color="#2ca02c", label=f"AFTER (0710 retarget)  total {TA:,}")
+b1 = ax.barh(y + h/2, before, h, color="#9e9e9e",
+             label=f"BEFORE 0710 ISA update (SW workarounds)  total {TB:,}")
+b2 = ax.barh(y - h/2, after,  h, color="#2ca02c",
+             label=f"AFTER (full 0710 retarget, incl. RoPE)  total {TA:,}")
 
 for i, (bf, af) in enumerate(zip(before, after)):
     yy = y[i]
@@ -38,13 +40,13 @@ for i, (bf, af) in enumerate(zip(before, after)):
 
 ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=11)
 ax.set_xlabel("commands per 3B prefill layer (measured)")
-ax.set_title(f"HF 3B prefill layer — measured BEFORE vs AFTER 0710 retarget\n"
+ax.set_title(f"3B prefill layer — 0710 ISA update: BEFORE (old ISA) vs AFTER (full retarget)\n"
              f"total {TB:,} → {TA:,}  (−{100*(1-TA/TB):.1f}%)  |  useful 32.4% → 41.2%",
              fontsize=13)
-ax.legend(loc="lower right", fontsize=11)
+ax.legend(loc="lower right", fontsize=10)
 ax.set_xlim(0, 1_200_000)
 ax.grid(axis="x", alpha=0.3)
 plt.tight_layout()
-out = "/home/chokwans99/NPU_cmodel/report/figs/g_before_after_hf_prefill.png"
+out = "/home/chokwans99/NPU_cmodel/report/figs/0710/g_before_after_hf_prefill.png"
 plt.savefig(out, dpi=130)
 print("wrote", out)
