@@ -264,7 +264,9 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
         T = tile or 64
         ones = mp.scratch_alloc(T)
         sP = mp.scratch_alloc(T * T)
-        a.vlen(T); a.v_move(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)   # ones = 1.0
+        # ones = 1.0 via native broadcast IMMEDIATE fill (0x15). v_move would read the
+        # (as-yet-unloaded) pin1 -> OOB; broadcast-immediate writes pout without reading pin1.
+        a.vlen(T); a.v_broadcast(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)
         for mi in range(0, Rd, T):
             mt = min(T, Rd - mi)
             for nj in range(0, Cd, T):
@@ -361,9 +363,11 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
 
     EW2 = {"relax.add": a.v_add, "relax.subtract": a.v_sub,
            "relax.multiply": a.v_mul, "relax.divide": a.v_div}
-    # SiLU: 0710 native activation on a matrix op (m_add(+0) with act bit = SiLU)
+    # SiLU: 0710 native activation on a matrix op (m_add(+0) with act bit = SiLU).
+    # negative -> sign-inversion (0x16); cos/sin -> 0x18 (RoPE on-device angle -> cos/sin).
     EW1 = {"relax.sqrt": a.v_sqrt, "relax.exp": a.v_exp,
-           "relax.nn.silu": lambda: a.m_add(mode=IMM, imm=0, act=True)}
+           "relax.nn.silu": lambda: a.m_add(mode=IMM, imm=0, act=True),
+           "relax.negative": a.v_sign_inv, "relax.cos": a.v_cos, "relax.sin": a.v_sin}
 
     seq = func.body
     # ---- detect per-head O-proj add-tree: attn = sum_h (ctx_h @ Wo_h) ----------

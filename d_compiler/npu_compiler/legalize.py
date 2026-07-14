@@ -72,9 +72,9 @@ def _llama3_scale_freqs(freqs, factor=32.0, low=1.0, high=4.0, old_ctx=8192):
 
 
 def rope_tables(seq, hd, base=10000.0, llama3_scaling=False):
-    """Host-precomputed cos/sin tables [seq,hd] (NPU can't do sin/cos) and the
-    rotate_half permutation matrix [hd,hd] (so rotate_half = q @ Rot, no slice/concat).
-    base=500000 + llama3_scaling=True for Llama 3.2."""
+    """Host-precomputed cos/sin tables [seq,hd] and the rotate_half permutation
+    matrix [hd,hd]. Kept for the numpy reference (cos(p*freq) equals the on-device
+    value); the NPU graph now computes cos/sin on-device (rope_cos_sin)."""
     half = hd // 2
     freqs = base ** (-2.0 * np.arange(half) / hd)              # [half]
     if llama3_scaling:
@@ -92,12 +92,38 @@ def rope_tables(seq, hd, base=10000.0, llama3_scaling=False):
     return cos, sin, rot
 
 
-def rope(bb, q, cos_c, sin_c, rot_c):
-    """RoPE: q_embed = q*cos + rotate_half(q)*sin. q is [seq,hd].
-    cos_c/sin_c [seq,hd], rot_c [hd,hd] are shared relax constants."""
-    rh = bb.emit(relax.op.matmul(q, rot_c))                    # rotate_half via perm matrix
-    a = bb.emit(relax.op.multiply(q, cos_c))
-    b = bb.emit(relax.op.multiply(rh, sin_c))
+def rope_freqs_row(hd, base=10000.0, llama3_scaling=False):
+    """Half-duplicated frequency row [1,hd] for on-device RoPE: angle = pos * freqs.
+    Static constant (only `pos` varies at runtime), so decode can feed just the
+    position and the NPU builds cos/sin itself."""
+    half = hd // 2
+    freqs = base ** (-2.0 * np.arange(half) / hd)
+    if llama3_scaling:
+        freqs = _llama3_scale_freqs(freqs)
+    return np.concatenate([freqs, freqs])[None, :]            # [1,hd]
+
+
+def rope_cos_sin(bb, pos_c, freqs_c, seq, hd):
+    """cos/sin computed ON-DEVICE from position (0710 cos/sin, 0x18):
+    angle[seq,hd] = pos[seq,1] * freqs[1,hd] ; then cos(angle), sin(angle).
+    Compute ONCE per layer (position-, not head-, dependent) and share across heads."""
+    pos_b = bb.emit(relax.op.broadcast_to(pos_c, relax.ShapeExpr([seq, hd])))   # [seq,1]->[seq,hd]
+    freq_b = bb.emit(relax.op.broadcast_to(freqs_c, relax.ShapeExpr([seq, hd])))  # [1,hd]->[seq,hd]
+    ang = bb.emit(relax.op.multiply(pos_b, freq_b))
+    return bb.emit(relax.op.cos(ang)), bb.emit(relax.op.sin(ang))
+
+
+def rope(bb, q, cos, sin):
+    """RoPE: q_embed = q*cos + rotate_half(q)*sin. q,cos,sin are [seq,hd].
+    rotate_half via 0710 sign-inversion (0x16) + slice/concat — 3x cheaper than the
+    permutation-matmul (measured), since a matmul by a near-zero perm matrix wastes
+    a gather + dense multiply on what is just a rearrangement."""
+    hd = int(q.struct_info.shape[1]); h = hd // 2
+    q1 = bb.emit(relax.op.strided_slice(q, axes=[1], begin=[0], end=[h]))       # q[:, :h]
+    q2 = bb.emit(relax.op.strided_slice(q, axes=[1], begin=[h], end=[hd]))      # q[:, h:]
+    rh = bb.emit(relax.op.concat([bb.emit(relax.op.negative(q2)), q1], axis=1))  # [-q2, q1]
+    a = bb.emit(relax.op.multiply(q, cos))
+    b = bb.emit(relax.op.multiply(rh, sin))
     return bb.emit(relax.op.add(a, b))
 
 

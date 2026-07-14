@@ -22,7 +22,7 @@ def test_reduced_hybrid_eq_direct():
     cfg = model.REDUCED
     cos, sin, rot = model.rope_tables(cfg)
     W = model.make_weights(cfg, seed=7)
-    mod = model.build_layer_module(cfg, cos, sin, rot)
+    mod = model.build_layer_module(cfg)
     gd = driver.run_module(mod, W, tile=64)
     gh = driver.run_module(mod, W, backend="hybrid")
     assert np.array_equal(gd, gh), "reduced: hybrid != direct"
@@ -37,7 +37,7 @@ def test_medium_hybrid_correct():
     cfg = model.MEDIUM
     cos, sin, rot = model.rope_tables(cfg)
     W = model.make_weights(cfg, seed=3)
-    mod = model.build_layer_module(cfg, cos, sin, rot)
+    mod = model.build_layer_module(cfg)
     gh = driver.run_module(mod, W, backend="hybrid")
     exp = model.ref_layer(cfg, W, cos, sin)
     maxabs = float(np.max(np.abs(exp)))
@@ -72,7 +72,7 @@ def report_3b_cost():
     cfg = model.LLAMA_3_2_3B
     S, D, H, KV, HD, F = cfg.SEQ, cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
     cos, sin, rot = model.rope_tables(cfg)
-    mp_full = memplan.plan(model.build_layer_module(cfg, cos, sin, rot)["main"])
+    mp_full = memplan.plan(model.build_layer_module(cfg)["main"])
     roles = [("q/k/v proj", S, D, HD, H + 2 * KV), ("scores", S, HD, S, H),
              ("ctx", S, S, HD, H), ("o proj", S, HD, D, H),
              ("gate/up", S, D, F, 2), ("down", S, F, D, 1)]

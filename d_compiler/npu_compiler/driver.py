@@ -113,18 +113,19 @@ def generate(cfg, W, X_full, MAX, cos, sin, rot, backend="hybrid", pack_weights=
     f16 = lambda a: np.asarray(a, np.float16)
     outs = []
     for p in range(N):
-        x_new = f16(X_full[p:p + 1]); cosp, sinp = f16(cos[p:p + 1]), f16(sin[p:p + 1])
-        outs.append(_decode_layer(cfg, kv_c, attn_c, W, x_new, Kt, Vc, p, MAX, cosp, sinp))
+        x_new = f16(X_full[p:p + 1])
+        outs.append(_decode_layer(cfg, kv_c, attn_c, W, x_new, Kt, Vc, p, MAX))
     return np.concatenate(outs, axis=0)
 
 
-def _decode_layer(cfg, kv_c, attn_c, W, x, Kt, Vc, p, MAX, cosp, sinp):
+def _decode_layer(cfg, kv_c, attn_c, W, x, Kt, Vc, p, MAX):
     """Run one decoder layer for token at position p using PRECOMPILED kernels
     (kv_c/attn_c = (asm, mp)): project+append K/V, then attention(masked to <=p)+FFN.
-    x[1,D] -> next hidden[1,D]."""
+    x[1,D] -> next hidden[1,D]. RoPE cos/sin are computed on-device from `pos`."""
     HD, KV, H = cfg.HD, cfg.KV, cfg.H
     f16 = lambda a: np.asarray(a, np.float16)
-    ins1 = {"x": x, "Wn1": W["Wn1"], "cos": cosp, "sin": sinp}
+    pos = f16([[p]])                                   # RoPE position -> on-device cos/sin
+    ins1 = {"x": x, "Wn1": W["Wn1"], "pos": pos}
     for k in range(KV):
         ins1[f"Wk{k}"] = W[f"Wk{k}"]; ins1[f"Wv{k}"] = W[f"Wv{k}"]
     o1 = run_compiled(*kv_c, ins1)
@@ -132,7 +133,7 @@ def _decode_layer(cfg, kv_c, attn_c, W, x, Kt, Vc, p, MAX, cosp, sinp):
         Kt[k][:, p] = o1[0, 2 * k * HD:(2 * k + 1) * HD]
         Vc[k][p, :] = o1[0, (2 * k + 1) * HD:(2 * k + 2) * HD]
     mask = np.zeros((1, MAX), np.float16); mask[0, p + 1:] = NEG
-    ins2 = {"x": x, "Wn1": W["Wn1"], "Wn2": W["Wn2"], "cos": cosp, "sin": sinp,
+    ins2 = {"x": x, "Wn1": W["Wn1"], "Wn2": W["Wn2"], "pos": pos,
             "mask": mask, "Wg": W["Wg"], "Wu": W["Wu"], "Wd": W["Wd"]}
     for h in range(H):
         ins2[f"Wq{h}"] = W[f"Wq{h}"]; ins2[f"Wo{h}"] = W[f"Wo{h}"]
@@ -141,25 +142,24 @@ def _decode_layer(cfg, kv_c, attn_c, W, x, Kt, Vc, p, MAX, cosp, sinp):
     return f16(run_compiled(*attn_c, ins2))
 
 
-def _decode_all_layers(cfg, kv_c, attn_c, layer_Ws, Kt, Vc, x, p, MAX, cosp, sinp):
+def _decode_all_layers(cfg, kv_c, attn_c, layer_Ws, Kt, Vc, x, p, MAX):
     """One token through all N decoder layers at position p. x[1,D] -> hidden[1,D]."""
     for l in range(len(layer_Ws)):
-        x = _decode_layer(cfg, kv_c, attn_c, layer_Ws[l], x, Kt[l], Vc[l], p, MAX, cosp, sinp)
+        x = _decode_layer(cfg, kv_c, attn_c, layer_Ws[l], x, Kt[l], Vc[l], p, MAX)
     return x
 
 
-def _batched_prefill(cfg, prefill_c, layer_Ws, top, prompt_ids, Kt, Vc, cos, sin):
+def _batched_prefill(cfg, prefill_c, layer_Ws, top, prompt_ids, Kt, Vc):
     """Run all layers over the whole prompt at once (PRECOMPILED prefill_c, one call
     per layer), seeding every layer's cache (Kk.T -> columns, Vk -> rows) and returning
-    the prompt hidden [P,D]."""
+    the prompt hidden [P,D]. RoPE positions 0..P-1 are baked into the prefill kernel."""
     HD, KV, H, D = cfg.HD, cfg.KV, cfg.H, cfg.D
     P = len(prompt_ids)
     f16 = lambda a: np.asarray(a, np.float16)
     x = f16(top["Wemb"][np.asarray(prompt_ids)])                    # [P,D]
-    cosP, sinP = f16(cos[:P]), f16(sin[:P])
     for l in range(len(layer_Ws)):
         W = layer_Ws[l]
-        ins = {"x": x, "Wn1": W["Wn1"], "Wn2": W["Wn2"], "cos": cosP, "sin": sinP,
+        ins = {"x": x, "Wn1": W["Wn1"], "Wn2": W["Wn2"],
                "Wg": W["Wg"], "Wu": W["Wu"], "Wd": W["Wd"]}
         for h in range(H):
             ins[f"Wq{h}"] = W[f"Wq{h}"]; ins[f"Wo{h}"] = W[f"Wo{h}"]
@@ -207,7 +207,7 @@ def generate_tokens(cfg, layer_Ws, top, prompt_ids, n_gen, MAX, cos, sin, rot,
 
     tokens = list(prompt_ids)
     if batched_prefill:
-        x = _batched_prefill(cfg, prefill_c, layer_Ws, top, prompt_ids, Kt, Vc, cos, sin)
+        x = _batched_prefill(cfg, prefill_c, layer_Ws, top, prompt_ids, Kt, Vc)
         tokens.append(argmax_h(x[-1:]))                            # 1st gen from last prompt hidden
         p = P
     else:
@@ -215,8 +215,7 @@ def generate_tokens(cfg, layer_Ws, top, prompt_ids, n_gen, MAX, cos, sin, rot,
     while len(tokens) < P + n_gen:
         ts = time.time()
         xt = f16(emb[tokens[p]:tokens[p] + 1])                     # [CPU] embedding lookup
-        xt = _decode_all_layers(cfg, kv_c, attn_c, layer_Ws, Kt, Vc, xt, p, MAX,
-                                f16(cos[p:p + 1]), f16(sin[p:p + 1]))
+        xt = _decode_all_layers(cfg, kv_c, attn_c, layer_Ws, Kt, Vc, xt, p, MAX)
         if p >= P - 1:                                             # [NPU] lm_head, [CPU] argmax
             tokens.append(argmax_h(xt))
         if verbose:

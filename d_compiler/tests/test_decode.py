@@ -44,7 +44,7 @@ def _one_step(cfg, MAX, seed=0):
 
     # M2a kv_proj
     Ks, Vs = model.ref_kv_proj(cfg, W, x_new, np.array([pos]), cos, sin, rot)
-    ins = {"x": _f16(x_new), "Wn1": W["Wn1"], "cos": _f16(cos[pos:pos + 1]), "sin": _f16(sin[pos:pos + 1])}
+    ins = {"x": _f16(x_new), "Wn1": W["Wn1"], "pos": _f16([[pos]])}
     for k in range(cfg.KV):
         ins[f"Wk{k}"] = W[f"Wk{k}"]; ins[f"Wv{k}"] = W[f"Wv{k}"]
     o1 = driver.run_module(model.build_kv_proj_module(cfg), ins, backend="hybrid")
@@ -66,7 +66,7 @@ def _one_step(cfg, MAX, seed=0):
     mask = np.zeros((1, MAX), np.float16); mask[0, pos + 1:] = driver.NEG
     y_ref = model.ref_attn_ffn(cfg, W, x_new, cache_f16, np.array([pos]), cos, sin, rot, stable_softmax=False)
     ins = {"x": _f16(x_new), "Wn1": W["Wn1"], "Wn2": W["Wn2"],
-           "cos": _f16(cos[pos:pos + 1]), "sin": _f16(sin[pos:pos + 1]), "mask": mask,
+           "pos": _f16([[pos]]), "mask": mask,
            "Wg": W["Wg"], "Wu": W["Wu"], "Wd": W["Wd"]}
     for h in range(cfg.H):
         ins[f"Wq{h}"] = W[f"Wq{h}"]; ins[f"Wo{h}"] = W[f"Wo{h}"]
@@ -138,7 +138,7 @@ def _batched_prefill_kv(cfg, S, MAX, seed=0):
     rng = np.random.default_rng(seed + 3)
     X = _f16(rng.standard_normal((S, cfg.D))).astype(np.float64)
     Ks, Vs = model.ref_kv_proj(cfg, W, X, np.arange(S), cos, sin, rot)   # numpy, positions 0..S-1
-    ins = {"x": _f16(X), "Wn1": W["Wn1"], "cos": _f16(cos[:S]), "sin": _f16(sin[:S])}
+    ins = {"x": _f16(X), "Wn1": W["Wn1"]}      # RoPE positions 0..S-1 baked into the kernel
     for k in range(cfg.KV):
         ins[f"Wk{k}"] = W[f"Wk{k}"]; ins[f"Wv{k}"] = W[f"Wv{k}"]
     out = driver.run_module(model.build_kv_proj_batched(cfg, S), ins, backend="hybrid")  # [S,2*KV*HD]

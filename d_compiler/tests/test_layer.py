@@ -77,14 +77,14 @@ def build_layer_mod(cos, sin, rot):
             Kt, V = [], []
             for k in range(KV):
                 Kk = bb.emit(op.matmul(xn, Wk[k]))             # [SEQ,HD]
-                Kk = legalize.rope(bb, Kk, cos_c, sin_c, rot_c)
+                Kk = legalize.rope(bb, Kk, cos_c, sin_c)
                 Kt.append(bb.emit(op.permute_dims(Kk, axes=[1, 0])))  # [HD,SEQ]
                 V.append(bb.emit(op.matmul(xn, Wv[k])))        # [SEQ,HD]
             attn = None
             for h in range(H):
                 kv = h // GPK
                 Q = bb.emit(op.matmul(xn, Wq[h]))              # [SEQ,HD]
-                Q = legalize.rope(bb, Q, cos_c, sin_c, rot_c)
+                Q = legalize.rope(bb, Q, cos_c, sin_c)
                 S = bb.emit(op.matmul(Q, Kt[kv]))              # [SEQ,SEQ]
                 S = bb.emit(op.multiply(S, scale_c))
                 S = bb.emit(op.add(S, mask_c))

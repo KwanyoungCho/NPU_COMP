@@ -40,13 +40,14 @@ def _P(name, shape):
     return relax.Var(name, relax.TensorStructInfo(list(shape), "float16"))
 
 
-def _attn_head(bb, xn, Wq_h, Wo_h, Kt_kv, V_kv, scale, mask, cos, sin, rot, qrows, kcols):
+def _attn_head(bb, xn, Wq_h, Wo_h, Kt_kv, V_kv, scale, mask, cos, sin, qrows, kcols):
     """One attention head, shared by prefill and decode builders:
     Q = rope(xn @ Wq); ctx = softmax(Q @ Kt * scale + mask) @ V; out = ctx @ Wo.
     Kt_kv/V_kv are supplied by the caller (prefill computes them from xn; decode
-    passes the KV-cache params), so the per-head body is identical for both."""
+    passes the KV-cache params), so the per-head body is identical for both.
+    cos/sin are shared (computed once per layer via legalize.rope_cos_sin)."""
     op = relax.op
-    Q = legalize.rope(bb, bb.emit(op.matmul(xn, Wq_h)), cos, sin, rot)
+    Q = legalize.rope(bb, bb.emit(op.matmul(xn, Wq_h)), cos, sin)
     S = bb.emit(op.matmul(Q, Kt_kv))
     S = bb.emit(op.multiply(S, scale))
     S = bb.emit(op.add(S, mask))
@@ -73,6 +74,17 @@ def rope_tables(cfg):
                                 llama3_scaling=cfg.rope_scale)
 
 
+def _rope_freqs_c(cfg):
+    """[1,HD] frequency-row constant for on-device RoPE (angle = pos * freqs)."""
+    return _const(legalize.rope_freqs_row(cfg.HD, base=cfg.rope_base,
+                                          llama3_scaling=cfg.rope_scale))
+
+
+def _pos_ramp_c(S):
+    """Baked position column [S,1] = [0,1,...,S-1] for prefill (positions are static)."""
+    return _const(np.arange(S, dtype="float32").reshape(S, 1))
+
+
 def make_weights(cfg, seed=0, ws=0.2):
     rng = np.random.default_rng(seed)
     W = {
@@ -92,7 +104,7 @@ def make_weights(cfg, seed=0, ws=0.2):
     return W
 
 
-def build_layer_module(cfg, cos, sin, rot):
+def build_layer_module(cfg):
     SEQ, D, H, KV, HD, F = cfg.SEQ, cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
     GPK = H // KV
     bb = relax.BlockBuilder()
@@ -108,24 +120,25 @@ def build_layer_module(cfg, cos, sin, rot):
     Wg = P("Wg", (D, F)); Wu = P("Wu", (D, F)); Wd = P("Wd", (F, D))
     params = [x, Wn1, Wn2] + Wq + Wo + Wk + Wv + [Wg, Wu, Wd]
 
-    cos_c, sin_c, rot_c = _const(cos), _const(sin), _const(rot)
+    pos_c = _pos_ramp_c(SEQ); freqs_c = _rope_freqs_c(cfg)   # RoPE: on-device cos/sin from position
     scale_c = _const(np.full((SEQ, SEQ), 1.0 / float(np.sqrt(HD))))
     mask_c = _const(legalize.causal_mask(SEQ))
     op = relax.op
 
     with bb.function("main", params):
         with bb.dataflow():
+            cos_c, sin_c = legalize.rope_cos_sin(bb, pos_c, freqs_c, SEQ, HD)
             xn = legalize.rms_norm(bb, x, Wn1, SEQ, D, eps=cfg.eps)
             Kt, V = [], []
             for k in range(KV):
                 Kk = bb.emit(op.matmul(xn, Wk[k]))
-                Kk = legalize.rope(bb, Kk, cos_c, sin_c, rot_c)
+                Kk = legalize.rope(bb, Kk, cos_c, sin_c)
                 Kt.append(bb.emit(op.permute_dims(Kk, axes=[1, 0])))
                 V.append(bb.emit(op.matmul(xn, Wv[k])))
             attn = None
             for h in range(H):
                 part = _attn_head(bb, xn, Wq[h], Wo[h], Kt[h // GPK], V[h // GPK],
-                                  scale_c, mask_c, cos_c, sin_c, rot_c, SEQ, SEQ)
+                                  scale_c, mask_c, cos_c, sin_c, SEQ, SEQ)
                 attn = part if attn is None else bb.emit(op.add(attn, part))
             y = _residual_ffn(bb, x, attn, Wn2, Wg, Wu, Wd, SEQ, D, F, cfg.eps)
             gv = bb.emit_output(y)
@@ -186,19 +199,20 @@ def build_kv_proj_module(cfg):
     """Decode kernel 1: x_new[1,D] -> concat([K0,V0,K1,V1,...])[1,2*KV*HD] (K roped).
     Host slices the output and writes K into cache column pos, V into row pos."""
     D, KV, HD = cfg.D, cfg.KV, cfg.HD
-    rot_c = _const(legalize.rope_tables(1, HD, base=cfg.rope_base, llama3_scaling=cfg.rope_scale)[2])
+    freqs_c = _rope_freqs_c(cfg)                      # RoPE cos/sin computed on-device from pos
     op = relax.op
     x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D))
     Wk = [_P(f"Wk{k}", (D, HD)) for k in range(KV)]
     Wv = [_P(f"Wv{k}", (D, HD)) for k in range(KV)]
-    cos = _P("cos", (1, HD)); sin = _P("sin", (1, HD))
+    pos = _P("pos", (1, 1))                           # current decode position (runtime)
     bb = relax.BlockBuilder()
-    with bb.function("main", [x, Wn1] + Wk + Wv + [cos, sin]):
+    with bb.function("main", [x, Wn1] + Wk + Wv + [pos]):
         with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
             xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
             outs = []
             for k in range(KV):
-                Kk = legalize.rope(bb, bb.emit(op.matmul(xn, Wk[k])), cos, sin, rot_c)
+                Kk = legalize.rope(bb, bb.emit(op.matmul(xn, Wk[k])), cos, sin)
                 outs += [Kk, bb.emit(op.matmul(xn, Wv[k]))]
             gv = bb.emit_output(bb.emit(op.concat(outs, axis=1)))
         bb.emit_func_output(gv)
@@ -211,19 +225,19 @@ def build_kv_proj_batched(cfg, S):
     0..S-1 — the SAME layout decode reads, so a batched prefill can seed the cache
     that the decode loop continues from. cos/sin are [S,HD] (positions 0..S-1)."""
     D, KV, HD = cfg.D, cfg.KV, cfg.HD
-    rot_c = _const(legalize.rope_tables(1, HD, base=cfg.rope_base, llama3_scaling=cfg.rope_scale)[2])
+    pos_c = _pos_ramp_c(S); freqs_c = _rope_freqs_c(cfg)   # positions 0..S-1 (static) -> on-device cos/sin
     op = relax.op
     x = _P("x", (S, D)); Wn1 = _P("Wn1", (1, D))
     Wk = [_P(f"Wk{k}", (D, HD)) for k in range(KV)]
     Wv = [_P(f"Wv{k}", (D, HD)) for k in range(KV)]
-    cos = _P("cos", (S, HD)); sin = _P("sin", (S, HD))
     bb = relax.BlockBuilder()
-    with bb.function("main", [x, Wn1] + Wk + Wv + [cos, sin]):
+    with bb.function("main", [x, Wn1] + Wk + Wv):
         with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos_c, freqs_c, S, HD)
             xn = rms_norm_(bb, x, Wn1, S, D, cfg.eps)
             outs = []
             for k in range(KV):
-                Kk = legalize.rope(bb, bb.emit(op.matmul(xn, Wk[k])), cos, sin, rot_c)
+                Kk = legalize.rope(bb, bb.emit(op.matmul(xn, Wk[k])), cos, sin)
                 outs += [Kk, bb.emit(op.matmul(xn, Wv[k]))]
             gv = bb.emit_output(bb.emit(op.concat(outs, axis=1)))
         bb.emit_func_output(gv)
@@ -238,7 +252,7 @@ def build_prefill_layer_module(cfg, S):
     just M=S with a causal mask). cos/sin are [S,HD] (positions 0..S-1)."""
     D, H, KV, HD, F = cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
     GPK = H // KV
-    rot_c = _const(legalize.rope_tables(1, HD, base=cfg.rope_base, llama3_scaling=cfg.rope_scale)[2])
+    pos_c = _pos_ramp_c(S); freqs_c = _rope_freqs_c(cfg)   # positions 0..S-1 -> on-device cos/sin
     scale_c = _const(np.full((S, S), 1.0 / float(np.sqrt(HD))))
     mask_c = _const(legalize.causal_mask(S))
     op = relax.op
@@ -247,23 +261,23 @@ def build_prefill_layer_module(cfg, S):
     Wk = [_P(f"Wk{k}", (D, HD)) for k in range(KV)]
     Wv = [_P(f"Wv{k}", (D, HD)) for k in range(KV)]
     Wo = [_P(f"Wo{h}", (HD, D)) for h in range(H)]
-    cos = _P("cos", (S, HD)); sin = _P("sin", (S, HD))
     Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
-    params = [x, Wn1, Wn2] + Wq + Wk + Wv + Wo + [cos, sin, Wg, Wu, Wd]
+    params = [x, Wn1, Wn2] + Wq + Wk + Wv + Wo + [Wg, Wu, Wd]
     bb = relax.BlockBuilder()
     with bb.function("main", params):
         with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos_c, freqs_c, S, HD)
             xn = rms_norm_(bb, x, Wn1, S, D, cfg.eps)
             Kk_list, Kt, V = [], [], []
             for k in range(KV):
-                Kk = legalize.rope(bb, bb.emit(op.matmul(xn, Wk[k])), cos, sin, rot_c)  # [S,HD]
+                Kk = legalize.rope(bb, bb.emit(op.matmul(xn, Wk[k])), cos, sin)          # [S,HD]
                 Kk_list.append(Kk)
                 Kt.append(bb.emit(op.permute_dims(Kk, axes=[1, 0])))                    # [HD,S]
                 V.append(bb.emit(op.matmul(xn, Wv[k])))                                 # [S,HD]
             attn = None
             for h in range(H):
                 part = _attn_head(bb, xn, Wq[h], Wo[h], Kt[h // GPK], V[h // GPK],
-                                  scale_c, mask_c, cos, sin, rot_c, S, S)
+                                  scale_c, mask_c, cos, sin, S, S)
                 attn = part if attn is None else bb.emit(op.add(attn, part))
             y = _residual_ffn(bb, x, attn, Wn2, Wg, Wu, Wd, S, D, F, cfg.eps)
             outs = [y]
@@ -279,7 +293,7 @@ def build_attn_ffn_module(cfg, MAX):
     Attention runs over the whole MAX cache; `mask` zeros slots j>pos."""
     D, H, KV, HD, F = cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
     GPK = H // KV
-    rot_c = _const(legalize.rope_tables(1, HD, base=cfg.rope_base, llama3_scaling=cfg.rope_scale)[2])
+    freqs_c = _rope_freqs_c(cfg)                      # RoPE cos/sin on-device from pos (Q only here)
     scale_c = _const(np.full((1, MAX), 1.0 / float(np.sqrt(HD))))
     op = relax.op
     x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
@@ -287,17 +301,18 @@ def build_attn_ffn_module(cfg, MAX):
     Wo = [_P(f"Wo{h}", (HD, D)) for h in range(H)]
     Kt = [_P(f"Kt{k}", (HD, MAX)) for k in range(KV)]
     Vc = [_P(f"Vc{k}", (MAX, HD)) for k in range(KV)]
-    cos = _P("cos", (1, HD)); sin = _P("sin", (1, HD)); mask = _P("mask", (1, MAX))
+    pos = _P("pos", (1, 1)); mask = _P("mask", (1, MAX))
     Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
-    params = [x, Wn1, Wn2] + Wq + Wo + Kt + Vc + [cos, sin, mask, Wg, Wu, Wd]
+    params = [x, Wn1, Wn2] + Wq + Wo + Kt + Vc + [pos, mask, Wg, Wu, Wd]
     bb = relax.BlockBuilder()
     with bb.function("main", params):
         with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
             xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
             attn = None
             for h in range(H):
                 part = _attn_head(bb, xn, Wq[h], Wo[h], Kt[h // GPK], Vc[h // GPK],
-                                  scale_c, mask, cos, sin, rot_c, 1, MAX)
+                                  scale_c, mask, cos, sin, 1, MAX)
                 attn = part if attn is None else bb.emit(op.add(attn, part))
             gv = bb.emit_output(_residual_ffn(bb, x, attn, Wn2, Wg, Wu, Wd, 1, D, F, cfg.eps))
         bb.emit_func_output(gv)
