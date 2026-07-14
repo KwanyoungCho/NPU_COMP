@@ -22,9 +22,9 @@
       "roles": {"mmul": 594432, "scatter": 540672, "gather": 409600, "accum": 242400, "broadcast": 206639, "layout": 148480, "reduce": 63608, "transpose": 16672, "elementwise": 12690}
     },
     "manual_old_isa": {
-      "desc": "NOT MEASURED. Manual build_prefill_layer_module packed on the OLD ISA (all SW workarounds). This is the only missing piece for a single 'before-ISA vs after' graph that also reflects the RoPE change. Measure once at commit 3e0638f and fill in.",
-      "total": null,
-      "roles": {}
+      "desc": "manual build_prefill_layer_module, packed, OLD ISA (commit 3e0638f: element-copy transpose, ones-matmul reduce/broadcast, add-based K-accum, 5-op SiLU, permutation-matmul RoPE). Same generation path as manual_signinv_rope, so a manual_old_isa vs manual_signinv_rope comparison reflects the RoPE change (permutation-matmul -> sign-inv+on-device).",
+      "total": 3702465,
+      "roles": {"transpose": 1048576, "accum": 680512, "scatter": 606208, "gather": 475136, "mmul": 451680, "broadcast": 251744, "reduce": 153716, "elementwise": 17484, "layout": 17408}
     },
     "unpacked_note": {
       "desc": "For reference: WITHOUT weight packing, the HF prefill layer is 14,818,383 cmds, gather 88.1%, useful 5.7% (analyze_kernels default). Packing is what makes the real path 6.6x smaller."
