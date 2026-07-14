@@ -246,9 +246,9 @@ float32 누산, 저장 시에만 반올림) 테스트 레퍼런스 `tiled_fp16_r
   섞여 틀린다. → strided는 **K^T(전치)에만** 유효(2a에서 이미 활용). gather/scatter는 유지.
 - **활성화 matmul 융합(마지막 k-타일에 act)은 보류**. native standalone SiLU(1 pass)로 이득
   대부분 확보. matmul 최종 k-타일 판별이 walker 구조상 번거로워 잔여 1 pass 절감은 미채택.
-- **RoPE rotate_half → sign-inv+copy: 보류(횡보)**. 현재 [hd,hd] 순열-matmul은 팀이 slice/concat을
-  피하려 **의도적으로 택한** 방식. sign-inv(0x16)+slice+concat은 명령수가 비슷하고 회피했던
-  slice/concat을 다시 들인다 → 명확한 이득 없어 유지.
+- **RoPE rotate_half → sign-inv + on-device cos/sin: 구현함(§7.9 참조)**. 명령 수는 실측상
+  중립(순열-matmul의 gather/scatter가 slice/concat layout으로 이동, 상쇄)이지만, `Rot` 행렬을
+  메모리에서 제거하고 **cos/sin을 위치에서 on-device 생성**해 autonomous decode 기반을 확보.
 
 ### 재평가(잠정): 기존 SW 최적화
 - **가중치 패킹**: gather가 여전히 비용 지배 → **유지 가치 큼**(B-gather 제거).
@@ -326,13 +326,44 @@ pack+reuse+fuse)** 로 직접 대조한다. 두 막대 모두 실측 명령 수�
 
 ---
 
+## 7.9 RoPE 재타겟 — sign-inversion + pos-기반 on-device cos/sin
+
+남은 RoPE 관련 0710 명령을 반영했다:
+- **rotate_half → sign-inversion(0x16) + slice/concat** (순열 행렬 곱 제거, `Rot[hd,hd]` 상수 소멸).
+- **cos/sin → on-device(0x18)**: `angle = pos × freqs → cos/sin`, 레이어당 1회 계산해 헤드 공유.
+  prefill은 위치 0..S-1을 상수로 굽고, **decode는 `pos`만 런타임 입력**으로 받음 → 미래의
+  autonomous decode에서 호스트는 위치 하나만 넘기면 됨. (codegen: negative→sign-inv, cos/sin→0x18)
+
+![rope before/after (measured)](figs/0710/g_rope_before_after.png)
+
+**★ 정직한 실측 결과 — 명령 수는 사실상 불변**(3B prefill layer, packed): **2,235,471 → 2,235,194 (−0.01%)**.
+
+| role | BEFORE(순열-matmul) | AFTER(sign-inv) | Δ |
+|---|---:|---:|---:|
+| gather | 475,136 | 409,600 | −14% |
+| scatter | 606,208 | 540,672 | −11% |
+| **layout(RoPE)** | 17,408 | 148,480 | **+753%** |
+| broadcast | 203,514 | 206,639 | +2% (on-device cos/sin) |
+
+즉 순열-matmul의 **gather/scatter(131k)가 slice/concat layout(131k)으로 이동**했을 뿐 **총량은 동일**하다.
+앞서 단일-헤드 측정에서 "sign-inv 3× 저렴(−6%)"이라 했던 건 **틀렸다**: 그 측정은 matmul에 딸린
+q-gather까지 포함한 고립 케이스였고, **패킹된 전체 레이어에선 두 방식의 데이터 이동량이 같아** 상쇄된다.
+
+**RoPE 변경의 실제 가치**(명령 수 이득 아님):
+1. **`Rot[hd,hd]` 순열 행렬을 버퍼에서 제거**(메모리 절약).
+2. **cos/sin을 위치에서 on-device 생성** → decode가 `pos`만 넘기면 되는 **autonomous decode 기반**.
+- 검증: 전체 테스트 통과, decode 토큰열 불변([21,21,9]/[28,8]), 3B vs torch rel≤0.0035, byte-exact 63/63.
+
+---
+
 ## 8. 결론
 
 - **Phase 1(우리 소스 반영) 완료·검증**: `isa.py`·`mysim.cpp`가 새 ISA를 지원하고,
   벤더 c-model과 **전체 63개 예제 byte-exact 일치**.
 - **Phase 2 완료·검증**: (2a) reduce-sum·transpose·row-broadcast 네이티브 + stable
-  softmax(reduce-max는 vector-max fold 우회); (2b) K-accum **MAC 비트**, 활성화 **native SiLU**.
-  전체 테스트·byte-exact(63/63) 통과, 3B vs torch rel≤0.0031, decode 토큰열 불변.
+  softmax(reduce-max는 vector-max fold 우회); (2b) K-accum **MAC 비트**, 활성화 **native SiLU**;
+  (2c) **RoPE**: rotate_half→**sign-inversion**, cos/sin→**on-device(pos-기반, 0x18)**.
+  전체 테스트·byte-exact(63/63) 통과, 3B vs torch rel≤0.0035, decode 토큰열 불변.
 - **Phase 3 재측정(패킹 실경로)**: prefill layer **useful 37.6%**, 남는 오버헤드는
   **scatter 27.1% + gather 21.3%(=행-major strided 이동) + broadcast 9.1%**. 재타겟으로
   transpose/reduce 등은 <3%로 소멸. (미패킹 측정의 "gather 88%"는 가중치 gather 포함값이라 실경로와 다름)
