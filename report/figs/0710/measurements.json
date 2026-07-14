@@ -1,0 +1,33 @@
+{
+  "note": "Measured command counts per Llama-3.2-3B prefill layer (S=128). cost.analyze by_role. Reuse these instead of re-compiling. Update only when the compiler changes.",
+  "datasets": {
+    "hf_before_isa": {
+      "desc": "HF import path, best mode (pack+reuse+fuse), OLD ISA (pre-0710 retarget: element-copy transpose, ones-matmul reduce/broadcast, add-based K-accum, 5-op SiLU). RoPE on HF path = slice/concat (fed cos/sin).",
+      "total": 3478647,
+      "roles": {"transpose": 1048576, "accum": 678720, "scatter": 540672, "mmul": 448992, "gather": 409600, "reduce": 153716, "layout": 131072, "broadcast": 50496, "elementwise": 16802}
+    },
+    "hf_after_retarget": {
+      "desc": "HF import path, best mode, AFTER Phase-2 retarget (transpose->strided, native reduce, MAC, native SiLU). NOTE: HF path feeds cos/sin and uses slice/concat rotate_half, so it does NOT exercise our RoPE (sign-inv + on-device cos/sin).",
+      "total": 2028699,
+      "roles": {"mmul": 594432, "scatter": 540672, "gather": 409600, "accum": 242400, "layout": 131072, "broadcast": 50424, "reduce": 26624, "elementwise": 16802, "transpose": 16672}
+    },
+    "manual_perm_rope": {
+      "desc": "manual build_prefill_layer_module, packed, AFTER Phase-2 retarget but RoPE STILL permutation-matmul (i.e. before the RoPE change). Exercises our reduce/transpose/MAC/SiLU.",
+      "total": 2235471,
+      "roles": {"mmul": 597504, "scatter": 606208, "gather": 475136, "accum": 243040, "broadcast": 203514, "reduce": 63608, "layout": 17408, "transpose": 16672, "elementwise": 12380}
+    },
+    "manual_signinv_rope": {
+      "desc": "manual build_prefill_layer_module, packed, AFTER FULL retarget incl. RoPE (sign-inversion rotate_half + on-device pos-based cos/sin). This is the current HEAD.",
+      "total": 2235194,
+      "roles": {"mmul": 594432, "scatter": 540672, "gather": 409600, "accum": 242400, "broadcast": 206639, "layout": 148480, "reduce": 63608, "transpose": 16672, "elementwise": 12690}
+    },
+    "manual_old_isa": {
+      "desc": "NOT MEASURED. Manual build_prefill_layer_module packed on the OLD ISA (all SW workarounds). This is the only missing piece for a single 'before-ISA vs after' graph that also reflects the RoPE change. Measure once at commit 3e0638f and fill in.",
+      "total": null,
+      "roles": {}
+    },
+    "unpacked_note": {
+      "desc": "For reference: WITHOUT weight packing, the HF prefill layer is 14,818,383 cmds, gather 88.1%, useful 5.7% (analyze_kernels default). Packing is what makes the real path 6.6x smaller."
+    }
+  }
+}
