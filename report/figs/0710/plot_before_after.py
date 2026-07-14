@@ -14,8 +14,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DS = json.load(open(os.path.join(HERE, "measurements.json")))["datasets"]
 B = DS["manual_old_isa"]["roles"]; A = DS["manual_signinv_rope"]["roles"]
 TB = DS["manual_old_isa"]["total"]; TA = DS["manual_signinv_rope"]["total"]
-uB = 100*(B.get("mmul", 0)+B.get("accum", 0))/TB
-uA = 100*(A.get("mmul", 0)+A.get("accum", 0))/TA
 
 # merge mmul+accum into "matmul core" (MAC shifts the tile-save tag between them)
 def merged(r):
@@ -31,10 +29,8 @@ after = np.array([ma[k] for k in labels], float)
 y = np.arange(len(labels))[::-1]; h = 0.38
 
 fig, ax = plt.subplots(figsize=(12, 6.8))
-ax.barh(y + h/2, before, h, color="#9e9e9e",
-        label=f"BEFORE 0710 ISA update (old ISA, all SW workarounds)  total {TB:,}")
-ax.barh(y - h/2, after, h, color="#2ca02c",
-        label=f"AFTER (full 0710 retarget, incl. RoPE)  total {TA:,}")
+ax.barh(y + h/2, before, h, color="#9e9e9e", label=f"Before  (total {TB:,})")
+ax.barh(y - h/2, after, h, color="#2ca02c", label=f"After  (total {TA:,})")
 for i, (bf, af) in enumerate(zip(before, after)):
     yy = y[i]
     ax.text(bf + 12000, yy + h/2, f"{bf:,.0f}", va="center", fontsize=9, color="#555")
@@ -43,10 +39,9 @@ for i, (bf, af) in enumerate(zip(before, after)):
     col = "#1a7a1a" if d < -1 else ("#b8860b" if d > 1 else "#888")
     ax.text(af + 12000, yy - h/2, f"{af:,.0f}  ({tag})", va="center", fontsize=9, color=col)
 ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=11)
-ax.set_xlabel("commands per 3B prefill layer (measured, manual generation path, packed)")
-ax.set_title(f"3B prefill layer — 0710 ISA update: BEFORE (old ISA) vs AFTER (full retarget, incl. RoPE)\n"
-             f"total {TB:,} → {TA:,}  (−{100*(1-TA/TB):.1f}%)   |   useful {uB:.1f}% → {uA:.1f}%",
-             fontsize=12.5)
+ax.set_xlabel("commands per 3B prefill layer")
+ax.set_title(f"3B prefill layer (S=128)\n"
+             f"total {TB:,} → {TA:,}  (−{100*(1-TA/TB):.1f}%)", fontsize=13)
 ax.legend(loc="lower right", fontsize=10)
 ax.set_xlim(0, 1_200_000); ax.grid(axis="x", alpha=0.3)
 plt.tight_layout()
