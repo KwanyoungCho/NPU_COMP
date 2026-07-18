@@ -57,13 +57,16 @@ torch import(frontend) ─┬─ import_legalize (HF)          ← (A3) 경로 �
 - **DoD**: 전체 테스트 green. codegen LOC 감소. 의미 변화 0.
 - **위험**: 낮음(오라클 교체만).
 
-### Stage 2 — (A2) 컴파일 속도 [소~중, SW]
-- 2a: `runtime._program_bytes` → `np.asarray(words, np.uint32).tobytes()`.
-- 2b: 프로파일(cProfile) → hot path 확정. `_Walker.ev()`의 `arith.simplify`가 hot이면
-  타일 주소를 **증분/캐시**(k-loop에서 base+delta) 로 계산해 재-simplify 제거.
-- **DoD**: 3B 커널 컴파일 시간 대폭↓(목표 100s→10s대), **byte-exact 유지**(속도만).
-- **위험**: 낮음(수치 불변).
-- 주의: 최종 **명령 수는 HW 루프 부재로 불변**(문서에 명시, HW 요청 별도).
+### Stage 2 — (A2) 컴파일 속도 [소~중, SW] ✅ phase-1 (커밋 3f3ef0b)
+- 프로파일(cProfile)로 hot path 확정: `_Walker.ev()`가 인덱스식마다 TVM FFI로
+  `substitute`+`simplify`(769k회, ~70s), `_bind_match`(ev 호출, ~109s), `_bind`의 IntImm 생성.
+- **2b ✅**: `ev()`를 **순수 파이썬 affine 평가**(`_ev_fast`: Add/Sub/Mul/FloorDiv/FloorMod/Min/Max/Cast를
+  int env로 평가)로 대체, 미지원 노드만 substitute+simplify로 fallback. env를 python int로 저장(IntImm FFI 제거).
+- **2a ✅**: `runtime._program_bytes` per-word struct.pack 루프 → numpy 벡터화 uint32 pack(바이트 동일).
+- **실측**: 3B prefill layer 컴파일 **106.3s → 58.5s (1.82x)**. gate GREEN, vendor byte-exact 유지.
+- **phase-2(미착수, 10s대 목표)**: GEMM shape별 walk 결과(intrinsic 시퀀스)를 메모이즈해 동일 shape 재-walk 제거.
+  더 큰 refactor·리스크라 보류. 컴파일은 kernel당 1회(토큰/레이어 재사용)라 우선순위 낮음.
+- 주의: 최종 **명령 수는 HW 루프 부재로 불변**(속도만; HW 요청 별도).
 
 ### Stage 3 — (A3) legalization 통합 [중] ✅ (커밋 b34c723)
 - `import_legalize`의 silu→`legalize.silu`(native), softmax→`legalize.softmax_lastdim`(stable),
@@ -116,22 +119,23 @@ A1(binding-var liveness 재사용)을 프로토타입해 **3B prefill layer로 �
 → **결론: A1은 A4에 포섭된다. A4를 먼저 하고, A1(binding+비-gather scratch 재사용)은 A4 이후
 minor 단계로.** (A1 프로토타입은 net-손해라 default 미탑재, 되돌림.)
 
-## 3. 순서 & 종료 조건 (재정렬)
+## 3. 순서 & 종료 조건 (실제 진행: Stage 0 → A4 → A3 → A2, A1 보류)
 
-권장 순서: **Stage 0 → A4 → A1 → A3 → A2**.
-- **A4 먼저**: gather/scatter 제거 → 명령 수(오버헤드 40~48%) + gather scratch(메모리) 동시 해결,
-  그리고 이후 A1을 안전하게 만든다(gather 없음 → gather_cache 없음 → 재사용 충돌 없음).
-- **A1 다음**(A4 후): binding + 비-gather scratch 재사용. gather scratch가 이미 사라져 순수 이득.
-  단 **liveness가 O-proj 융합 등 codegen 스케줄과 일치**하도록 결합(또는 융합 off와 함께).
-- **A3/A2**: 정리·속도, 후순위.
-- 각 Stage green 전엔 다음으로 안 넘어감.
+원래 순서는 A4 → A1 → A3 → A2였으나, A1의 전제(A4가 gather를 **전부** 제거 → gather_cache 불필요)가
+A4를 **5c(FFN)에서 확정**하며 부분적으로만 성립(attention gather_cache 여전) → **A1 보류**, A3·A2 우선.
 
-**최종 종료 조건(End State 달성)**:
-- 전체 테스트 + byte-exact 63/63 green
-- direct 백엔드 제거, legalize 단일화
-- 3B 레이어: **버퍼 수십× 감소(A1)**, **matmul 체인 gather/scatter ~0(A4)**, 컴파일 시간 대폭↓(A2)
-- measurements.json에 Stage별 전/후 지표 전부 기록
-- 남는 것은 **HW 의존 항목**(루프 → 명령 수, register-indirect → KV/가변길이)뿐 — 별도 벤더 요청서로 분리(SW로 마무리 가능한 것은 전부 완료)
+**최종 상태(2026-07-18)**:
+- **A4 ✅ (5c, byte-exact)**: FFN 체인 tile-blocking. 3B prefill layer **−19.8%**(2,235,194→1,792,826),
+  scatter −58%. `layouts=True/False` 토글로 A/B 비교. 5d(RMSNorm/attention)는 reduce 재정렬로 byte-exact
+  불가라 보류(§3.5).
+- **A3 ✅ (커밋 b34c723)**: import legalization을 manual 경로와 통일(native SiLU/stable softmax/sign-inv).
+- **A2 ✅ phase-1 (커밋 3f3ef0b)**: 컴파일 106.3s→58.5s(1.82x, byte-exact).
+- **A1 보류**: net-손해(§2.5) + A4 부분 완료로 attention gather_cache 여전 활성 → 리스크. 5d 완료 후 재평가.
+- **전체 gate GREEN + vendor byte-exact 전 구간 유지.**
+
+**남는 것(우선순위·리스크順)**: A2 phase-2(walk 메모이즈, 10s대) · 5d(tolerance 수용 시 attention/RMSNorm 타일링,
+−~8%+) · A1(5d 후) · direct 백엔드는 **golden 오라클로 유지**(제거 안 함). HW 의존(루프→명령 수,
+register-indirect→KV/가변길이)은 별도 벤더 요청서.
 
 ---
 
