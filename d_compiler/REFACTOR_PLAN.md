@@ -175,15 +175,22 @@ minor 단계로.** (A1 프로토타입은 net-손해라 default 미탑재, 되�
   경계에서 relayout은 데이터 볼륨이 같아 gather와 **비용 동일**(예: [128,3072] gather=49,152 = relayout scatter=49,152).
   → **경계를 relayout로 감싸는 건 이득 0**; 그 op들 자체를 **tile-native**(tile 레이아웃에서 직접 계산)로 만들어야 제거됨.
 
-  **5d 서브스테이지(각각 gate GREEN + byte-exact 필수, 조율된 다중 op 변경이라 리스크 높음)**:
-  - **5d-1 tile-native RMSNorm + residual stream**: `emit_row_sum`(N 리듀스를 Nt 타일 누적) + `emit_broadcast`
-    col-broadcast(tile) tile-native화, residual stream을 TILE로(진입 param 1회 relayout, 반환 1회 relayout).
-    제거 예상: gate/up gather 49,152 + O/down scatter 각 49,152 (per-layer ~98K; **28-layer full model에선 relayout이
-    1회로 상각되어 ~196K/layer**). 연결성 최대(QKV·FFN·residual island 통합).
-  - **5d-2 tile-native attention core**: RoPE·softmax·transpose를 tile 레이아웃 계산. 가장 큼(gather 131K)이자
-    가장 어려움(head_dim=64 = 1 타일폭, RoPE가 타일 내부 반쪽 slice). byte-exact 리스크 최고.
+  **5d 결정: 보류(A4는 5c에서 확정). 이유 = byte-exact 불가.**
+  - 5d는 reduce(RMSNorm의 sum, softmax의 sum/max)를 tile화해야 하는데, **tile reduce는 FP16 합산 순서를 바꿈**
+    (3072개 일괄 reduce → 48개 64-col 타일 elementwise 누적 후 행 reduce). broadcast/const-pack은 정확한 순열이라
+    무해하지만 **reduce만 산술 재정렬** → 비트 동일 불가. byte-exact를 유지하려면 reduce가 행을 gather해야 하고
+    (parity), 그러면 tile화 이득이 소멸. **독립 matmul→RMSNorm→matmul로 실증: rel≈0.18%(maxdiff 9.77e-3), tolerance-valid.**
+  - 5c는 **주소만 변경(같은 MAC 순서)** 이라 비트 동일이었음 → **A4의 byte-exact 실현 가능 구간은 5c가 끝**.
+  - 사용자 결정(2026-07-18): **5c의 비트-동일(layouts=True==False, 깨끗한 A/B 비교)을 우선**, 5d 미진행.
+  - **설계 보존(향후 full-model fusion 시 유효)**:
+    - 5d-1 tile-native RMSNorm+residual: `emit_row_sum`(Nt 타일 elementwise 누적 후 행 reduce, gather 0) +
+      `emit_broadcast` col/row tile-native + 2D-64mult elementwise 상수 tile-pack(`alloc_const_tiled`) +
+      assign_layouts에 `sum`=TILE 입력 소비자·`broadcast_to`=TILE producer 규칙 + 입력 param tile-pack(host-side 무료)
+      + O-proj group `c_tiled` 출력 + `emit_concat` tile-입력 relayout. per-layer 순이득 ~147K(−8%), 비용 ~1% FP16.
+    - 5d-2 tile-native attention core: RoPE·softmax·transpose tile화(gather 131K, 최대). head_dim=64=1 타일폭,
+      RoPE 타일 내부 반쪽 slice, softmax reduce도 tolerance-only.
 
-**검증**: 매 서브스테이지 출력 tolerance 유지 + gather/scatter % 감소 측정. golden 오라클 = direct 백엔드(row-major) 유지.
+**검증**: 5c까지 **출력 완전일치(byte-exact)** 확인 완료. 이후 최적화는 여기서 종료. golden 오라클 = direct 백엔드(row-major) 유지.
 
 ## 4. 리스크 관리 (중간 결과물 방지)
 - 매 Stage: 착수 전 브랜치, 완료 시 **전체 테스트 + byte-exact** 통과해야 커밋.
