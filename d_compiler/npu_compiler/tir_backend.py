@@ -13,6 +13,7 @@ which is byte-identical to the existing oracle (fp16(0+x) == fp16(x)).
 
 T0 scope: matmul with M, N, K all multiples of 64 (padding comes later).
 """
+import functools
 import tvm
 import tvm.tir as tir
 from tvm import relax, arith
@@ -219,29 +220,36 @@ class _Walker:
 
     def _bind_match(self, mbr):
         """match_buffer: bind the view's data/elem_offset/stride symbols to the
-        source buffer's concrete values (source assumed compact 2D root)."""
-        buf, src = mbr.buffer, mbr.source
+        source buffer's concrete values (source assumed compact 2D root).
+        Repeated TVM-FFI attribute reads are hoisted into locals (compile hot path:
+        this runs once per tile — the walk re-creates fresh Python wrappers each pass)."""
+        src = mbr.source
         sbuf = src.buffer
-        if sbuf.data not in self.base:
+        sdata = sbuf.data
+        base = self.base
+        if sdata not in base:
             raise TirBackendError(f"match_buffer source not a root param: {sbuf.name}")
-        if sbuf.data in self.packed_src:                     # tile-blocked weight: tile is contiguous
-            packed_base, Nt = self.packed_src[sbuf.data]
-            rt = self.ev(src.region[0].min) // TILE          # row tile index (ko)
-            ct = self.ev(src.region[1].min) // TILE          # col tile index (jo)
-            off = (rt * Nt + ct) * TILE * TILE               # blocked offset
-            self.base[buf.data] = packed_base
-            if isinstance(buf.elem_offset, tir.Var):
-                self._bind(buf.elem_offset, off)
-            if len(buf.strides) and isinstance(buf.strides[0], tir.Var):
-                self._bind(buf.strides[0], TILE)             # stride==64 -> _gather_cached skips gather
-            return
-        row_stride = int(sbuf.shape[1])                       # compact 2D
-        off = self.ev(src.region[0].min) * row_stride + self.ev(src.region[1].min)
-        self.base[buf.data] = self.base[sbuf.data]            # alias to root base
-        if isinstance(buf.elem_offset, tir.Var):
-            self._bind(buf.elem_offset, off)
-        if len(buf.strides) and isinstance(buf.strides[0], tir.Var):
-            self._bind(buf.strides[0], row_stride)
+        buf = mbr.buffer
+        bdata = buf.data
+        region = src.region
+        r0min, r1min = region[0].min, region[1].min
+        packed = self.packed_src.get(sdata)
+        if packed is not None:                               # tile-blocked: tile is contiguous
+            packed_base, Nt = packed
+            off = (self.ev(r0min) // TILE * Nt + self.ev(r1min) // TILE) * TILE * TILE
+            base[bdata] = packed_base
+            strd = TILE                                      # stride==64 -> gather skipped
+        else:
+            row_stride = int(sbuf.shape[1])                  # compact 2D
+            off = self.ev(r0min) * row_stride + self.ev(r1min)
+            base[bdata] = base[sdata]                        # alias to root base
+            strd = row_stride
+        eoff = buf.elem_offset
+        if isinstance(eoff, tir.Var):
+            self._bind(eoff, off)
+        strides = buf.strides
+        if len(strides) and isinstance(strides[0], tir.Var):
+            self._bind(strides[0], strd)
 
     # ---- intrinsic emission ----
     def _intrinsic(self, call):
@@ -339,6 +347,28 @@ class _Walker:
                     a.addr(DST, c + r * sc); a.save(0)
         self.cbuf.clear()
 
+    def emit_gemm(self, Mp, Kp, Np, a_off, b_off, c_off, a_nt=None, b_nt=None, c_nt=None):
+        """Emit the canonical scheduled GEMM directly, WITHOUT walking the TIR.
+        schedule_matmul always produces the same nest: for (io,jo) in grid(Mt,Nt):
+        fill C[io,jo]; for ko in Kt: gemm_acc(C[io,jo], A[io,ko], B[ko,jo]). This
+        replays that nest in pure Python — same tile order, same per-tile ptr/stride
+        as _bind_match (compact: row-major offset + row_stride; tile-blocked *_nt:
+        (r*Nt+c)*4096 + stride 64) — so it is byte-identical to walk(pf.body) but
+        skips ~1.8M TVM-FFI wrapper allocations. *_nt=<tiles-per-row> marks an operand
+        tile-blocked; None = compact 2D (a: KxN? no -> stride Kp for A, Np for B/C)."""
+        Mt, Nt, Kt, T2 = Mp // TILE, Np // TILE, Kp // TILE, TILE * TILE
+        for io in range(Mt):
+            for jo in range(Nt):
+                c, sc = ((c_off + (io * c_nt + jo) * T2, TILE) if c_nt is not None
+                         else (c_off + io * TILE * Np + jo * TILE, Np))
+                self.emit_fill(c, sc)
+                for ko in range(Kt):
+                    a, sa = ((a_off + (io * a_nt + ko) * T2, TILE) if a_nt is not None
+                             else (a_off + io * TILE * Kp + ko * TILE, Kp))
+                    b, sb = ((b_off + (ko * b_nt + jo) * T2, TILE) if b_nt is not None
+                             else (b_off + ko * TILE * Np + jo * TILE, Np))
+                    self.emit_acc(c, sc, a, sa, b, sb)
+
 
 # ============================ padding helpers ============================
 def _ceil64(x):
@@ -406,9 +436,11 @@ def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gath
     _copy2d(asm, c_off, N, cpad, Np, M, N)        # cpad[0:M,0:N] -> C[M,N]
 
 
+@functools.lru_cache(maxsize=None)
 def _scheduled_gemm(M, K, N):
     """Legalize+schedule a [M,K]@[K,N] matmul; return the scheduled prim_func
-    (params: A_in, B_in, C_out). Pure shape function -> safe to cache/reuse."""
+    (params: A_in, B_in, C_out). Pure shape function -> cached (the single-matmul
+    path re-enters this for every projection; the prim_func is read-only in the walk)."""
     bb = relax.BlockBuilder()
     x = relax.Var("x", relax.TensorStructInfo([M, K], "float16"))
     w = relax.Var("w", relax.TensorStructInfo([K, N], "float16"))
@@ -445,13 +477,14 @@ def _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt=None, a_tiled=None, c_tile
 
 def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None,
                    a_tiled=None, c_tiled=None):
-    """Core TIR+tensorize emit for a 64-multiple matmul (no padding)."""
+    """Core emit for a 64-multiple matmul (no padding). Emits the canonical scheduled
+    GEMM directly (walker.emit_gemm) instead of walking the TIR — byte-identical, far
+    faster. a_tiled/c_tiled (=tiles-per-row) mark A/C tile-blocked; b_pack_nt marks B
+    a pre-packed weight; None => compact 2D."""
     for d in (M, K, N):
         assert d % TILE == 0, f"_emit_tir_gemm needs 64-multiples, got {M}x{K}x{N}"
-    pf = _scheduled_gemm(M, K, N)
     wk = _Walker(asm, mp, {}, gather_cache=gather_cache)
-    _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt, a_tiled=a_tiled, c_tiled=c_tiled)
-    wk.walk(pf.body)
+    wk.emit_gemm(M, K, N, a_off, b_off, c_off, a_nt=a_tiled, b_nt=b_pack_nt, c_nt=c_tiled)
     wk.flush()
 
 

@@ -57,15 +57,19 @@ torch import(frontend) ─┬─ import_legalize (HF)          ← (A3) 경로 �
 - **DoD**: 전체 테스트 green. codegen LOC 감소. 의미 변화 0.
 - **위험**: 낮음(오라클 교체만).
 
-### Stage 2 — (A2) 컴파일 속도 [소~중, SW] ✅ phase-1 (커밋 3f3ef0b)
-- 프로파일(cProfile)로 hot path 확정: `_Walker.ev()`가 인덱스식마다 TVM FFI로
-  `substitute`+`simplify`(769k회, ~70s), `_bind_match`(ev 호출, ~109s), `_bind`의 IntImm 생성.
-- **2b ✅**: `ev()`를 **순수 파이썬 affine 평가**(`_ev_fast`: Add/Sub/Mul/FloorDiv/FloorMod/Min/Max/Cast를
-  int env로 평가)로 대체, 미지원 노드만 substitute+simplify로 fallback. env를 python int로 저장(IntImm FFI 제거).
-- **2a ✅**: `runtime._program_bytes` per-word struct.pack 루프 → numpy 벡터화 uint32 pack(바이트 동일).
-- **실측**: 3B prefill layer 컴파일 **106.3s → 58.5s (1.82x)**. gate GREEN, vendor byte-exact 유지.
-- **phase-2(미착수, 10s대 목표)**: GEMM shape별 walk 결과(intrinsic 시퀀스)를 메모이즈해 동일 shape 재-walk 제거.
-  더 큰 refactor·리스크라 보류. 컴파일은 kernel당 1회(토큰/레이어 재사용)라 우선순위 낮음.
+### Stage 2 — (A2) 컴파일 속도 [소~중, SW] ✅ (커밋 3f3ef0b, <다음 커밋>)
+- 프로파일(cProfile)로 hot path 확정: `_Walker.ev()`가 인덱스식마다 TVM FFI `substitute`+`simplify`,
+  이후 재-프로파일에선 `_bind_match` + **재-walk마다 TVM FFI wrapper ~11M개 생성**이 지배.
+- **phase-1 ✅ (3f3ef0b)**: `ev()`를 순수 파이썬 affine 평가(`_ev_fast`)로, env를 python int로, `_program_bytes`
+  numpy 벡터화. **106.3s → 58.5s (1.82x)**.
+- **phase-2 ✅**: `schedule_matmul` 출력이 **항상 동일 canonical nest**(`grid(Mt,Nt)`: fill C[io,jo];
+  `for ko`: gemm_acc(C[io,jo],A[io,ko],B[ko,jo]))임을 확인 → 단일 matmul 경로에서 **TIR walk를 순수 파이썬
+  루프(`_Walker.emit_gemm`)로 대체**. 타일 순서·per-tile ptr/stride를 `_bind_match`와 동일하게 계산(compact:
+  row-major offset+row_stride; tile-blocked: (r*Nt+c)*4096+stride64) → **byte-identical**, ~1.8M FFI wrapper 제거.
+  보조: `_bind_match` 반복 FFI 접근 hoist + `_scheduled_gemm` lru_cache.
+- **실측**: 3B prefill layer 컴파일 **58.5s → 8.6s** (누적 **106.3s → 8.6s, 12.4x**, DoD "10s대" 달성).
+  gate GREEN, vendor byte-exact 유지. words 불변(1,792,826).
+- O-proj group 경로는 walker 유지(→ walker/`ev`/`_bind_match` 여전히 사용, dead code 없음; 검증 오라클 역할).
 - 주의: 최종 **명령 수는 HW 루프 부재로 불변**(속도만; HW 요청 별도).
 
 ### Stage 3 — (A3) legalization 통합 [중] ✅ (커밋 b34c723)
