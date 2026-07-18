@@ -156,11 +156,13 @@ minor 단계로.** (A1 프로토타입은 net-손해라 default 미탑재, 되�
 - **5a ✅ (커밋 8282758)**: memplan `layout`/`alloc_tiled` + `pack_tiled/unpack_tiled/tiled_numel` + round-trip 테스트.
 - **5b ✅ (커밋 4be9ccc)**: `emit_matmul_into`에 `a_tiled/c_tiled` — A/C를 `packed_src`에 등록 → tile-contiguous
   read/write로 gather/scatter skip. **실측 128×3072×128: 103,596 → 3,244 (32×↓), gather/scatter→0, byte-exact.**
-- **5c (다음)**: 레이아웃 배정 패스 + 경계 re-layout. memplan에 layout-assignment 서브패스(matmul out→TILE,
-  elementwise 투명 전파, reduce/transpose/broadcast/입출력→ROW, 불일치 경계에 relayout 삽입), TILE var는
-  `alloc_tiled`. codegen: matmul이 layout 따라 a_tiled/c_tiled, elementwise는 TILE이면 physical(tiled_numel)로,
-  relayout 헬퍼(ROW↔TILE). **FFN 체인부터** → 측정 → attention/RMSNorm/softmax 확장.
-- 5d: layout-aware reduce/broadcast/transpose(또는 경계 국소 relayout).
+- **5c ✅ (커밋 6ac0d5d)**: `memplan.assign_layouts`(fixpoint) — matmul out(64-mult)/투명 elementwise가
+  모든 소비자 TILE-호환 시 TILE, 아니면 ROW(일관성 → relayout 불필요). TILE var는 `alloc_tiled`,
+  codegen이 layout 따라 a_tiled/c_tiled + elementwise physical 크기. **3B prefill layer(gate GREEN, 출력 불변):
+  total 2,235,194 → 1,792,826 (−19.8%), gather −32%, scatter −58%** (FFN 체인 tile-blocking). TILE var 28.
+- **5d (다음)**: 남은 gather/scatter는 **attention**(Q/K/V/O·scores·ctx·O-proj — RoPE/softmax/transpose가 ROW라
+  ROW 유지). layout-aware reduce/broadcast/transpose로 attention·RMSNorm 경계를 TILE화(또는 국소 relayout).
+  이것이 나머지 gather 278K/scatter 229K의 대부분.
 
 **검증**: 매 서브스테이지 출력 tolerance 유지 + gather/scatter % 감소 측정. golden 오라클 = direct 백엔드(row-major) 유지.
 
