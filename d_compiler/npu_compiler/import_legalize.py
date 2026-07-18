@@ -1,20 +1,24 @@
-"""Legalize an imported Relax graph into our NPU primitive op set.
+"""Legalize an imported Relax graph into our NPU op set.
 
-TVM's torch frontend emits high-level ops (relax.nn.silu, softmax, ...) that our
-codegen doesn't know. This Relax->Relax pass rewrites them into the primitives we
-support: matmul, add/subtract/multiply/divide, sqrt, exp, permute_dims.
+TVM's torch frontend emits high-level ops (relax.nn.silu, softmax, power, ...).
+This Relax->Relax pass rewrites the ones our codegen can't take directly, and —
+where a native 0710 op or a shared builder exists — routes to the SAME lowering
+the manual model path uses (npu_compiler.legalize), so import and manual layers
+are byte-for-byte the same graph:
+  - relax.nn.silu    -> legalize.silu           (native HW activation, kept as relax.nn.silu)
+  - relax.nn.softmax -> legalize.softmax_lastdim (STABLE: max-subtraction, report.md §6.1)
+  - relax.negative   -> kept as-is              (native sign-inversion 0x16; shared RoPE path)
+  - relax.power/rsqrt/mean -> primitive multiply/sqrt/divide/sum (RMSNorm internals)
 
-Extensible: add a handler per op. Currently:
-  - relax.nn.silu  ->  z / (1 + exp(-z))      (= z * sigmoid(z))
-
-Reductions (mean/softmax rowsum) and broadcasts are emitted as dedicated
-relax.sum / relax.broadcast_to ops (NOT ones-matmul), so that relax.matmul in
-the graph is exclusively true GEMM (-> TIR-only backend). codegen lowers
-sum/broadcast efficiently on the matrix engine.
+Reductions (mean/softmax rowsum) and broadcasts are dedicated relax.sum /
+relax.broadcast_to ops (NOT ones-matmul), so relax.matmul stays true GEMM
+(-> TIR-only backend); codegen lowers sum/broadcast on the matrix engine.
 """
 import numpy as np
 import tvm
 from tvm import relax
+
+from . import legalize as _lg     # module (aliased: this file also defines a `legalize` fn)
 
 
 def _op(name):
@@ -31,8 +35,6 @@ class _Legalizer(relax.PyExprMutator):
         op = call.op
         if op == _op("relax.nn.silu"):
             return self._silu(call.args[0], call.struct_info)
-        if op == _op("relax.negative"):
-            return self._negative(call.args[0], call.struct_info)
         if op == _op("relax.power"):
             return self._power(call.args[0], call.args[1])
         if op == _op("relax.rsqrt"):
@@ -48,20 +50,14 @@ class _Legalizer(relax.PyExprMutator):
     def _shp(sinfo):
         return [int(d) for d in sinfo.shape], sinfo.dtype
 
-    # SiLU(z) = z * sigmoid(z) = z / (1 + exp(-z))
+    # SiLU(z) = z * sigmoid(z): keep the native op (0710 HW activation) via the shared
+    # legalize builder — codegen lowers relax.nn.silu to one m_add(+0, act=SiLU) per chunk.
     def _silu(self, z, sinfo):
-        shp, dt = self._shp(sinfo)
-        ones = relax.const(np.ones(shp, dt))
-        b = self.builder_
-        neg = b.emit(relax.op.subtract(relax.const(np.zeros(shp, dt)), z))
-        den = b.emit(relax.op.add(b.emit(relax.op.exp(neg)), ones))
-        sig = b.emit(relax.op.divide(ones, den))
-        return b.emit(relax.op.multiply(z, sig))
+        shp, _ = self._shp(sinfo)
+        return _lg.silu(self.builder_, z, shp[0], shp[1])
 
-    # -x = 0 - x
-    def _negative(self, x, sinfo):
-        shp, dt = self._shp(sinfo)
-        return self.builder_.emit(relax.op.subtract(relax.const(np.zeros(shp, dt)), x))
+    # relax.negative is kept as-is (codegen lowers it to native sign-inversion 0x16,
+    # shared with the manual RoPE rotate_half path) — no decomposition needed.
 
     # x ** 2 = x * x  (only integer exponent 2 supported)
     def _power(self, x, exp_const):
@@ -88,18 +84,13 @@ class _Legalizer(relax.PyExprMutator):
         ssum = b.emit(relax.op.sum(x, axis=[len(xshp) - 1], keepdims=True))   # [R,1]
         return b.emit(relax.op.multiply(ssum, relax.const(np.full((R, 1), 1.0 / C, dt))))
 
-    # softmax over last dim of [R,C] (no max-subtraction): exp / rowsum-broadcast
-    # rowsum via relax.sum, broadcast via relax.broadcast_to (both dedicated ops,
-    # not matmul).
+    # softmax over last dim of [R,C]: delegate to the shared STABLE builder
+    # (max-subtraction, then exp / rowsum-broadcast / divide) so the import path
+    # matches the manual path (report.md §6.1). reduce/broadcast stay dedicated ops.
     def _softmax(self, x, attrs, sinfo):
-        shp, dt = self._shp(sinfo)
+        shp, _ = self._shp(sinfo)
         assert len(shp) == 2 and int(attrs.axis) in (-1, 1), f"softmax axis {attrs.axis}"
-        R, C = shp
-        b = self.builder_
-        e = b.emit(relax.op.exp(x))                                          # [R,C]
-        ssum = b.emit(relax.op.sum(e, axis=[1], keepdims=True))              # [R,1]
-        denom = b.emit(relax.op.broadcast_to(ssum, relax.ShapeExpr([R, C])))  # [R,C]
-        return b.emit(relax.op.divide(e, denom))
+        return _lg.softmax_lastdim(self.builder_, x, shp[0], shp[1], stable=True)
 
 
 def legalize(mod, func_name="main"):
