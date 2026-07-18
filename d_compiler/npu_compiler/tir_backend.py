@@ -330,7 +330,8 @@ def _copy_block(asm, dst_off, src_off, n, CH=8192):
 
 
 # ============================ single-matmul emit (hybrid entry) ============================
-def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None):
+def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None,
+                     a_tiled=False, c_tiled=False):
     """Emit one matmul C[M,N]=A[M,K]@B[K,N] into an existing asm at the given
     G-buffer offsets, via the TIR+tensorize+walker path (T1 input reuse).
 
@@ -345,8 +346,13 @@ def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gath
     [Kt,Nt,64,64] (Nt=b_pack_nt); the walker reads each B tile contiguously (no gather)."""
     Mp, Kp, Np = _ceil64(M), _ceil64(K), _ceil64(N)
     if (Mp, Kp, Np) == (M, K, N):
-        _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=b_pack_nt, gather_cache=gather_cache)
+        _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=b_pack_nt,
+                       gather_cache=gather_cache,
+                       a_tiled=(K // TILE if a_tiled else None),
+                       c_tiled=(N // TILE if c_tiled else None))
         return
+    assert not (a_tiled or c_tiled), \
+        f"tile-blocked A/C need 64-multiple M,K,N; got {M}x{K}x{N}"
     if Kp == K and Np == N:                       # M-only padding (cheap: no input copy)
         cpad = mp.scratch_alloc(Mp * N)
         _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt, gather_cache=gather_cache)
@@ -383,23 +389,31 @@ def _scheduled_gemm(M, K, N):
     return sched[gvar.name_hint]
 
 
-def _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt=None):
-    """Point a (reused) walker's root buffers at this matmul's G-buffer offsets."""
-    wk.base[pf.buffer_map[pf.params[0]].data] = a_off
-    wk.base[pf.buffer_map[pf.params[1]].data] = b_off
-    wk.base[pf.buffer_map[pf.params[2]].data] = c_off
+def _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt=None, a_tiled=None, c_tiled=None):
+    """Point a (reused) walker's root buffers at this matmul's G-buffer offsets.
+    a_tiled/c_tiled (A4): if set (=K//64 / =N//64), A/C are tile-blocked so each 64x64
+    tile is contiguous -> the walker skips the A-gather / C-scatter (stride==64)."""
+    aD = pf.buffer_map[pf.params[0]].data
+    bD = pf.buffer_map[pf.params[1]].data
+    cD = pf.buffer_map[pf.params[2]].data
+    wk.base[aD] = a_off; wk.base[bD] = b_off; wk.base[cD] = c_off
     wk.packed_src = {}
-    if b_pack_nt is not None:                               # B is tile-blocked weight -> no gather
-        wk.packed_src[pf.buffer_map[pf.params[1]].data] = (b_off, b_pack_nt)
+    if b_pack_nt is not None:                               # B tile-blocked weight -> no gather
+        wk.packed_src[bD] = (b_off, b_pack_nt)
+    if a_tiled is not None:                                 # A tile-blocked -> no A-gather
+        wk.packed_src[aD] = (a_off, a_tiled)
+    if c_tiled is not None:                                 # C tile-blocked -> no C-scatter
+        wk.packed_src[cD] = (c_off, c_tiled)
 
 
-def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None):
+def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None,
+                   a_tiled=None, c_tiled=None):
     """Core TIR+tensorize emit for a 64-multiple matmul (no padding)."""
     for d in (M, K, N):
         assert d % TILE == 0, f"_emit_tir_gemm needs 64-multiples, got {M}x{K}x{N}"
     pf = _scheduled_gemm(M, K, N)
     wk = _Walker(asm, mp, {}, gather_cache=gather_cache)
-    _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt)
+    _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt, a_tiled=a_tiled, c_tiled=c_tiled)
     wk.walk(pf.body)
     wk.flush()
 

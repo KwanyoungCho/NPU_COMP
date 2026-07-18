@@ -35,7 +35,50 @@ def test_tile_contiguous():
     return "each 64x64 tile is contiguous in tile-blocked storage"
 
 
+def _f16(x):
+    return np.asarray(x, dtype=np.float16).astype(np.float32)
+
+
+def test_tile_mode_matmul():
+    """A4 5b: matmul with tile-blocked A and/or C == row-major, BYTE-EXACT (same MAC
+    order; layout only changes addressing, and TILE skips the A-gather / C-scatter)."""
+    from npu_compiler import isa, memplan as MP, tir_backend
+    import npu_compiler.runtime as rt
+
+    def run(a_data, b_data, M, K, N, a_tiled, c_tiled, b_packed):
+        asm = isa.Asm(); mp = MP.MemPlan()
+        a_off = mp.scratch_alloc(a_data.size); b_off = mp.scratch_alloc(b_data.size)
+        cn = MP.tiled_numel((M, N)) if c_tiled else M * N
+        c_off = mp.scratch_alloc(cn)
+        tir_backend.emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N,
+                                     b_pack_nt=(N // 64 if b_packed else None),
+                                     a_tiled=a_tiled, c_tiled=c_tiled)
+        asm.halt()
+        g = np.zeros(mp.top, np.float32)
+        g[a_off:a_off + a_data.size] = a_data.reshape(-1)
+        g[b_off:b_off + b_data.size] = b_data.reshape(-1)
+        full = rt.run(asm, g, gn=mp.top)
+        if c_tiled:
+            return MP.unpack_tiled(full[c_off:c_off + cn], M, N)
+        return full[c_off:c_off + M * N].reshape(M, N)
+
+    out = {}
+    for (M, K, N) in [(64, 64, 64), (128, 192, 128), (64, 128, 256), (128, 3072, 128)]:
+        rng = np.random.default_rng(M + K + N)
+        A = _f16(rng.standard_normal((M, K)) * 0.3)
+        B = _f16(rng.standard_normal((K, N)) * 0.1)
+        Crow = run(A, B, M, K, N, False, False, False)                 # A,B,C row-major
+        Ctile = run(MP.pack_tiled(A), MP.pack_tiled(B), M, K, N,       # A tile, B packed, C tile
+                    a_tiled=True, c_tiled=True, b_packed=True)
+        assert np.array_equal(Crow, Ctile), f"{M}x{K}x{N}: TILE != ROW"
+        # sanity vs float64
+        rel = float(np.max(np.abs(Crow - A @ B))) / (float(np.max(np.abs(A @ B))) + 1e-9)
+        out[f"{M}x{K}x{N}"] = round(rel, 5)
+    return f"TILE-mode A/C == row-major byte-exact; rel-vs-f64 {out}"
+
+
 if __name__ == "__main__":
     print("[PASS] roundtrip:", test_roundtrip())
     print("[PASS] tile-contiguous:", test_tile_contiguous())
-    print("ALL LAYOUT (A4 5a) TESTS PASSED")
+    print("[PASS] tile-mode matmul:", test_tile_mode_matmul())
+    print("ALL LAYOUT (A4 5a/5b) TESTS PASSED")
