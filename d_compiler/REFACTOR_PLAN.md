@@ -153,9 +153,13 @@ minor 단계로.** (A1 프로토타입은 net-손해라 default 미탑재, 되�
   현행 대비 **down의 A-gather + gate/up의 재-gather 제거**. FFN이 matmul 비용 최대라 큰 이득.
 
 **구현 서브스테이지**(각각 독립 green + gather 측정):
-- 5a: memplan에 `layout`/tile-blocked alloc 추가(shape는 논리 유지, 저장만 tile-blocked). 단위테스트: tile-blocked round-trip.
-- 5b: `emit_matmul_into`가 **입력·출력 TILE 모드**를 받게(연속 tile read/write, gather/scatter skip). 오라클: TILE==ROW 결과 일치.
-- 5c: 레이아웃 배정 패스 + re-layout 삽입(경계). 먼저 **FFN 체인만** 적용 → 측정 → attention·RMSNorm/softmax 경계로 확장.
+- **5a ✅ (커밋 8282758)**: memplan `layout`/`alloc_tiled` + `pack_tiled/unpack_tiled/tiled_numel` + round-trip 테스트.
+- **5b ✅ (커밋 4be9ccc)**: `emit_matmul_into`에 `a_tiled/c_tiled` — A/C를 `packed_src`에 등록 → tile-contiguous
+  read/write로 gather/scatter skip. **실측 128×3072×128: 103,596 → 3,244 (32×↓), gather/scatter→0, byte-exact.**
+- **5c (다음)**: 레이아웃 배정 패스 + 경계 re-layout. memplan에 layout-assignment 서브패스(matmul out→TILE,
+  elementwise 투명 전파, reduce/transpose/broadcast/입출력→ROW, 불일치 경계에 relayout 삽입), TILE var는
+  `alloc_tiled`. codegen: matmul이 layout 따라 a_tiled/c_tiled, elementwise는 TILE이면 physical(tiled_numel)로,
+  relayout 헬퍼(ROW↔TILE). **FFN 체인부터** → 측정 → attention/RMSNorm/softmax 확장.
 - 5d: layout-aware reduce/broadcast/transpose(또는 경계 국소 relayout).
 
 **검증**: 매 서브스테이지 출력 tolerance 유지 + gather/scatter % 감소 측정. golden 오라클 = direct 백엔드(row-major) 유지.
