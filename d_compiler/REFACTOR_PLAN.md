@@ -160,9 +160,28 @@ minor 단계로.** (A1 프로토타입은 net-손해라 default 미탑재, 되�
   모든 소비자 TILE-호환 시 TILE, 아니면 ROW(일관성 → relayout 불필요). TILE var는 `alloc_tiled`,
   codegen이 layout 따라 a_tiled/c_tiled + elementwise physical 크기. **3B prefill layer(gate GREEN, 출력 불변):
   total 2,235,194 → 1,792,826 (−19.8%), gather −32%, scatter −58%** (FFN 체인 tile-blocking). TILE var 28.
-- **5d (다음)**: 남은 gather/scatter는 **attention**(Q/K/V/O·scores·ctx·O-proj — RoPE/softmax/transpose가 ROW라
-  ROW 유지). layout-aware reduce/broadcast/transpose로 attention·RMSNorm 경계를 TILE화(또는 국소 relayout).
-  이것이 나머지 gather 278K/scatter 229K의 대부분.
+- **토글 ✅ (커밋 34d88be)**: `driver.compile_module/run_module`에 `layouts=True/False` — A4 on/off A/B 비교용.
+- **5d (다음) — 타겟팅 실측(layouts=True, 5c 이후)**:
+
+  | op | gather | scatter | 원인(ROW 경계) |
+  |---|---|---|---|
+  | attn score/ctx | **131,072** | 49,152 | Qr/Kr(RoPE)·P(softmax)·Kt(transpose)가 ROW |
+  | Q/K/V proj | 49,152 | **81,920** | 출력이 RoPE(slice/concat)로 감 → ROW |
+  | O proj | 49,152 | 49,152 | ctx(attn) 입력 ROW, residual add 출력 ROW |
+  | gate/up | 49,152 | 0 | 입력 rms2(RMSNorm) ROW |
+  | down | 0 | 49,152 | 출력 residual add ROW |
+
+  **핵심 발견**: 남은 비용은 전부 **row↔tile 경계**(RMSNorm·RoPE·softmax·transpose·residual = 전부 ROW op)에 있음.
+  경계에서 relayout은 데이터 볼륨이 같아 gather와 **비용 동일**(예: [128,3072] gather=49,152 = relayout scatter=49,152).
+  → **경계를 relayout로 감싸는 건 이득 0**; 그 op들 자체를 **tile-native**(tile 레이아웃에서 직접 계산)로 만들어야 제거됨.
+
+  **5d 서브스테이지(각각 gate GREEN + byte-exact 필수, 조율된 다중 op 변경이라 리스크 높음)**:
+  - **5d-1 tile-native RMSNorm + residual stream**: `emit_row_sum`(N 리듀스를 Nt 타일 누적) + `emit_broadcast`
+    col-broadcast(tile) tile-native화, residual stream을 TILE로(진입 param 1회 relayout, 반환 1회 relayout).
+    제거 예상: gate/up gather 49,152 + O/down scatter 각 49,152 (per-layer ~98K; **28-layer full model에선 relayout이
+    1회로 상각되어 ~196K/layer**). 연결성 최대(QKV·FFN·residual island 통합).
+  - **5d-2 tile-native attention core**: RoPE·softmax·transpose를 tile 레이아웃 계산. 가장 큼(gather 131K)이자
+    가장 어려움(head_dim=64 = 1 타일폭, RoPE가 타일 내부 반쪽 slice). byte-exact 리스크 최고.
 
 **검증**: 매 서브스테이지 출력 tolerance 유지 + gather/scatter % 감소 측정. golden 오라클 = direct 백엔드(row-major) 유지.
 
