@@ -18,6 +18,7 @@ Reductions/broadcasts are dedicated ops (not matmul) so matmul-the-op is TIR-onl
 """
 from tvm import relax
 from . import isa
+from . import memplan as _memplan
 from .isa import Asm, SRC1, SRC2, DST, VECTOR, IMM
 
 
@@ -151,8 +152,13 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
         if mm_backend == "tir":
             from . import tir_backend
             nt = mp.packed_meta.get(w)        # tile-blocked weight (no B-gather) if pre-packed
+            # A4: tile-blocked A/C skip the gather/scatter (mp.layout, 64-mult only)
+            sf = (M % 64 == 0 and K % 64 == 0 and N % 64 == 0)
+            a_tiled = sf and mp.layout.get(x) == "tile"
+            c_tiled = sf and mp.layout.get(dst) == "tile"
             tir_backend.emit_matmul_into(a, mp, off[dst], off[x], off[w], M, K, N,
-                                         b_pack_nt=nt, gather_cache=mm_gather_cache)
+                                         b_pack_nt=nt, gather_cache=mm_gather_cache,
+                                         a_tiled=a_tiled, c_tiled=c_tiled)
             return
         if tile is None:
             if max(M, K, N) > 255:
@@ -369,6 +375,16 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
            "relax.nn.silu": lambda: a.m_add(mode=IMM, imm=0, act=True),
            "relax.negative": a.v_sign_inv, "relax.cos": a.v_cos, "relax.sin": a.v_sin}
 
+    def _ew_n(dst):
+        """Element count for an elementwise op: physical tile-blocked size when the
+        output (and thus all its inputs, by layout consistency) is tile-blocked."""
+        if mp.layout.get(dst) == "tile":
+            return _memplan.tiled_numel(mp.shape[dst])
+        n = 1
+        for d in mp.shape[dst]:
+            n *= d
+        return n
+
     seq = func.body
     # ---- detect per-head O-proj add-tree: attn = sum_h (ctx_h @ Wo_h) ----------
     # H separate same-shape matmuls feeding one left-folded add chain. Fuse them
@@ -435,17 +451,11 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
                 with a.role("layout"):
                     emit_concat(dst, call)
             elif name in EW2:
-                n = 1
-                for d in mp.shape[dst]:
-                    n *= d
                 with a.role("elementwise"):
-                    emit_ew(dst, EW2[name], [call.args[0], call.args[1]], n)
+                    emit_ew(dst, EW2[name], [call.args[0], call.args[1]], _ew_n(dst))
             elif name in EW1:
-                n = 1
-                for d in mp.shape[dst]:
-                    n *= d
                 with a.role("elementwise"):
-                    emit_ew(dst, EW1[name], [call.args[0]], n)
+                    emit_ew(dst, EW1[name], [call.args[0]], _ew_n(dst))
             else:
                 raise CodegenError(f"unsupported op for B0 codegen: {name}")
             if emit_log is not None:
