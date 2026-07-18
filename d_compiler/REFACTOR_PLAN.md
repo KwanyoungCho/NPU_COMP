@@ -134,6 +134,32 @@ minor 단계로.** (A1 프로토타입은 net-손해라 default 미탑재, 되�
 
 ---
 
+## 3.5. A4 상세 설계 (tile-blocked 레이아웃 전파)
+
+**레이아웃 태그**: 각 텐서에 `layout ∈ {ROW, TILE}`.
+- `TILE` = `[⌈R/64⌉, ⌈N/64⌉, 64, 64]`(타일 row-major, 타일 내부 row-major, 패딩 0). matmul 출력 타일을
+  **연속 저장**(scatter 0), 다음 matmul이 **연속 읽기**(gather 0).
+- `ROW` = 현행 `[R,C]`.
+
+**레이아웃 배정 패스**(relax 그래프 위):
+- matmul in/out → TILE 선호.
+- elementwise/residual(add/mul/silu) → **레이아웃 투명**(두 피연산자 blocking 동일하면 원소별 그대로 동작) → TILE 전파.
+- reduce(sum/max, last-dim), broadcast, transpose → 논리 행/열 필요 → **ROW**.
+- 그래프 입력·최종 출력 → ROW.
+- 불일치 지점에 **re-layout(ROW↔TILE)** 삽입 = 현행 gather/scatter를 **경계로 이동**.
+
+**핵심 이득**: matmul **체인**(특히 FFN: gate/up→silu·mul→down)이 TILE로 이어지면 그 사이 gather/scatter 소멸.
+- FFN 예: `hn(ROW)` →[relayout 1회]→ `TILE_hn` → gate/up(A-gather 0) → silu·mul(TILE) → down(A-gather 0) →[relayout 1회]→ ROW.
+  현행 대비 **down의 A-gather + gate/up의 재-gather 제거**. FFN이 matmul 비용 최대라 큰 이득.
+
+**구현 서브스테이지**(각각 독립 green + gather 측정):
+- 5a: memplan에 `layout`/tile-blocked alloc 추가(shape는 논리 유지, 저장만 tile-blocked). 단위테스트: tile-blocked round-trip.
+- 5b: `emit_matmul_into`가 **입력·출력 TILE 모드**를 받게(연속 tile read/write, gather/scatter skip). 오라클: TILE==ROW 결과 일치.
+- 5c: 레이아웃 배정 패스 + re-layout 삽입(경계). 먼저 **FFN 체인만** 적용 → 측정 → attention·RMSNorm/softmax 경계로 확장.
+- 5d: layout-aware reduce/broadcast/transpose(또는 경계 국소 relayout).
+
+**검증**: 매 서브스테이지 출력 tolerance 유지 + gather/scatter % 감소 측정. golden 오라클 = direct 백엔드(row-major) 유지.
+
 ## 4. 리스크 관리 (중간 결과물 방지)
 - 매 Stage: 착수 전 브랜치, 완료 시 **전체 테스트 + byte-exact** 통과해야 커밋.
 - 값-불변 Stage(1,2,4)는 **출력 완전일치** 자동 비교. 값-변경 Stage(3,5)는 tolerance + 참조 비교.
