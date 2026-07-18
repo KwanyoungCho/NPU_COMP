@@ -65,12 +65,13 @@ torch import(frontend) ─┬─ import_legalize (HF)          ← (A3) 경로 �
 - **위험**: 낮음(수치 불변).
 - 주의: 최종 **명령 수는 HW 루프 부재로 불변**(문서에 명시, HW 요청 별도).
 
-### Stage 3 — (A3) legalization 통합 [중]
-- `import_legalize`의 softmax/silu/rope를 `legalize.py` 공통 빌더로 위임
-  (stable softmax, native SiLU, sign-inv+on-device RoPE 공유).
-- import 경로 회귀 테스트 추가(HF 레이어 == manual 레이어 값 일치).
-- **DoD**: import·manual 두 경로가 **동일 코드·정확도**. 전체 테스트 green.
-- **위험**: 중(HF 프론트엔드 op 형태 차이) → import 어댑터에서 shape/attr 정규화.
+### Stage 3 — (A3) legalization 통합 [중] ✅ (커밋 b34c723)
+- `import_legalize`의 silu→`legalize.silu`(native), softmax→`legalize.softmax_lastdim`(stable),
+  negative→native 유지(sign-inv, RoPE rotate_half 공유). import·manual 두 경로가 **동일 lowering**.
+- 회귀: 기존 `test_import.test_llama_block`(full Llama decoder block import vs torch, rel=0.025<0.05)이
+  통일된 lowering을 커버. rope는 import에서 이미 primitive(slice/concat/negative/mul/add)라 manual과 동일.
+- **결과**: 전체 gate GREEN + vendor byte-exact 유지. 향후 실제 HF 모델도 동일 최적화 경로로 import됨.
+- 미변경: `_power`/`_rsqrt`/`_mean`(RMSNorm 내부)은 manual과 같은 primitive라 유지.
 
 ### Stage 4 — (A1) liveness 기반 메모리 재사용 [대] ★
 - 4a: **graph-var liveness** — SSA use-def로 각 binding var의 [def, last-use] 구간 계산.
