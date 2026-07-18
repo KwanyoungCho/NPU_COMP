@@ -7,7 +7,7 @@ PY=/home/chokwans99/anaconda3/envs/npu-tvm/bin/python
 ROOT=/home/chokwans99/NPU_cmodel
 cd "$ROOT/d_compiler"
 fail=0
-for t in test_isa test_matmul test_rmsnorm test_swiglu test_elementwise test_tiling \
+for t in test_isa test_layout test_matmul test_rmsnorm test_swiglu test_elementwise test_tiling \
          test_runtime test_layer test_tir_backend test_import test_attention \
          test_real_layer test_decode; do
   out=$(timeout 300 $PY tests/$t.py 2>&1 | tail -1)

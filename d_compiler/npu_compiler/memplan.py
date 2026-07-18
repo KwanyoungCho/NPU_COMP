@@ -23,6 +23,34 @@ def _numel(shape):
     return n
 
 
+def _ceil(x, T=64):
+    return (x + T - 1) // T * T
+
+
+# ---- tile-blocked layout (A4): [R,N] logical <-> [Rt,Nt,T,T] physical, zero-padded ----
+# Canonical convention shared by memplan alloc, codegen TILE-mode matmul, and runtime.
+def pack_tiled(arr, T=64):
+    """[R,N] row-major -> flat tile-blocked [ceil(R/T),ceil(N/T),T,T] (pad with 0)."""
+    R, N = arr.shape
+    Rt, Nt = _ceil(R, T) // T, _ceil(N, T) // T
+    padded = np.zeros((Rt * T, Nt * T), dtype=arr.dtype)
+    padded[:R, :N] = arr
+    return padded.reshape(Rt, T, Nt, T).transpose(0, 2, 1, 3).reshape(-1)
+
+
+def unpack_tiled(flat, R, N, T=64):
+    """flat tile-blocked -> [R,N] row-major (drops padding). Inverse of pack_tiled."""
+    Rt, Nt = _ceil(R, T) // T, _ceil(N, T) // T
+    blk = np.asarray(flat).reshape(Rt, Nt, T, T).transpose(0, 2, 1, 3).reshape(Rt * T, Nt * T)
+    return blk[:R, :N]
+
+
+def tiled_numel(shape, T=64):
+    """Physical element count of a [R,N] tensor stored tile-blocked (padded to T)."""
+    R, N = shape
+    return (_ceil(R, T) // T) * (_ceil(N, T) // T) * T * T
+
+
 class MemPlan:
     def __init__(self):
         self.offset = {}      # Var|Constant -> int offset (FP16 element units)
@@ -35,6 +63,7 @@ class MemPlan:
         self.tuple_of = {}    # tuple-typed Var -> [field vars] (torch import outputs)
         self.output = None    # returned Var
         self.packed_meta = {} # Constant -> Nt (tile-blocked weight: stored [Kt,Nt,64,64])
+        self.layout = {}      # Var|Constant -> 'row' (default) | 'tile' (A4 tile-blocked)
 
     def alloc(self, var):
         shape, dtype = _shape_dtype(var.struct_info)
@@ -42,7 +71,21 @@ class MemPlan:
         self.offset[var] = off
         self.shape[var] = shape
         self.dtype[var] = dtype
+        self.layout[var] = "row"
         self.top += _numel(shape)
+        return off
+
+    def alloc_tiled(self, var):
+        """Allocate a binding var in tile-blocked layout (A4). Logical shape is kept;
+        physical footprint is padded-to-64 tiles. codegen TILE-mode matmul reads/writes
+        each 64x64 tile contiguously (no gather/scatter)."""
+        shape, dtype = _shape_dtype(var.struct_info)
+        off = self.top
+        self.offset[var] = off
+        self.shape[var] = shape
+        self.dtype[var] = dtype
+        self.layout[var] = "tile"
+        self.top += tiled_numel(shape)
         return off
 
     def scratch_alloc(self, n):
@@ -60,6 +103,7 @@ class MemPlan:
         self.offset[c] = self.top
         self.shape[c] = shape
         self.dtype[c] = dtype
+        self.layout[c] = "row"
         self.top += _numel(shape)
         self.constants.append(c)
         self.const_data[c] = data
@@ -77,6 +121,7 @@ class MemPlan:
         self.offset[c] = self.top
         self.shape[c] = shape                                  # logical shape unchanged
         self.dtype[c] = dtype
+        self.layout[c] = "tile"
         self.top += K * N
         self.constants.append(c)
         self.const_data[c] = packed
