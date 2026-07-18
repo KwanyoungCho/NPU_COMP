@@ -95,10 +95,35 @@ torch import(frontend) ─┬─ import_legalize (HF)          ← (A3) 경로 �
 
 ---
 
-## 3. 순서 & 종료 조건
+## 2.5. ★ A1 실측 결과 & 재정렬 (2026-07-14)
 
-권장 순서: **Stage 0 → 1 → 2 → 3 → 4 → 5**.
-(소·저위험부터 → 대공사 A1 → A4. 각 Stage green 전엔 다음으로 안 넘어감.)
+A1(binding-var liveness 재사용)을 프로토타입해 **3B prefill layer로 실측**한 결과 재정렬 필요:
+
+| | 메모리(mp.top) | 명령 수 |
+|---|---:|---:|
+| bump(현행) | 293MB | 2,235,194 |
+| liveness 재사용 | 263MB (**−10%뿐**) | **4,236,090 (+90%!)** |
+
+- **메모리 −10%뿐**: 버퍼는 **가중치(~200MB, 레이어 상주 불가피)** 가 지배. 활성화 재사용 효과 작음.
+- **명령 +90%**: liveness 재사용은 **write-once 가정을 깨서** `gather_cache`(활성화 gather 재사용)와
+  충돌 → 비활성화하면 xn/hn 재-gather로 명령 2배. (MEDIUM에선 출력 bit-exact 확인했으나 3B에서 net-손해)
+- **O-proj 융합**이 leaf 입력을 root에서 지연-read → naive SSA liveness가 조기 free(0.51 오차). liveness가
+  codegen의 **실제 스케줄(융합/reschedule)** 과 일치해야 함 = 추가 결합.
+- **핵심**: 재사용 가능한 메모리 bulk는 **gather scratch(~80MB, 누적)** 인데 이는 **A4가 제거**한다.
+  그리고 **A4 이후엔 gather가 없어 gather_cache도 없으니 binding 재사용이 안전**해진다.
+
+→ **결론: A1은 A4에 포섭된다. A4를 먼저 하고, A1(binding+비-gather scratch 재사용)은 A4 이후
+minor 단계로.** (A1 프로토타입은 net-손해라 default 미탑재, 되돌림.)
+
+## 3. 순서 & 종료 조건 (재정렬)
+
+권장 순서: **Stage 0 → A4 → A1 → A3 → A2**.
+- **A4 먼저**: gather/scatter 제거 → 명령 수(오버헤드 40~48%) + gather scratch(메모리) 동시 해결,
+  그리고 이후 A1을 안전하게 만든다(gather 없음 → gather_cache 없음 → 재사용 충돌 없음).
+- **A1 다음**(A4 후): binding + 비-gather scratch 재사용. gather scratch가 이미 사라져 순수 이득.
+  단 **liveness가 O-proj 융합 등 codegen 스케줄과 일치**하도록 결합(또는 융합 off와 함께).
+- **A3/A2**: 정리·속도, 후순위.
+- 각 Stage green 전엔 다음으로 안 넘어감.
 
 **최종 종료 조건(End State 달성)**:
 - 전체 테스트 + byte-exact 63/63 green
