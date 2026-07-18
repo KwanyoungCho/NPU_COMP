@@ -23,6 +23,19 @@ from .isa import Asm, SRC1, SRC2, DST, IMM, VECTOR
 
 TILE = 64
 
+# Pure-Python evaluator dispatch for the affine index math in scheduled GEMM TIR.
+# Walking these in Python (below) avoids a TVM FFI substitute+simplify round-trip per
+# index expr — the compile hot path. Anything not here falls back to arith.simplify.
+_TIR_BINOPS = {
+    tir.Add: lambda a, b: a + b,
+    tir.Sub: lambda a, b: a - b,
+    tir.Mul: lambda a, b: a * b,
+    tir.FloorDiv: lambda a, b: a // b,       # matches TVM floordiv for all signs
+    tir.FloorMod: lambda a, b: a % b,        # matches TVM floormod for all signs
+    tir.Min: min,
+    tir.Max: max,
+}
+
 
 # ============================ intrinsic definitions ============================
 # desc = what the 64x64 block computes (for pattern matching)
@@ -135,14 +148,38 @@ class _Walker:
 
     # ---- expression / pointer evaluation ----
     def ev(self, expr):
-        e = tir.stmt_functor.substitute(expr, self.env)
+        v = self._ev_fast(expr)                          # pure-Python fast path (no FFI)
+        if v is not None:
+            return v
+        env = {k: tir.IntImm(k.dtype if k.dtype else "int64", i) for k, i in self.env.items()}
+        e = tir.stmt_functor.substitute(expr, env)       # fallback for unhandled node types
         e = self.ana.simplify(e)
         if not isinstance(e, tir.IntImm):
             raise TirBackendError(f"cannot const-evaluate: {expr}")
         return int(e.value)
 
+    def _ev_fast(self, e):
+        """Evaluate an affine index expr from self.env (Var->int) without TVM FFI.
+        Returns an int, or None if the expr contains a node type we don't handle
+        (-> ev() falls back to substitute+simplify). env holds plain Python ints."""
+        t = type(e)
+        if t is tir.Var or t is tir.SizeVar:
+            return self.env.get(e)                       # int, or None (unbound -> fallback)
+        if t is tir.IntImm:
+            return int(e.value)
+        op = _TIR_BINOPS.get(t)
+        if op is not None:
+            a = self._ev_fast(e.a)
+            if a is None:
+                return None
+            b = self._ev_fast(e.b)
+            return None if b is None else op(a, b)
+        if t is tir.Cast:
+            return self._ev_fast(e.value)
+        return None
+
     def _bind(self, var, value):
-        self.env[var] = tir.IntImm(var.dtype if var.dtype else "int64", value)
+        self.env[var] = value                            # plain Python int (see _ev_fast)
 
     def ptr(self, call):                  # tvm_access_ptr(type, data, elem_offset, extent, mask)
         data = call.args[1]

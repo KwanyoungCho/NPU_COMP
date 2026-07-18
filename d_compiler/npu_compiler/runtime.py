@@ -33,8 +33,9 @@ def _program_bytes(program):
     if isinstance(program, (bytes, bytearray)):
         return bytes(program)
     words = program.words if hasattr(program, "words") else list(program)
-    import struct
-    return b"".join(struct.pack("<I", w & 0xFFFFFFFF) for w in words) + b"\n"
+    # vectorized little-endian uint32 pack (was a per-word struct.pack loop over ~1.8M words)
+    arr = (np.asarray(words, dtype=np.uint64) & np.uint64(0xFFFFFFFF)).astype("<u4")
+    return arr.tobytes() + b"\n"
 
 
 def _gbuffer_bytes(gbuf):
