@@ -16,20 +16,22 @@ def compile_func(func, tile=None):
 
 
 def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_oproj=True,
-                   pack_params=False):
+                   pack_params=False, layouts=True):
     """Relax module -> (asm, mp). Split out so a caller can compile ONCE and reuse
     the compiled program across many runs — e.g. the SAME decode kernel serves all
     28 layers and every token (only the weight *inputs* differ). This is what makes
     full-size generation practical: compile ~once, then just re-run on mysim.
 
     pack_params=True pre-packs static weight PARAMS (tile-blocked) so the reused
-    kernel reads weights contiguously (no gather); run_compiled packs the fed data."""
+    kernel reads weights contiguously (no gather); run_compiled packs the fed data.
+    layouts=True enables the A4 tile-blocked layout propagation (matmul-chain
+    gather/scatter elimination); layouts=False = pre-A4 row-major, for A/B comparison."""
     if backend == "tir":                      # matmul-only modules via pure TIR path
         from . import tir_backend
         return tir_backend.compile_func(mod, func_name)
     if backend == "hybrid":                   # whole graph: matmul->TIR, rest->direct
         func = mod[func_name]
-        mp = _memplan.plan(func, pack_params=pack_params)
+        mp = _memplan.plan(func, pack_params=pack_params, layouts=layouts)
         asm = _codegen.compile_func(func, mp, tile=64, mm_backend="tir", fuse_oproj=fuse_oproj)
         return asm, mp
     func = mod[func_name]
@@ -72,10 +74,11 @@ def run_compiled(asm, mp, inputs, maxrun=None):
 
 
 def run_module(mod, inputs, func_name="main", maxrun=None, tile=None, backend="direct",
-               fuse_oproj=True, pack_params=False):
+               fuse_oproj=True, pack_params=False, layouts=True):
     """Convenience: compile + run a Relax module on mysim (recompiles each call).
-    For loops that reuse one kernel, prefer compile_module()+run_compiled()."""
-    asm, mp = compile_module(mod, func_name, tile, backend, fuse_oproj, pack_params)
+    For loops that reuse one kernel, prefer compile_module()+run_compiled().
+    layouts=False disables the A4 tile-blocked layout (pre-A4 row-major) for A/B tests."""
+    asm, mp = compile_module(mod, func_name, tile, backend, fuse_oproj, pack_params, layouts)
     return run_compiled(asm, mp, inputs, maxrun)
 
 
