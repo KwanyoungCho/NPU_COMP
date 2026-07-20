@@ -16,7 +16,7 @@ def compile_func(func, tile=None):
 
 
 def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_oproj=True,
-                   pack_params=False, layouts=True):
+                   pack_params=False, layouts=True, reuse=False):
     """Relax module -> (asm, mp). Split out so a caller can compile ONCE and reuse
     the compiled program across many runs — e.g. the SAME decode kernel serves all
     28 layers and every token (only the weight *inputs* differ). This is what makes
@@ -31,7 +31,7 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
         return tir_backend.compile_func(mod, func_name)
     if backend == "hybrid":                   # whole graph: matmul->TIR, rest->direct
         func = mod[func_name]
-        mp = _memplan.plan(func, pack_params=pack_params, layouts=layouts)
+        mp = _memplan.plan(func, pack_params=pack_params, layouts=layouts, reuse=reuse)
         asm = _codegen.compile_func(func, mp, tile=64, mm_backend="tir", fuse_oproj=fuse_oproj)
         return asm, mp
     func = mod[func_name]
@@ -77,11 +77,12 @@ def run_compiled(asm, mp, inputs, maxrun=None):
 
 
 def run_module(mod, inputs, func_name="main", maxrun=None, tile=None, backend="direct",
-               fuse_oproj=True, pack_params=False, layouts=True):
+               fuse_oproj=True, pack_params=False, layouts=True, reuse=False):
     """Convenience: compile + run a Relax module on mysim (recompiles each call).
     For loops that reuse one kernel, prefer compile_module()+run_compiled().
-    layouts=False disables the A4 tile-blocked layout (pre-A4 row-major) for A/B tests."""
-    asm, mp = compile_module(mod, func_name, tile, backend, fuse_oproj, pack_params, layouts)
+    layouts=False disables the A4 tile-blocked layout (pre-A4 row-major) for A/B tests.
+    reuse=True enables A1 liveness-based activation offset reuse (byte-exact, lower mp.top)."""
+    asm, mp = compile_module(mod, func_name, tile, backend, fuse_oproj, pack_params, layouts, reuse)
     return run_compiled(asm, mp, inputs, maxrun)
 
 

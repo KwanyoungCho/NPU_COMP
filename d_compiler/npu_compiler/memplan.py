@@ -338,7 +338,43 @@ def assign_layouts(bindings, output_var, tile_inputs=False):
     return layout
 
 
-def plan(func, pack=True, pack_params=False, layouts=True):
+def _footprint(shape, lay):
+    return tiled_numel(shape) if lay == "tile" else _numel(shape)
+
+
+def _liveness(seq, bindings):
+    """A1: fusion-aware last-read per binding var, in codegen EMISSION order.
+    O-proj groups are emitted at the root and read the leaves' inputs (ctx_h/Wo_h)
+    there, so those inputs stay live until the root — naive graph liveness would free
+    them one step too early. Folded (consumed non-root) vars are never materialised.
+    Returns (emit_idx, reads_at, last_read, consumed, fused_root)."""
+    from . import codegen                                  # module-level helper (lazy: avoids cycle)
+    fused_root, consumed = codegen._detect_oproj_groups(seq)
+    val_of = {b.var: b.value for b in bindings}
+    emit_idx, reads_at, i = {}, {}, 0
+    for b in bindings:
+        v = b.var
+        if v in consumed and v not in fused_root:         # folded away, not emitted
+            continue
+        if v in fused_root:                               # group reads every leaf's inputs here
+            rd = []
+            for leaf in fused_root[v]:
+                mm = val_of[leaf]
+                rd += [a for a in mm.args if isinstance(a, relax.Var)]
+            reads_at[i] = rd
+        else:
+            reads_at[i] = _arg_vars(b.value)
+        emit_idx[v] = i
+        i += 1
+    last_read = {}
+    for idx, rds in reads_at.items():
+        for u in rds:
+            if last_read.get(u, -1) < idx:
+                last_read[u] = idx
+    return emit_idx, reads_at, last_read, consumed, fused_root
+
+
+def plan(func, pack=True, pack_params=False, layouts=True, reuse=False):
     """Plan a Relax function: assign G-buffer offsets to params, constants, and
     every binding var. Returns a MemPlan. Assumes one dataflow block returning a Var.
 
@@ -347,7 +383,13 @@ def plan(func, pack=True, pack_params=False, layouts=True):
                        weights) as packed. The param's byte-size is unchanged (same
                        K*N); only packed_meta is recorded so codegen reads it packed
                        (no gather) and run_compiled packs the fed data. Cache params
-                       (Kt*/Vc*, filled at runtime) are NOT weights -> not packed."""
+                       (Kt*/Vc*, filled at runtime) are NOT weights -> not packed.
+    reuse=True       : A1 liveness-based offset reuse for ACTIVATION binding vars — a
+                       var's slot is freed at its last read and handed to a later
+                       same-size var (exact-size free-list). Value-invariant (data
+                       location only) -> byte-exact vs reuse=False. Safe now that A4
+                       (5d-2) eliminated all gather, so there is no gather_cache
+                       write-once conflict."""
     mp = MemPlan()
     param_set = set(func.params)
     seq = func.body
@@ -373,6 +415,32 @@ def plan(func, pack=True, pack_params=False, layouts=True):
             mp.tiled_inputs.add(p)
         else:
             mp.alloc(p)
+
+    # A1: fusion-aware liveness + exact-size free-list (activation offset reuse)
+    emit_idx = reads_at = last_read = None
+    consumed_set, fused_root = set(), {}
+    keep_alive = set(param_set)
+    free_list = {}                                         # footprint -> [freed offsets]
+    if reuse:
+        emit_idx, reads_at, last_read, consumed_set, fused_root = _liveness(seq, bindings)
+        val_of = {b.var: b.value for b in bindings}
+        o = out                                           # output + its alias chain never freed
+        keep_alive.add(o)
+        while isinstance(val_of.get(o), relax.Var):
+            o = val_of[o]; keep_alive.add(o)
+
+    def _alloc_reuse(v, lay):
+        shape, dtype = _shape_dtype(v.struct_info)
+        size = _footprint(shape, lay)
+        lst = free_list.get(size)
+        off = lst.pop() if lst else mp.top
+        if not lst:
+            mp.top += size
+        mp.offset[v] = off; mp.shape[v] = shape; mp.dtype[v] = dtype; mp.layout[v] = lay
+        for u in reads_at.get(emit_idx.get(v, -1), []):   # free inputs dead after this binding
+            if (last_read.get(u) == emit_idx[v] and u not in keep_alive
+                    and u in mp.offset and u not in mp.const_data):
+                free_list.setdefault(_footprint(mp.shape[u], mp.layout[u]), []).append(mp.offset[u])
 
     for binding in bindings:
         val = binding.value
@@ -402,9 +470,17 @@ def plan(func, pack=True, pack_params=False, layouts=True):
                       and arg in param_set and arg not in mp.packed_meta
                       and arg.name_hint.startswith("W") and _packable(arg)):
                     mp.packed_meta[arg] = int(arg.struct_info.shape[1]) // 64
-        if layout.get(binding.var) == "tile":
-            mp.alloc_tiled(binding.var)
+        v = binding.var
+        lay = layout.get(v, "row")
+        if reuse:
+            if v in consumed_set and v not in fused_root:  # folded non-root: never emitted/read
+                shape, dtype = _shape_dtype(v.struct_info)   # dead -> dummy offset (never read)
+                mp.offset[v] = 0; mp.shape[v] = shape; mp.dtype[v] = dtype; mp.layout[v] = lay
+            else:                                          # normal var OR O-proj root (emitted)
+                _alloc_reuse(v, lay)
+        elif lay == "tile":
+            mp.alloc_tiled(v)
         else:
-            mp.alloc(binding.var)
+            mp.alloc(v)
     mp.output = out
     return mp

@@ -139,10 +139,33 @@ def test_tile_attention():
     return f"tile-native attention within tol ({ntile} tile, rel={rel:.4f})"
 
 
+def test_reuse_memory():
+    """A1: liveness-based activation offset reuse (reuse=True) frees a binding var's
+    slot at its last read (fusion-aware: O-proj leaves stay live until the root) and
+    hands it to a later same-size var. Value-invariant -> BYTE-EXACT vs reuse=False,
+    with strictly lower mp.top and identical instruction count."""
+    from npu_compiler import model, driver, memplan
+    cfg = model.MEDIUM._replace(name="tiny128", SEQ=64, D=256, H=2, KV=1, HD=128, F=256)
+    mod = model.build_prefill_layer_module(cfg, cfg.SEQ)
+    rng = np.random.default_rng(11)
+    f16 = lambda a: np.asarray(a, np.float16)
+    ins = {p.name_hint: f16(rng.standard_normal([int(d) for d in p.struct_info.shape]) * 0.08)
+           for p in mod["main"].params}
+    kw = dict(pack=True, pack_params=True, layouts=True)
+    top0 = memplan.plan(mod["main"], reuse=False, **kw).top
+    top1 = memplan.plan(mod["main"], reuse=True, **kw).top
+    assert top1 < top0, f"reuse should lower mp.top ({top1} !< {top0})"
+    o0 = driver.run_module(mod, ins, backend="hybrid", layouts=True, pack_params=True, reuse=False)
+    o1 = driver.run_module(mod, ins, backend="hybrid", layouts=True, pack_params=True, reuse=True)
+    assert np.array_equal(o0, o1), f"reuse != no-reuse (maxdiff={np.max(np.abs(o0 - o1))})"
+    return f"reuse byte-exact; mp.top {top0:,} -> {top1:,} ({100*(top1-top0)/top0:.1f}%)"
+
+
 if __name__ == "__main__":
     print("[PASS] roundtrip:", test_roundtrip())
     print("[PASS] tile-contiguous:", test_tile_contiguous())
     print("[PASS] tile-mode matmul:", test_tile_mode_matmul())
     print("[PASS] tile-rmsnorm:", test_tile_rmsnorm())
     print("[PASS] tile-attention:", test_tile_attention())
-    print("ALL LAYOUT (A4 5a/5b/5d) TESTS PASSED")
+    print("[PASS] reuse-memory:", test_reuse_memory())
+    print("ALL LAYOUT (A4 5a/5b/5d + A1) TESTS PASSED")
