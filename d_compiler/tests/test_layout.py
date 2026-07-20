@@ -116,9 +116,33 @@ def test_tile_rmsnorm():
     return f"tile-native RMSNorm + tile input within tol ({ntile} tile, rel={rel:.4f})"
 
 
+def test_tile_attention():
+    """A4 5d-2: tile-native attention core — RoPE (slice/concat, h=64 = 1 tile so the
+    half-slice is tile-aligned), Kᵀ transpose, stable softmax (tile reduce max/sum +
+    broadcast), and matmul reading a tile ACTIVATION B (Kt/V) — on a small HD=128 layer.
+    Matches the row-major path within FP16 tolerance (reduce reorder ~0.1%)."""
+    from npu_compiler import model, driver, memplan
+    cfg = model.MEDIUM._replace(name="tiny128", SEQ=64, D=256, H=2, KV=1, HD=128, F=256)
+    S = cfg.SEQ
+    mod = model.build_prefill_layer_module(cfg, S)
+    rng = np.random.default_rng(11)
+    f16 = lambda a: np.asarray(a, np.float16)
+    ins = {p.name_hint: f16(rng.standard_normal([int(d) for d in p.struct_info.shape]) * 0.08)
+           for p in mod["main"].params}
+    ntile = sum(1 for l in memplan.plan(mod["main"], pack=True, pack_params=True,
+                                        layouts=True).layout.values() if l == "tile")
+    assert ntile >= 70, f"attention core should tile, got {ntile}"
+    o_row = driver.run_module(mod, ins, backend="hybrid", layouts=False)
+    o_til = driver.run_module(mod, ins, backend="hybrid", layouts=True, pack_params=True)
+    rel = float(np.max(np.abs(o_row - o_til))) / (float(np.max(np.abs(o_row))) + 1e-9)
+    assert rel < 0.02, f"tile attention rel {rel} too large"
+    return f"tile-native attention within tol ({ntile} tile, rel={rel:.4f})"
+
+
 if __name__ == "__main__":
     print("[PASS] roundtrip:", test_roundtrip())
     print("[PASS] tile-contiguous:", test_tile_contiguous())
     print("[PASS] tile-mode matmul:", test_tile_mode_matmul())
     print("[PASS] tile-rmsnorm:", test_tile_rmsnorm())
+    print("[PASS] tile-attention:", test_tile_attention())
     print("ALL LAYOUT (A4 5a/5b/5d) TESTS PASSED")

@@ -156,6 +156,8 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
             sf = (M % 64 == 0 and K % 64 == 0 and N % 64 == 0)
             a_tiled = sf and mp.layout.get(x) == "tile"
             c_tiled = sf and mp.layout.get(dst) == "tile"
+            if nt is None and sf and mp.layout.get(w) == "tile":
+                nt = N // 64                  # A4 5d-2: tile-blocked activation B (Kt/V, no B-gather)
             tir_backend.emit_matmul_into(a, mp, off[dst], off[x], off[w], M, K, N,
                                          b_pack_nt=nt, gather_cache=mm_gather_cache,
                                          a_tiled=a_tiled, c_tiled=c_tiled)
@@ -247,6 +249,30 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
         R, C = mp.shape[src]
         assert mp.shape[dst][-1] == 1, f"emit_row_max expects [R,1] dst, got {mp.shape[dst]}"
         s0, d0 = off[src], off[dst]
+        if mp.layout.get(src) == "tile":                 # A4 5d-2: TILE src (no gather); no native
+            assert R % 64 == 0 and C % 64 == 0, f"tile row_max needs 64-mult, got {[R,C]}"
+            Ct = C // 64                                 # reduce-max -> fold with vector-max (0x12)
+            B = mp.scratch_alloc(64 * 64)                # per row-block: max over column-tiles
+            ac = mp.scratch_alloc(64)
+            for rt in range(R // 64):
+                base = s0 + (rt * Ct) * 4096
+                a.vlen(4096); a.addr(SRC1, base); a.load(0, 0)
+                a.v_copy(); a.addr(DST, B); a.save(0)     # B = tile(rt,0)
+                for ct in range(1, Ct):
+                    a.vlen(4096); a.addr(SRC1, base + ct * 4096); a.load(0, 0)
+                    a.addr(SRC2, B); a.load(0, 1); a.v_max(mode=VECTOR)
+                    a.addr(DST, B); a.save(0)             # B = max(B, tile(rt,ct))  elementwise
+                a.tile(0, 64, 64); a.addr(SRC1, B)        # reduce B's 64 cols -> row max (fold)
+                a.load(1, 0, strided=1, ncols=1, start=0)
+                a.vlen(64); a.v_copy(); a.addr(DST, ac); a.save(0)  # ac = col 0
+                for j in range(1, 64):
+                    a.tile(0, 64, 64); a.addr(SRC1, B)
+                    a.load(1, 0, strided=1, ncols=1, start=j)
+                    a.vlen(64); a.addr(SRC2, ac); a.load(0, 1); a.v_max(mode=VECTOR)
+                    a.addr(DST, ac); a.save(0)
+                a.vlen(64); a.addr(SRC1, ac); a.load(0, 0)
+                a.v_copy(); a.addr(DST, d0 + rt * 64); a.save(0)   # dst[rt*64+ir] = row max
+            return
         acc = mp.scratch_alloc(R)
         a.tile(0, R, C); a.addr(SRC1, s0)
         a.load(1, 0, strided=1, ncols=1, start=0)         # pin1 = column 0 [R]
@@ -339,6 +365,16 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
             raise CodegenError(f"transpose expects 2D, got {shp}")
         R, C = shp
         s0, d0 = off[src], off[dst]
+        if mp.layout.get(src) == "tile":                 # A4 5d-2: tile [R,C]->[C,R] tile
+            assert R % 64 == 0 and C % 64 == 0, f"tile transpose needs 64-mult, got {[R,C]}"
+            Rt, Ct = R // 64, C // 64
+            for ti in range(Rt):
+                for tj in range(Ct):
+                    a.tile(0, 64, 64); a.addr(SRC1, s0 + (ti * Ct + tj) * 4096)
+                    a.load(1, 0, strided=1, ncols=64, start=0)  # column-major read = 64x64 transpose
+                    a.vlen(4096); a.v_copy()
+                    a.addr(DST, d0 + (tj * Rt + ti) * 4096); a.save(0)  # -> dst tile (tj,ti)
+            return
         T = tile or 64
         scr = mp.scratch_alloc(T * T)
         for ci in range(0, C, T):                        # tile dst rows (= src cols)
@@ -367,6 +403,15 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
         b0 = begin[0] + (C if begin[0] < 0 else 0)
         e0 = min(end[0], C)
         w = e0 - b0
+        if mp.layout.get(dst) == "tile":                 # A4 5d-2: tile-column-aligned slice (RoPE)
+            assert R % 64 == 0 and b0 % 64 == 0 and w % 64 == 0, \
+                f"tile strided_slice needs 64-aligned, got R={R} b0={b0} w={w}"
+            Rt, Ct, wt, cb = R // 64, C // 64, w // 64, b0 // 64
+            for ti in range(Rt):                         # copy the selected column-tiles
+                for j in range(wt):
+                    a.vlen(4096); a.addr(SRC1, off[src] + (ti * Ct + cb + j) * 4096); a.load(0, 0)
+                    a.v_copy(); a.addr(DST, off[dst] + (ti * wt + j) * 4096); a.save(0)
+            return
         for r in range(R):
             a.vlen(w)
             a.addr(SRC1, off[src] + r * C + b0); a.load(0, 0)
@@ -376,11 +421,27 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
     def emit_concat(dst, call):
         """2D last-axis concat: copy each input's columns into the output (per-row).
         dst is row-major; a TILE input (A4 5d) is relayout-read (its row r spans Ct
-        tile segments) so the concat output stays row-major."""
+        tile segments) so the concat output stays row-major. When dst is TILE (A4 5d-2,
+        RoPE rh) all inputs are tile with 64-mult widths -> place whole column-tiles."""
         srcs = list(call.args[0].fields)
         if int(call.attrs.axis) not in (1, -1):
             raise CodegenError(f"concat: only last-axis 2D (axis={call.attrs.axis})")
         Cd = mp.shape[dst][1]
+        if mp.layout.get(dst) == "tile":                 # tile->tile: place each input's column-tiles
+            Rd = mp.shape[dst][0]
+            assert Rd % 64 == 0 and Cd % 64 == 0, f"tile concat needs 64-mult, got {[Rd,Cd]}"
+            Rt, Ntd = Rd // 64, Cd // 64
+            ctile = 0
+            for s in srcs:
+                Rs, Cs = mp.shape[s]
+                assert mp.layout.get(s) == "tile" and Cs % 64 == 0, f"tile concat src {s.name_hint}"
+                Cst = Cs // 64
+                for ti in range(Rt):
+                    for j in range(Cst):
+                        a.vlen(4096); a.addr(SRC1, off[s] + (ti * Cst + j) * 4096); a.load(0, 0)
+                        a.v_copy(); a.addr(DST, off[dst] + (ti * Ntd + ctile + j) * 4096); a.save(0)
+                ctile += Cst
+            return
         col = 0
         for s in srcs:
             Rs, Cs = mp.shape[s]
@@ -455,7 +516,9 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
             mm = val_of[lv]                                  # relax.matmul call
             av, bv = mm.args[0], mm.args[1]
             M, K = mp.shape[av]; _, N = mp.shape[bv]
-            terms.append((off[av], off[bv], M, K, N, mp.packed_meta.get(bv)))
+            a_tiled = (K // 64) if (mp.layout.get(av) == "tile"
+                                    and M % 64 == 0 and K % 64 == 0) else None
+            terms.append((off[av], off[bv], M, K, N, mp.packed_meta.get(bv), a_tiled))
         M, N = terms[0][2], terms[0][4]
         c_tiled = (N // 64) if (mp.layout.get(root_var) == "tile"
                                 and M % 64 == 0 and N % 64 == 0) else None
@@ -471,7 +534,7 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
             if dst in consumed:                              # folded into an O-proj group
                 if dst in fused_root:
                     _start = len(a.words)
-                    _, _, M, K, N, _ = emit_oproj_group(dst, fused_root[dst])
+                    _, _, M, K, N, _, _ = emit_oproj_group(dst, fused_root[dst])
                     if emit_log is not None:                 # attribute to the matmul (O proj)
                         emit_log.append(("relax.matmul", mp.shape.get(dst),
                                          [(M, K), (K, N)], _start, len(a.words)))

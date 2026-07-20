@@ -186,12 +186,16 @@ def assign_layouts(bindings, output_var, tile_inputs=False):
     val = {b.var: b.value for b in bindings}
     consumers = {}
     mm_a = {}                                          # v -> {matmul binding vars reading v as A}
+    mm_b = {}                                          # v -> {matmul binding vars reading v as B}
     for b in bindings:
         for v in _arg_vars(b.value):
             consumers.setdefault(v, []).append(b.var)
         c = b.value
-        if isinstance(c, relax.Call) and _opn(c) == "relax.matmul" and isinstance(c.args[0], relax.Var):
-            mm_a.setdefault(c.args[0], set()).add(b.var)  # Var hash-eq keys (identity `is` is unreliable)
+        if isinstance(c, relax.Call) and _opn(c) == "relax.matmul":
+            if isinstance(c.args[0], relax.Var):
+                mm_a.setdefault(c.args[0], set()).add(b.var)  # Var hash-eq keys (identity `is` unreliable)
+            if isinstance(c.args[1], relax.Var):
+                mm_b.setdefault(c.args[1], set()).add(b.var)  # tile activation B (A4 5d-2: Kt/V)
 
     def is_mm64(v):
         c = val.get(v)
@@ -223,6 +227,37 @@ def assign_layouts(bindings, output_var, tile_inputs=False):
         c = val.get(v)
         return isinstance(c, relax.Call) and _opn(c) == "relax.concat"
 
+    def _is64_2d(v):
+        sh = [int(d) for d in v.struct_info.shape]
+        return len(sh) == 2 and sh[0] % 64 == 0 and sh[1] % 64 == 0
+
+    # A4 5d-2 attention: layout-transforming producers that need a TILE input.
+    def is_transpose(v):                               # permute_dims [R,C]->[C,R]
+        c = val.get(v)
+        return isinstance(c, relax.Call) and _opn(c) == "relax.permute_dims" and _is64_2d(v)
+
+    def is_tslice(v):                                  # strided_slice, tile-COLUMN-aligned last axis
+        c = val.get(v)
+        if not (isinstance(c, relax.Call) and _opn(c) == "relax.strided_slice" and _is64_2d(v)):
+            return False
+        axes = [int(f.value) for f in c.args[1]]
+        if axes[0] not in (1, -1):
+            return False
+        src_c = int(c.args[0].struct_info.shape[1])
+        beg = int(c.args[2][0].value)
+        b0 = beg + (src_c if beg < 0 else 0)
+        return b0 % 64 == 0
+
+    def is_concat64(v):                                # concat with a 64-mult 2D output (tile if all in tile)
+        return is_concat(v) and _is64_2d(v)
+
+    def is_max(v):                                     # row-max reduce reading a 64-mult 2D src
+        c = val.get(v)
+        if not (isinstance(c, relax.Call) and _opn(c) == "relax.max"):
+            return False
+        sh = [int(d) for d in c.args[0].struct_info.shape]
+        return len(sh) == 2 and sh[0] % 64 == 0 and sh[1] % 64 == 0
+
     # A4 5d: activation INPUT params (residual stream x) can be tile — but ONLY when the
     # caller pre-packs the fed data host-side (tile_inputs, set on the real generation
     # path). Otherwise the input stays row so the direct oracle (which doesn't honor tile
@@ -245,8 +280,9 @@ def assign_layouts(bindings, output_var, tile_inputs=False):
                        and len(p.struct_info.shape) == 2
                        and int(p.struct_info.shape[0]) % 64 == 0 and int(p.struct_info.shape[1]) % 64 == 0}
 
-    layout = {b.var: ("tile" if (is_mm64(b.var) or is_ew(b.var) or is_bcast(b.var)) else "row")
-              for b in bindings}
+    layout = {b.var: ("tile" if (is_mm64(b.var) or is_ew(b.var) or is_bcast(b.var)
+                                 or is_transpose(b.var) or is_tslice(b.var) or is_concat64(b.var))
+                      else "row") for b in bindings}
     for p in tile_params:
         layout[p] = "tile"
     layout[output_var] = "row"
@@ -274,17 +310,28 @@ def assign_layouts(bindings, output_var, tile_inputs=False):
                         demote = True; break
                     if isinstance(a, relax.Tuple) and any(layout.get(f, "row") != "tile" for f in a.fields):
                         demote = True; break
+            if not demote and (is_transpose(v) or is_tslice(v)):  # producer needs a TILE input
+                if layout.get(val[v].args[0], "row") != "tile":
+                    demote = True
+            if not demote and is_concat64(v):                 # tile concat: every input TILE
+                if any(layout.get(f, "row") != "tile" for f in val[v].args[0].fields):
+                    demote = True
             if not demote:
                 v_mm_a = mm_a.get(v, set())
+                v_mm_b = mm_b.get(v, set())
                 for cv in consumers.get(v, []):               # all consumers TILE-compatible
                     if cv in v_mm_a and is_mm64(cv):
                         continue                              # read as A by a 64-mult matmul
+                    if cv in v_mm_b and is_mm64(cv):
+                        continue                              # read as B by a 64-mult matmul (tile act B)
                     if is_ew(cv) and layout.get(cv) == "tile":
                         continue                              # feeds a TILE ew
-                    if is_reduce(cv):
-                        continue                              # feeds a tile-native reduce (sum)
+                    if is_reduce(cv) or is_max(cv):
+                        continue                              # feeds a tile-native reduce (sum/max)
+                    if (is_transpose(cv) or is_tslice(cv)) and layout.get(cv) == "tile":
+                        continue                              # feeds a tile transpose/slice
                     if is_concat(cv):
-                        continue                              # concat relayouts tile inputs itself
+                        continue                              # concat relayouts/places tile inputs
                     demote = True; break
             if demote:
                 layout[v] = "row"; changed = True

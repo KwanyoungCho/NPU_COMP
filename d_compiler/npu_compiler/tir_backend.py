@@ -510,12 +510,12 @@ def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None, c_til
         cpad = mp.scratch_alloc(Mp * N); out = cpad
     wk = _Walker(asm, mp, {}, gather_cache=gather_cache)
     sched_cache = {}
-    for i, (a_off, b_off, M_t, K_t, N_t, nt) in enumerate(terms):
+    for i, (a_off, b_off, M_t, K_t, N_t, nt, a_tiled) in enumerate(terms):
         assert K_t % TILE == 0 and N_t == N, f"bad group term {M_t}x{K_t}x{N_t}"
         pf = sched_cache.get((Mp, K_t, N))
         if pf is None:
             pf = _scheduled_gemm(Mp, K_t, N); sched_cache[(Mp, K_t, N)] = pf
-        _bind_gemm(wk, pf, a_off, b_off, out, nt, c_tiled=c_tiled)
+        _bind_gemm(wk, pf, a_off, b_off, out, nt, a_tiled=a_tiled, c_tiled=c_tiled)
         wk.suppress_fill = (i > 0)                         # only the first term zero-inits C
         wk.walk(pf.body)
     wk.flush()                                             # ONE scatter for the whole sum
