@@ -49,15 +49,17 @@ RMSNorm/residual(5d-1)·attention(5d-2)까지 확장하면 reduce의 FP16 재정
 | 스테이지 | 내용 | 상태 | 핵심 결과 |
 |---|---|---|---|
 | **Stage 0** | 회귀 게이트 + 측정 기준 고정 | ✅ | 전체 테스트 + 벤더 byte-exact를 한 번에 검사 |
-| **A4** | tile-blocked 레이아웃 전파 | ✅ (5c에서 확정) | 3B layer **−19.8%**, scatter −58%, byte-exact |
+| **A4** | tile-blocked 레이아웃 전파 | ✅ (5c→5d-1→5d-2) | 3B layer **−52.7%, gather 0 / scatter 0** (5c byte-exact, 5d ~0.1% tol) |
 | **A3** | import legalization을 manual과 통일 | ✅ | 향후 실제 HF 모델도 동일 최적화 경로 |
 | **A2** | 컴파일 속도 | ✅ | **106.3s → 8.6s (12.4×)**, byte-exact |
-| **A1** | liveness 기반 메모리 재사용 | ⏸ 보류 | 측정상 net-negative(§8) |
+| **A1** | liveness 기반 메모리 재사용 | ⏸ 보류(재평가 가능) | 이전 net-negative였으나 5d-2로 gather 소멸 → 안전해짐(§8) |
 
-> **원래 계획 순서는 A4 → A1 → A3 → A2** 였다. 그런데 A1을 프로토타입해 3B로 측정하니
-> **net-negative**(§8)였고, A1의 안전 전제(A4가 gather를 *전부* 없앰)가 A4를 **5c(FFN)에서
-> 확정**하며 부분적으로만 성립(attention의 gather는 잔존) → **A1을 보류하고 A3·A2를 먼저**
-> 끝냈다.
+> **원래 계획 순서는 A4 → A1 → A3 → A2** 였다. A1을 프로토타입해 3B로 측정하니 **net-negative**
+> (§8)였고 그 원인이 `gather_cache`(활성화 gather 재사용)와의 충돌이었다. A1의 안전 전제는 "A4가
+> gather를 **전부** 없앤다"인데, 당시엔 A4를 5c(FFN)까지만 하면 attention gather가 잔존해 성립하지
+> 않았다 → **A1을 보류하고 A3·A2를 먼저** 끝낸 뒤, "끝까지" 요청에 따라 **A4를 5d-2(attention)까지
+> 완주해 gather를 완전히 0으로** 만들었다. 이제 gather_cache 자체가 불필요해져 **A1이 안전하게
+> 재평가 가능**하다.
 
 ---
 
@@ -174,7 +176,7 @@ row를 기대하면 relayout이 필요→무의미). `memplan.assign_layouts`(**
 - **0710이 "HW 없이는 못 없앤다"던 scatter를 −58%** 줄였다(FFN 체인 한정, HW 변경 없음).
 - 시작점 2,235,194는 정확히 0710 리포트의 종료 상태(§7.8)와 같다 → **연속된 개선**.
 
-### 5.6 (5d) 왜 여기서 멈췄나 — byte-exact 한계와 타겟팅 실측
+### 5.6 (5d) byte-exact 한계와 타겟팅 실측 — 왜 5c 다음은 tolerance인가
 
 **남은 gather/scatter가 어디 있나**를 op별로 실측(5c 이후, `layouts=True`):
 
@@ -381,9 +383,13 @@ for (io,jo) in grid(Mt,Nt):
 - **O-proj 융합**이 leaf 입력을 root에서 지연-read 하는데 naive SSA liveness가 조기 free →
   liveness가 codegen의 **실제 스케줄과 일치**해야 하는 추가 결합.
 
-→ **net-negative라 되돌리고 보류**. A4가 gather를 **전부** 없애면 `gather_cache`가 불필요해져
-A1이 안전해지는데, A4를 **5c(FFN)에서 확정**해 **attention의 gather는 잔존** → A1의 안전 전제가
-아직 미성립. **5d 완료 후 재평가** 대상.
+→ **net-negative라 되돌리고 보류**. A1이 안전하려면 A4가 gather를 **전부** 없애 `gather_cache`가
+불필요해져야 하는데, 당시(5c까지)엔 attention gather가 잔존해 미성립이었다.
+
+**★ 5d-2 이후 재평가 가능**: 이제 **3B prefill layer의 gather가 완전히 0**(§5.8)이라 `gather_cache`
+자체가 없어졌다 → binding 재사용의 write-once 충돌 원인이 사라졌다. A1의 남은 결합(O-proj 융합의
+지연-read와 liveness 일치)만 처리하면 **이제 A1은 순수 이득(메모리↓, 명령 수 불변)** 이 될 수 있다.
+(단 메모리 절감은 여전히 가중치 지배로 −10% 규모.) — 다음 후보 작업.
 
 ---
 
@@ -401,21 +407,31 @@ A1이 안전해지는데, A4를 **5c(FFN)에서 확정**해 **attention의 gathe
 | `97624a0` | 계획 갱신(5c done) |
 | `34d88be` | **토글** — `driver`에 `layouts=True/False` 노출(A/B 비교) |
 | `52fb98b` | 5d 타겟팅 실측(op별 gather/scatter + 경계-parity 발견) |
-| `54f76c1` | **A4 확정** — 5c에서 종료(byte-exact), 5d 보류(reduce 재정렬) |
+| `54f76c1` | A4 5c 확정 문서(당시엔 byte-exact 우선으로 5d 보류) |
 | `b34c723` | **A3** — import legalization 통일(native SiLU/stable softmax/sign-inv) |
 | `1994e1d` | 계획 갱신(A3 done) |
 | `3f3ef0b` | **A2 phase-1** — 파이썬 affine 평가 + 직렬화 벡터화(1.82×) |
 | `1cdd48f` | 계획 갱신 + 최종 상태 |
 | `55b667d` | **A2 phase-2** — canonical GEMM 직접 emit(12.4×) |
+| `d39f254` | **report_0719 최초 작성**(0710 이후 전체) |
+| `7042abd` | **A4 5d-1** — tile-native RMSNorm + residual(입력 param tile-pack, O-proj tile 출력, concat relayout) → **−28.6%** |
+| `4056f86` | 계획·리포트 갱신(5d-1 done, tolerance 수용 결정) |
+| `2020496` | **A4 5d-2** — tile-native attention core(RoPE/transpose/softmax/matmul-B + O-proj a_tiled 버그 수정) → **−52.7%, gather/scatter 0** |
+| `8d5affc` | 계획·리포트 갱신(5d-2 done) |
 
 **주로 바뀐 소스 파일**:
-- `npu_compiler/memplan.py` — 레이아웃 규약·`alloc_tiled`·`assign_layouts`(A4).
-- `npu_compiler/tir_backend.py` — TILE-mode A/C(5b), `ev` 파이썬 평가·`emit_gemm` 직접 emit(A2).
-- `npu_compiler/codegen.py` — 레이아웃에 따른 a_tiled/c_tiled·elementwise 물리 크기(A4 5c).
-- `npu_compiler/driver.py` — `layouts` 토글.
+- `npu_compiler/memplan.py` — 레이아웃 규약·`alloc_tiled`/`alloc_const_tiled`·`assign_layouts`
+  (fixpoint: matmul out/ew/broadcast/transpose/slice/concat producer, sum/max reduce, matmul-A/B
+  consumer, 입력 param tile-pack)(A4 5a~5d).
+- `npu_compiler/codegen.py` — 레이아웃별 a/b/c_tiled matmul, `emit_row_sum`/`emit_row_max`/
+  `emit_broadcast`/`emit_transpose`/`emit_strided_slice`/`emit_concat`의 tile 분기(5c~5d-2),
+  O-proj group a_tiled/c_tiled(5d).
+- `npu_compiler/tir_backend.py` — TILE-mode A/C(5b), `ev` 파이썬 평가·`emit_gemm` 직접 emit(A2),
+  accumulate-group c_tiled/a_tiled(5d).
+- `npu_compiler/driver.py` — `layouts` 토글, tile 입력 param host-pack(5d-1b).
 - `npu_compiler/import_legalize.py` — manual 경로와 통일(A3).
 - `npu_compiler/runtime.py` — program 직렬화 벡터화(A2).
-- `tests/test_layout.py` — 레이아웃 규약·TILE-mode matmul 테스트(신규).
+- `tests/test_layout.py` — 레이아웃 규약·TILE-mode matmul·**tile RMSNorm(5d-1)·tile attention(5d-2)** 테스트(신규).
 - `d_compiler/run_gate.sh`, `d_compiler/REFACTOR_PLAN.md` — 게이트·계획(신규).
 
 ---
@@ -435,10 +451,15 @@ A1이 안전해지는데, A4를 **5c(FFN)에서 확정**해 **attention의 gathe
    명령 수 불변.
 
 **핵심 교훈**:
-- **row↔tile 경계의 relayout은 gather와 비용이 같다**(데이터 볼륨 동일). 그래서 A4의 이득은
-  "경계를 감싸는" 게 아니라 **matmul→matmul처럼 경계가 없는 체인을 tile로 묶는 데서** 나온다.
-- A4를 attention/RMSNorm까지 확장(5d)하려면 **reduce의 FP16 재정렬(비-byte-exact, ~1%)** 을
-  수용해야 한다 — 5c는 주소만 바꿔 비트 동일이었던 것과 근본적으로 다르다.
+- **레이어 전체를 tile로 흘리면 gather/scatter가 원천적으로 사라진다.** row↔tile 경계의 relayout은
+  gather와 비용이 같으므로(데이터 볼륨 동일), 부분 tile화는 경계만 이동시킬 뿐이다. **경계가 하나도
+  없도록 전 op를 tile-native로** 만들어야(5d-2) 3B 레이어의 gather/scatter가 **완전히 0**이 된다.
+  → 0710이 "HW가 있어야 한다"던 것을 **SW 레이아웃만으로** 해결.
+- A4를 RMSNorm/attention까지 확장하는 대가는 **reduce의 FP16 재정렬(~0.1%, 비-byte-exact)** 뿐이다
+  — 5c(주소만 변경 → 비트 동일)와 근본적으로 다르며, 이 ~0.1%는 모든 프레임워크가 겪는 표준 차이다.
+- **격리 테스트가 결합 버그를 잡는다.** 5d-2에서 개별 이미터(transpose/slice/concat/max/matmul-B)는
+  전부 byte-exact인데 전체 attention은 rel=1.11이었다. 각 이미터 + 조합을 하나씩 격리 테스트해,
+  범인이 **O-proj group의 a_tiled 누락**(tile ctx를 row로 읽음)임을 특정했다. "개별 통과 ≠ 통합 통과".
 - `schedule_matmul`의 출력이 **항상 동일 형태**라는 사실이 컴파일 12.4× 단축의 열쇠였다
   (TIR 재순회를 파이썬 루프로 대체).
 
