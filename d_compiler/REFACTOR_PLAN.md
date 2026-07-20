@@ -123,22 +123,27 @@ A1(binding-var liveness 재사용)을 프로토타입해 **3B prefill layer로 �
 → **결론: A1은 A4에 포섭된다. A4를 먼저 하고, A1(binding+비-gather scratch 재사용)은 A4 이후
 minor 단계로.** (A1 프로토타입은 net-손해라 default 미탑재, 되돌림.)
 
-## 3. 순서 & 종료 조건 (실제 진행: Stage 0 → A4 → A3 → A2, A1 보류)
+## 3. 순서 & 종료 조건 (실제 진행: Stage 0 → A4(5c→5d-2) → A3 → A2 → A1)
 
 원래 순서는 A4 → A1 → A3 → A2였으나, A1의 전제(A4가 gather를 **전부** 제거 → gather_cache 불필요)가
-A4를 **5c(FFN)에서 확정**하며 부분적으로만 성립(attention gather_cache 여전) → **A1 보류**, A3·A2 우선.
+A4 5c(FFN)만으론 미성립 → A1을 뒤로 미루고 A3·A2를 먼저, 그리고 "끝까지" 요청에 따라 **A4를 5d-2
+(attention)까지 완주해 gather를 완전히 0으로** 만든 뒤 A1을 마지막에 완료(이제 gather_cache 자체가 없어 안전).
 
-**최종 상태(2026-07-18)**:
-- **A4 ✅ (5c, byte-exact)**: FFN 체인 tile-blocking. 3B prefill layer **−19.8%**(2,235,194→1,792,826),
-  scatter −58%. `layouts=True/False` 토글로 A/B 비교. 5d(RMSNorm/attention)는 reduce 재정렬로 byte-exact
-  불가라 보류(§3.5).
+**최종 상태(2026-07-19) — 전 스테이지 완료**:
+- **A4 ✅ (5c→5d-1→5d-2)**: tile-blocked 레이아웃을 FFN→RMSNorm/residual→attention 전체로 전파.
+  3B prefill layer **2,235,194 → 1,057,758 (−52.7%), gather 0 / scatter 0**. 5c는 byte-exact,
+  5d는 ~0.1% tolerance(tile reduce 재정렬). `layouts=True/False` 토글.
 - **A3 ✅ (커밋 b34c723)**: import legalization을 manual 경로와 통일(native SiLU/stable softmax/sign-inv).
-- **A2 ✅ phase-1 (커밋 3f3ef0b)**: 컴파일 106.3s→58.5s(1.82x, byte-exact).
-- **A1 보류**: net-손해(§2.5) + A4 부분 완료로 attention gather_cache 여전 활성 → 리스크. 5d 완료 후 재평가.
+- **A2 ✅ (커밋 3f3ef0b·55b667d)**: 컴파일 **106.3s → 8.6s (12.4×)**(파이썬 affine 평가 + canonical GEMM
+  직접 emit), byte-exact.
+- **A1 ✅ (커밋 c05e0b8)**: liveness 기반 활성화 offset 재사용(`reuse=True`). gather=0이라 gather_cache
+  충돌 소멸 → **명령 수 불변(+0)**, byte-exact. **3B mp.top 278MB → 228MB (−18%)**. 융합-인지 liveness
+  (O-proj 리프 입력을 root까지 live 유지). ★ 버그: O-proj root가 consumed에도 속해 dummy offset 0으로
+  잘못 배정(param x와 충돌) → consumed면서 root 아닌 것만 dummy로 수정(격리 bisect로 발견).
 - **전체 gate GREEN + vendor byte-exact 전 구간 유지.**
 
-**남는 것(우선순위·리스크順)**: A2 phase-2(walk 메모이즈, 10s대) · 5d(tolerance 수용 시 attention/RMSNorm 타일링,
-−~8%+) · A1(5d 후) · direct 백엔드는 **golden 오라클로 유지**(제거 안 함). HW 의존(루프→명령 수,
+**남는 것(SW로 net-positive한 건 모두 완료)**: A2 phase-2는 완료(12.4×) — 잔여는 tile-native op(전치/fold)
+오버헤드 미세 최적화 여지뿐. direct 백엔드는 **golden 오라클로 유지**(제거 안 함). HW 의존(루프→명령 수,
 register-indirect→KV/가변길이)은 별도 벤더 요청서.
 
 ---

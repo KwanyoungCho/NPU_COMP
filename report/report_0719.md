@@ -52,14 +52,14 @@ RMSNorm/residual(5d-1)·attention(5d-2)까지 확장하면 reduce의 FP16 재정
 | **A4** | tile-blocked 레이아웃 전파 | ✅ (5c→5d-1→5d-2) | 3B layer **−52.7%, gather 0 / scatter 0** (5c byte-exact, 5d ~0.1% tol) |
 | **A3** | import legalization을 manual과 통일 | ✅ | 향후 실제 HF 모델도 동일 최적화 경로 |
 | **A2** | 컴파일 속도 | ✅ | **106.3s → 8.6s (12.4×)**, byte-exact |
-| **A1** | liveness 기반 메모리 재사용 | ⏸ 보류(재평가 가능) | 이전 net-negative였으나 5d-2로 gather 소멸 → 안전해짐(§8) |
+| **A1** | liveness 기반 메모리 재사용 | ✅ (5d-2 후 완료) | 3B mp.top **278MB → 228MB (−18%)**, 명령 수 불변, byte-exact(§8) |
 
 > **원래 계획 순서는 A4 → A1 → A3 → A2** 였다. A1을 프로토타입해 3B로 측정하니 **net-negative**
 > (§8)였고 그 원인이 `gather_cache`(활성화 gather 재사용)와의 충돌이었다. A1의 안전 전제는 "A4가
 > gather를 **전부** 없앤다"인데, 당시엔 A4를 5c(FFN)까지만 하면 attention gather가 잔존해 성립하지
 > 않았다 → **A1을 보류하고 A3·A2를 먼저** 끝낸 뒤, "끝까지" 요청에 따라 **A4를 5d-2(attention)까지
-> 완주해 gather를 완전히 0으로** 만들었다. 이제 gather_cache 자체가 불필요해져 **A1이 안전하게
-> 재평가 가능**하다.
+> 완주해 gather를 완전히 0으로** 만들었다. 그러면 gather_cache 자체가 불필요해져 A1의 net-negative
+> 원인이 사라지므로, **마지막에 A1을 완료**(명령 수 불변 + mp.top −18%, byte-exact)했다.
 
 ---
 
@@ -372,30 +372,32 @@ for (io,jo) in grid(Mt,Nt):
 
 ---
 
-## 8. A1 — 왜 보류했나 (측정 기반 net-negative) — 커밋 `6cfe8c5`
+## 8. A1 — liveness 기반 메모리 재사용 — 커밋 `6cfe8c5`(보류) → `c05e0b8`(완료) ★
 
-계획엔 **liveness 기반 메모리 재사용**(binding var의 [def,last-use]로 offset 재활용)이 있었다.
-프로토타입해 3B로 **실측**하니:
+계획엔 **liveness 기반 메모리 재사용**(binding var의 [def,last-read]로 offset 재활용)이 있었다.
+
+**8.1 (당시) 프로토타입이 net-negative였던 이유** — 3B 실측:
 
 | | 메모리(mp.top) | 명령 수 |
 |---|---:|---:|
 | bump(현행) | 293MB | 2,235,194 |
 | liveness 재사용 | 263MB (**−10%뿐**) | **4,236,090 (+90%!)** |
 
-- **메모리 −10%뿐**: 버퍼는 **가중치(~200MB, 레이어 상주 불가피)** 가 지배 → 활성화 재사용
-  효과가 작다.
-- **명령 +90%**: liveness 재사용이 **write-once 가정을 깨서** `gather_cache`(활성화 gather
-  재사용)와 충돌 → 비활성화하면 재-gather로 명령이 2배.
-- **O-proj 융합**이 leaf 입력을 root에서 지연-read 하는데 naive SSA liveness가 조기 free →
-  liveness가 codegen의 **실제 스케줄과 일치**해야 하는 추가 결합.
+- **명령 +90%**: 재사용이 **write-once 가정을 깨서** `gather_cache`(활성화 gather 재사용)와 충돌 →
+  비활성화하면 재-gather로 명령이 2배. → **net-negative라 되돌리고 보류**.
 
-→ **net-negative라 되돌리고 보류**. A1이 안전하려면 A4가 gather를 **전부** 없애 `gather_cache`가
-불필요해져야 하는데, 당시(5c까지)엔 attention gather가 잔존해 미성립이었다.
-
-**★ 5d-2 이후 재평가 가능**: 이제 **3B prefill layer의 gather가 완전히 0**(§5.8)이라 `gather_cache`
-자체가 없어졌다 → binding 재사용의 write-once 충돌 원인이 사라졌다. A1의 남은 결합(O-proj 융합의
-지연-read와 liveness 일치)만 처리하면 **이제 A1은 순수 이득(메모리↓, 명령 수 불변)** 이 될 수 있다.
-(단 메모리 절감은 여전히 가중치 지배로 −10% 규모.) — 다음 후보 작업.
+**8.2 (5d-2 이후) 완료** — `reuse=True`(`memplan.plan`/`driver`):
+- **전제가 성립**: 5d-2로 **gather가 완전히 0**(§5.8) → `gather_cache` 자체가 없어짐 → write-once
+  충돌 소멸. 이제 재사용이 **명령 수를 전혀 늘리지 않는다**.
+- **exact-size free-list**: binding var의 slot을 마지막 read에서 free하고 이후 **같은 크기** var에 넘김.
+- **융합-인지 liveness**: O-proj 그룹은 root에서 emit되며 리프 입력(ctx_h)을 거기서 읽으므로, naive
+  그래프 liveness가 **한 스텝 일찍 free**하는 걸 막아 ctx_h를 root까지 live 유지.
+- **★ 버그(격리 bisect로 발견)**: chain/rmsnorm/attn-H1은 통과인데 H≥2(O-proj 융합)만 rel=0.5로 실패.
+  원인은 **O-proj root가 `consumed`에도 속해** 죽은 dummy offset 0으로 잘못 배정(param x와 충돌)한 것.
+  root는 실제로 emit되어 residual이 읽으므로, **consumed면서 root가 아닌 것만** dummy로 수정.
+- **실측(3B prefill layer): mp.top 278MB → 228MB (−18%), 명령 수 완전 불변(+0), byte-exact**
+  (값-불변이라 reuse on==off 비트 동일 검증). gate GREEN. 회귀 `test_layout.test_reuse_memory`.
+- 메모리는 여전히 **가중치(73%, ~200MB, 레이어 상주 불가피)** 지배라 −18%가 상한에 가깝다.
 
 ---
 
@@ -424,11 +426,13 @@ for (io,jo) in grid(Mt,Nt):
 | `4056f86` | 계획·리포트 갱신(5d-1 done, tolerance 수용 결정) |
 | `2020496` | **A4 5d-2** — tile-native attention core(RoPE/transpose/softmax/matmul-B + O-proj a_tiled 버그 수정) → **−52.7%, gather/scatter 0** |
 | `8d5affc` | 계획·리포트 갱신(5d-2 done) |
+| `05162d7`·`b3cd9ea` | 리포트 전 섹션 5d 반영 + **A4 진행 그래프**(figs/0719/) |
+| `c05e0b8` | **A1** — liveness 기반 활성화 offset 재사용(융합-인지, exact-size free-list) → **mp.top −18%, 명령 수 불변, byte-exact** |
 
 **주로 바뀐 소스 파일**:
 - `npu_compiler/memplan.py` — 레이아웃 규약·`alloc_tiled`/`alloc_const_tiled`·`assign_layouts`
   (fixpoint: matmul out/ew/broadcast/transpose/slice/concat producer, sum/max reduce, matmul-A/B
-  consumer, 입력 param tile-pack)(A4 5a~5d).
+  consumer, 입력 param tile-pack)(A4 5a~5d) + **`_liveness`·`reuse=True` 융합-인지 offset 재사용(A1)**.
 - `npu_compiler/codegen.py` — 레이아웃별 a/b/c_tiled matmul, `emit_row_sum`/`emit_row_max`/
   `emit_broadcast`/`emit_transpose`/`emit_strided_slice`/`emit_concat`의 tile 분기(5c~5d-2),
   O-proj group a_tiled/c_tiled(5d).
@@ -455,6 +459,8 @@ for (io,jo) in grid(Mt,Nt):
    최적화 경로.
 3. **A2 컴파일 속도** — canonical GEMM을 파이썬으로 직접 emit해 **106.3s → 8.6s (12.4×)**,
    명령 수 불변.
+4. **A1 메모리 재사용** — liveness 기반 활성화 offset 재사용. A4가 gather를 0으로 만들어
+   gather_cache가 사라진 덕에 **명령 수 불변(+0)**, byte-exact. **3B mp.top 278MB → 228MB (−18%)**.
 
 **핵심 교훈**:
 - **레이어 전체를 tile로 흘리면 gather/scatter가 원천적으로 사라진다.** row↔tile 경계의 relayout은
@@ -468,15 +474,13 @@ for (io,jo) in grid(Mt,Nt):
   범인이 **O-proj group의 a_tiled 누락**(tile ctx를 row로 읽음)임을 특정했다. "개별 통과 ≠ 통합 통과".
 - `schedule_matmul`의 출력이 **항상 동일 형태**라는 사실이 컴파일 12.4× 단축의 열쇠였다
   (TIR 재순회를 파이썬 루프로 대체).
+- **한 최적화가 다른 최적화를 풀어준다.** A1은 원래 net-negative(gather_cache 충돌로 +90% 명령)라
+  보류했는데, A4가 gather를 0으로 만들자 그 충돌 원인이 사라져 **A1이 명령 수 불변 순이득으로 전환**됐다.
 
-**5d(§5.7·§5.8) 업데이트**: ~0.1% FP16 재정렬을 수용하고 **5d-1(RMSNorm+residual)·5d-2(attention
-core)** 를 완주 → 3B prefill layer **−52.7%**, **gather 0 / scatter 0**. A4 진행:
-5c(byte-exact −19.8%) → 5d-1(−28.6%) → **5d-2(−52.7%, gather/scatter 완전 소멸)**.
+**최종 종료 상태**: **A4(−52.7%, gather/scatter 0) · A3(legalize 통일) · A2(컴파일 12.4×) · A1(mp.top
+−18%)** 를 모두 완료. 전 스테이지 커밋·gate GREEN·벤더 byte-exact.
 
-**남은 과제(우선순위·근거와 함께)**:
-- **A1**(메모리 재사용) — 이전 측정상 net-negative였으나, **5d-2로 gather가 완전히 사라져
-  gather_cache가 불필요**해졌으므로 이제 **재평가 유효**(binding 재사용의 write-once 충돌 원인 소멸).
-- **A2 phase-2**는 완료(12.4×). **A2를 attention tile로 더 최적화**(전치/fold 오버헤드)는 여지 있음.
-- **HW 의존**: **행-major strided 모드는 tile-blocked 레이아웃으로 SW에서 완전 대체**됨(더 이상
-  불필요). 남는 HW 항목은 **register-indirect 주소**(KV append·가변길이 decode), **HW 루프**(명령
-  수 감소)뿐 — 별도 벤더 요청서. (SW로 가능한 net-positive 최적화는 사실상 모두 완료.)
+**남은 것(전부 HW 의존 — SW로 net-positive한 최적화는 완료)**:
+- **행-major strided 모드**는 tile-blocked 레이아웃으로 **SW에서 완전 대체**됨(더 이상 불필요).
+- 남는 HW 항목은 **register-indirect 주소**(KV append·가변길이 decode), **HW 루프**(명령 수 감소)뿐
+  — 별도 벤더 요청서. 그 외 미세 여지: A2의 tile-native op(전치/fold) 오버헤드.
