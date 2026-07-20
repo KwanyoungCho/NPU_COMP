@@ -1,0 +1,10 @@
+{
+  "note": "A4 tile-blocked layout progression — MEASURED command counts per Llama-3.2-3B prefill layer (S=128, pack_params, layouts=True vs the pre-A4 row-major baseline). Compiled with npu_compiler (backend=tir, fuse_oproj). 'other' = total - gather - scatter (useful compute + remaining overhead). Reuse these instead of re-compiling; update only when the compiler changes.",
+  "baseline_total": 2235194,
+  "stages": [
+    {"key": "row",  "label": "row-major\n(pre-A4)",        "total": 2235194, "gather": 409600, "scatter": 540672, "exact": true},
+    {"key": "5c",   "label": "5c\n+FFN tile",              "total": 1792826, "gather": 278528, "scatter": 229376, "exact": true},
+    {"key": "5d1",  "label": "5d-1\n+RMSNorm/residual",    "total": 1596062, "gather": 180224, "scatter": 131072, "exact": false},
+    {"key": "5d2",  "label": "5d-2\n+attention core",      "total": 1057758, "gather": 0,      "scatter": 0,      "exact": false}
+  ]
+}

@@ -271,6 +271,12 @@ tile ctx를 `a_tiled`로 읽지 않고 row로 읽어** garbage를 낸 것(5d-1�
 | 5d-1 (+RMSNorm/residual) | 1,596,062 (−28.6%) | 180,224 | 131,072 |
 | **5d-2 (+attention)** | **1,057,758 (−52.7%)** | **0** | **0** |
 
+![A4 진행: FFN(5c)→RMSNorm/residual(5d-1)→attention(5d-2)로 확장하며 gather(파랑)+scatter(초록)가
+0으로 소멸, total −52.7%. 회색은 useful/기타.](figs/0719/g_a4_progression.png)
+
+*(그래프: `report/figs/0719/plot_a4_progression.py` — 실측값 `measurements.json`에서 읽어 재생성.
+색은 dataviz reference categorical slot 1(파랑)/2(초록), 검증 통과 ΔE 9.1.)*
+
 - **0710 리포트가 "행-major strided HW가 있어야 없앤다"던 gather+scatter(≈48%)를 하드웨어 변경
   없이 SW(tile-blocked 레이아웃)로 100% 제거.** 남은 것은 순수 useful 계산 + tile-native op 오버헤드.
 - tolerance ~0.1%(tile reduce 재정렬). gate GREEN(REDUCED byte-exact, MEDIUM/attention/3B tolerance,
