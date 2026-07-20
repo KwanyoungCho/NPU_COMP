@@ -342,14 +342,16 @@ def _footprint(shape, lay):
     return tiled_numel(shape) if lay == "tile" else _numel(shape)
 
 
-def _liveness(seq, bindings):
+def _liveness(seq, bindings, fuse_oproj=True):
     """A1: fusion-aware last-read per binding var, in codegen EMISSION order.
     O-proj groups are emitted at the root and read the leaves' inputs (ctx_h/Wo_h)
     there, so those inputs stay live until the root — naive graph liveness would free
     them one step too early. Folded (consumed non-root) vars are never materialised.
-    Returns (emit_idx, reads_at, last_read, consumed, fused_root)."""
+    Must mirror codegen's fusion decision: only fuse when fuse_oproj (else the adds are
+    emitted normally and their liveness is graph-natural). Returns (emit_idx, reads_at,
+    last_read, consumed, fused_root)."""
     from . import codegen                                  # module-level helper (lazy: avoids cycle)
-    fused_root, consumed = codegen._detect_oproj_groups(seq)
+    fused_root, consumed = codegen._detect_oproj_groups(seq) if fuse_oproj else ({}, set())
     val_of = {b.var: b.value for b in bindings}
     emit_idx, reads_at, i = {}, {}, 0
     for b in bindings:
@@ -374,7 +376,7 @@ def _liveness(seq, bindings):
     return emit_idx, reads_at, last_read, consumed, fused_root
 
 
-def plan(func, pack=True, pack_params=False, layouts=True, reuse=False):
+def plan(func, pack=True, pack_params=False, layouts=True, reuse=False, fuse_oproj=True):
     """Plan a Relax function: assign G-buffer offsets to params, constants, and
     every binding var. Returns a MemPlan. Assumes one dataflow block returning a Var.
 
@@ -422,7 +424,7 @@ def plan(func, pack=True, pack_params=False, layouts=True, reuse=False):
     keep_alive = set(param_set)
     free_list = {}                                         # footprint -> [freed offsets]
     if reuse:
-        emit_idx, reads_at, last_read, consumed_set, fused_root = _liveness(seq, bindings)
+        emit_idx, reads_at, last_read, consumed_set, fused_root = _liveness(seq, bindings, fuse_oproj)
         val_of = {b.var: b.value for b in bindings}
         o = out                                           # output + its alias chain never freed
         keep_alive.add(o)

@@ -31,7 +31,8 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
         return tir_backend.compile_func(mod, func_name)
     if backend == "hybrid":                   # whole graph: matmul->TIR, rest->direct
         func = mod[func_name]
-        mp = _memplan.plan(func, pack_params=pack_params, layouts=layouts, reuse=reuse)
+        mp = _memplan.plan(func, pack_params=pack_params, layouts=layouts, reuse=reuse,
+                           fuse_oproj=fuse_oproj)
         asm = _codegen.compile_func(func, mp, tile=64, mm_backend="tir", fuse_oproj=fuse_oproj)
         return asm, mp
     func = mod[func_name]
