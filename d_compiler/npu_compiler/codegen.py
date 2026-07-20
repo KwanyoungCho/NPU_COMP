@@ -273,6 +273,13 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
                 a.vlen(64); a.addr(SRC1, ac); a.load(0, 0)
                 a.v_copy(); a.addr(DST, d0 + rt * 64); a.save(0)   # dst[rt*64+ir] = row max
             return
+        # ROW-layout fallback: the strided column load packs R0=R rows, R1=C stride and
+        # start=j into 8-bit tile fields, so R,C must be <256 or they silently wrap
+        # (256&0xFF==0 -> stride 0 / row-count 0 -> corruption/SIGSEGV). The TILE path
+        # above (layouts=True) is immune (always 64x64) and is the path large dims use.
+        assert R < 256 and C < 256, (
+            f"emit_row_max row path: 8-bit tile field needs R,C<256 (got {R}x{C}); "
+            f"use layouts=True (tile path) for larger reductions")
         acc = mp.scratch_alloc(R)
         a.tile(0, R, C); a.addr(SRC1, s0)
         a.load(1, 0, strided=1, ncols=1, start=0)         # pin1 = column 0 [R]
@@ -375,6 +382,12 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
                     a.vlen(4096); a.v_copy()
                     a.addr(DST, d0 + (tj * Rt + ti) * 4096); a.save(0)  # -> dst tile (tj,ti)
             return
+        # ROW-layout fallback: the strided transpose load uses R1=C as the src row
+        # stride, packed into an 8-bit tile field -> C must be <256 (256&0xFF==0 -> stride
+        # 0 -> garbage). The TILE path above reads contiguous 64x64 tiles (stride 64) so it
+        # is immune and handles any width.
+        assert C < 256, (f"emit_transpose row path: 8-bit stride field needs C<256 (got {C}); "
+                         f"use layouts=True (tile path) for wider transposes")
         T = tile or 64
         scr = mp.scratch_alloc(T * T)
         for ci in range(0, C, T):                        # tile dst rows (= src cols)
