@@ -387,16 +387,22 @@ for (io,jo) in grid(Mt,Nt):
   비활성화하면 재-gather로 명령이 2배. → **net-negative라 되돌리고 보류**.
 
 **8.2 (5d-2 이후) 완료** — `reuse=True`(`memplan.plan`/`driver`):
-- **전제가 성립**: 5d-2로 **gather가 완전히 0**(§5.8) → `gather_cache` 자체가 없어짐 → write-once
-  충돌 소멸. 이제 재사용이 **명령 수를 전혀 늘리지 않는다**.
 - **exact-size free-list**: binding var의 slot을 마지막 read에서 free하고 이후 **같은 크기** var에 넘김.
 - **융합-인지 liveness**: O-proj 그룹은 root에서 emit되며 리프 입력(ctx_h)을 거기서 읽으므로, naive
   그래프 liveness가 **한 스텝 일찍 free**하는 걸 막아 ctx_h를 root까지 live 유지.
-- **★ 버그(격리 bisect로 발견)**: chain/rmsnorm/attn-H1은 통과인데 H≥2(O-proj 융합)만 rel=0.5로 실패.
-  원인은 **O-proj root가 `consumed`에도 속해** 죽은 dummy offset 0으로 잘못 배정(param x와 충돌)한 것.
-  root는 실제로 emit되어 residual이 읽으므로, **consumed면서 root가 아닌 것만** dummy로 수정.
-- **실측(3B prefill layer): mp.top 278MB → 228MB (−18%), 명령 수 완전 불변(+0), byte-exact**
-  (값-불변이라 reuse on==off 비트 동일 검증). gate GREEN. 회귀 `test_layout.test_reuse_memory`.
+- **★ 버그1(격리 bisect로 발견)**: chain/rmsnorm/attn-H1은 통과인데 H≥2(O-proj 융합)만 rel=0.5로 실패.
+  원인은 **O-proj root가 `consumed`에도 속해** 죽은 dummy offset 0으로 잘못 배정(param x와 충돌). root는
+  실제로 emit되어 residual이 읽으므로 **consumed면서 root가 아닌 것만** dummy로 수정.
+- **★ 버그2(사후 코드리뷰로 발견, 커밋 별도)**: "gather=0이라 안전"은 **fully-tiled prefill에만** 참이었다.
+  **decode 커널(M=1)** 은 RMSNorm 출력이 row로 남아 matmul-A가 stride=D>64로 **gather**하는데,
+  `mm_gather_cache`가 `(off,stride)`로만 키잉되고 invalidate가 없어 **bump 할당의 write-once 불변식**에
+  의존한다. reuse가 offset을 재사용하면(hn이 xnorm의 slot을 받음) 캐시가 **오래된 xnorm gather를 반환** →
+  gate/up이 xnorm으로 계산됨(garbage, maxdiff 35). **수정: `reuse=True`면 gather 캐시를 끈다**
+  (`driver`가 `reuse_act=not reuse`). tiled prefill은 gather=0이라 캐시 미사용 → **비용 0**; row gather만
+  재-gather. liveness 자체는 캐시 off 시 30개 config byte-exact로 정확성 입증됨. 회귀 테스트에 **decode
+  커널 reuse 검증 추가**(이전엔 prefill만 돌려 이 버그를 놓쳤음).
+- **실측(3B prefill layer): mp.top 278MB → 228MB (−18%), 명령 수 완전 불변(+0)**(tiled prefill=gather 없음),
+  byte-exact(prefill+decode 모두). gate GREEN. 회귀 `test_layout.test_reuse_memory`.
 - 메모리는 여전히 **가중치(73%, ~200MB, 레이어 상주 불가피)** 지배라 −18%가 상한에 가깝다.
 
 ---
@@ -427,7 +433,10 @@ for (io,jo) in grid(Mt,Nt):
 | `2020496` | **A4 5d-2** — tile-native attention core(RoPE/transpose/softmax/matmul-B + O-proj a_tiled 버그 수정) → **−52.7%, gather/scatter 0** |
 | `8d5affc` | 계획·리포트 갱신(5d-2 done) |
 | `05162d7`·`b3cd9ea` | 리포트 전 섹션 5d 반영 + **A4 진행 그래프**(figs/0719/) |
-| `c05e0b8` | **A1** — liveness 기반 활성화 offset 재사용(융합-인지, exact-size free-list) → **mp.top −18%, 명령 수 불변, byte-exact** |
+| `c05e0b8`·`fc4f1a4` | **A1** — liveness 기반 활성화 offset 재사용(융합-인지, exact-size free-list) → **mp.top −18%, 명령 수 불변, byte-exact** |
+| `efcf226` | 리뷰 수정 — reuse liveness가 `fuse_oproj`를 존중(잠재 결합 제거) |
+| `709fee6` | 리뷰 수정 — 기존 row 경로 `emit_row_max`/`emit_transpose`의 **≥256 8-bit 필드 오버플로우** 가드 |
+| `383313d` | 리뷰 수정 — **A1 reuse가 gather 캐시로 출력 손상**(decode) → reuse 시 캐시 off + decode 회귀 추가 |
 
 **주로 바뀐 소스 파일**:
 - `npu_compiler/memplan.py` — 레이아웃 규약·`alloc_tiled`/`alloc_const_tiled`·`assign_layouts`
