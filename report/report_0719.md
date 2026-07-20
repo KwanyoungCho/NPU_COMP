@@ -1,4 +1,4 @@
-# NPU 컴파일러 최적화 리팩터링 보고서 (2026-07-19) — tile-blocked 레이아웃 · legalize 통합 · 컴파일 12.4×
+# NPU 컴파일러 최적화 리팩터링 보고서 (2026-07-19) — tile-blocked 레이아웃(gather/scatter=0) · legalize 통합 · 컴파일 12.4×
 
 > 작성일: 2026-07-19
 > 대상: `d_compiler` 컴파일러(0710 ISA 반영 이후의 SW 최적화 리팩터링)
@@ -11,12 +11,12 @@
 
 0710 리포트가 "**남은 최대 오버헤드는 gather+scatter(≈48%)이고 이건 행-major strided HW가
 있어야 없앤다**"로 끝났는데, 이번 리팩터링에서 **그 gather/scatter를 하드웨어 변경 없이
-소프트웨어(데이터 레이아웃)로 대폭 제거**했다(**A4 tile-blocked 레이아웃**, 3B prefill
-layer **−28.6%**, scatter **−75.8%**). FFN 체인(5c, −19.8%)은 **byte-exact**, RMSNorm/residual
-(5d-1)까지 확장하면 reduce의 FP16 재정렬로 **~1% tolerance**(수용). 더불어 **import 경로를
-manual 경로와 동일 lowering으로 통일**(A3)하고, **컴파일 시간을 106.3s → 8.6s(12.4×)로
-단축**(A2, byte-exact)했다. 모든 단계가 **회귀 게이트(전체 테스트 + 벤더 byte-exact) 통과
-상태로 커밋**됐다.
+소프트웨어(데이터 레이아웃)로 완전히 제거**했다(**A4 tile-blocked 레이아웃**, 3B prefill
+layer **−52.7%**, **gather 0 / scatter 0**). FFN 체인(5c, −19.8%)은 **byte-exact**,
+RMSNorm/residual(5d-1)·attention(5d-2)까지 확장하면 reduce의 FP16 재정렬로 **~0.1% tolerance**
+(수용). 더불어 **import 경로를 manual 경로와 동일 lowering으로 통일**(A3)하고, **컴파일 시간을
+106.3s → 8.6s(12.4×)로 단축**(A2, byte-exact)했다. 모든 단계가 **회귀 게이트(전체 테스트 +
+벤더 byte-exact) 통과 상태로 커밋**됐다.
 
 ---
 
@@ -239,6 +239,43 @@ RMSNorm/residual 경계를 없애려면(발견 1) 그 op들을 **tile-native**�
 
 ---
 
+### 5.8 (5d-2) tile-native attention core — 커밋 `2020496` ★ gather/scatter = 0
+
+attention 체인 전체(RoPE→scores→softmax→ctx→O-proj)를 tile로 흘려, **3B prefill layer에서
+gather/scatter를 완전히 0으로** 만들었다. 서로 얽힌 6개 변경을 한 번에 조율:
+
+1. **matmul이 tile 활성화 B를 읽음** — scores=Qr@Kt, ctx=P@V에서 Kt/V가 tile. 기존 가중치-패킹의
+   `packed_src` 경로를 재사용(`emit_matmul`이 `mp.layout`으로 b_nt 설정) → B-gather 없음.
+2. **tile transpose(Kt)** — 각 64×64 타일을 strided-load(0710 열-major=전치)로 읽어 swap된 타일
+   위치에 저장. `[R,C]`tile → `[C,R]`tile.
+3. **tile strided_slice(RoPE q1/q2)** — head_dim=128이라 반쪽 h=64 = **정확히 1 타일**. slice가
+   타일-열 정렬이라 열-타일 부분집합 복사로 끝.
+4. **tile→tile concat(RoPE rh)** — 각 입력의 열-타일을 출력 위치에 배치.
+5. **tile reduce-max(stable softmax)** — 0710엔 native reduce-max가 없어, 열-타일을 vector-max로
+   누적 후 열 fold. (reduce-sum은 5d-1a 재사용.)
+6. **assign_layouts** — permute_dims/strided_slice/concat을 tile 생성자(입력 tile 필요), max를
+   tile-reading reduce, matmul-B 소비자를 tile-호환으로.
+
+**★ 핵심 버그(격리 테스트로 발견)**: 개별 이미터(transpose/slice/concat/max/matmul-B)는 전부
+byte-exact인데 **전체 attention에서 rel=1.11**로 틀렸다. 원인은 **O-proj accumulate group이
+tile ctx를 `a_tiled`로 읽지 않고 row로 읽어** garbage를 낸 것(5d-1까진 ctx가 row라 안 드러났음).
+`emit_oproj_group`이 term별 a_tiled를 넘기도록 고쳐 rel=0.001로 정정.
+
+**★ 실측(3B prefill layer, packed, pre-A4 대비)**:
+
+| | total | gather | scatter |
+|---|---:|---:|---:|
+| 5c (FFN, byte-exact) | 1,792,826 (−19.8%) | 278,528 | 229,376 |
+| 5d-1 (+RMSNorm/residual) | 1,596,062 (−28.6%) | 180,224 | 131,072 |
+| **5d-2 (+attention)** | **1,057,758 (−52.7%)** | **0** | **0** |
+
+- **0710 리포트가 "행-major strided HW가 있어야 없앤다"던 gather+scatter(≈48%)를 하드웨어 변경
+  없이 SW(tile-blocked 레이아웃)로 100% 제거.** 남은 것은 순수 useful 계산 + tile-native op 오버헤드.
+- tolerance ~0.1%(tile reduce 재정렬). gate GREEN(REDUCED byte-exact, MEDIUM/attention/3B tolerance,
+  vendor byte-exact). 회귀 `test_layout.test_tile_attention`.
+
+---
+
 ## 6. A3 — import legalization을 manual 경로와 통일 — 커밋 `b34c723`
 
 **문제**: 우리는 레이어를 두 가지로 만든다. (1) **manual**(`model.py`가 BlockBuilder로 직접
@@ -387,10 +424,11 @@ A1이 안전해지는데, A4를 **5c(FFN)에서 확정**해 **attention의 gathe
 
 **이번 리팩터링으로 확정된 것**(전부 커밋, gate GREEN, 벤더 byte-exact 유지):
 
-1. **A4 tile-blocked 레이아웃(5c)** — 0710이 "HW가 있어야 없앤다"던 gather/scatter를,
-   데이터를 타일 단위로 저장하는 **SW 접근으로 FFN 체인에서 제거**. 3B prefill layer
-   **2,235,194 → 1,792,826 (−19.8%)**, scatter **−58%**, gather −32%, **비트 동일**.
-   `layouts=True/False` 토글로 이전/현재를 A/B 비교 가능.
+1. **A4 tile-blocked 레이아웃(5c/5d)** — 0710이 "HW가 있어야 없앤다"던 gather/scatter를,
+   데이터를 타일 단위로 저장하는 **SW 접근으로 완전히 제거**. FFN(5c, byte-exact −19.8%) →
+   RMSNorm/residual(5d-1, −28.6%) → attention(5d-2)로 확장해 3B prefill layer
+   **2,235,194 → 1,057,758 (−52.7%), gather 0 / scatter 0**. 5c는 비트 동일, 5d는 ~0.1% tolerance
+   (tile reduce 재정렬). `layouts=True/False` 토글로 A/B 비교 가능.
 2. **A3 legalize 통일** — import·manual 두 경로가 동일 lowering → 향후 실제 HF 모델도 동일
    최적화 경로.
 3. **A2 컴파일 속도** — canonical GEMM을 파이썬으로 직접 emit해 **106.3s → 8.6s (12.4×)**,
@@ -404,15 +442,14 @@ A1이 안전해지는데, A4를 **5c(FFN)에서 확정**해 **attention의 gathe
 - `schedule_matmul`의 출력이 **항상 동일 형태**라는 사실이 컴파일 12.4× 단축의 열쇠였다
   (TIR 재순회를 파이썬 루프로 대체).
 
-**5d(§5.7) 업데이트**: ~1% FP16 재정렬을 수용하기로 하고 **5d-1(tile-native RMSNorm+residual)**
-을 진행 → 3B prefill layer **−28.6%**(5c −19.8%에서 확대), scatter **−75.8%**. 남은 gather/scatter는
-전부 attention.
+**5d(§5.7·§5.8) 업데이트**: ~0.1% FP16 재정렬을 수용하고 **5d-1(RMSNorm+residual)·5d-2(attention
+core)** 를 완주 → 3B prefill layer **−52.7%**, **gather 0 / scatter 0**. A4 진행:
+5c(byte-exact −19.8%) → 5d-1(−28.6%) → **5d-2(−52.7%, gather/scatter 완전 소멸)**.
 
 **남은 과제(우선순위·근거와 함께)**:
-- **5d-2**(tile-native attention core: RoPE·transpose·softmax + matmul 활성화-B tile) — 남은
-  attention gather 131k/scatter 131k. 6개 op를 조율해야 하는 최대·최난이도 작업.
-- **A1**(메모리 재사용) — 현재 측정상 net-negative. **5d-2로 attention gather까지 없앤 뒤**
-  gather_cache가 불필요해지면 재평가.
-- **HW 의존**: **행-major strided 모드**는 tile-blocked 레이아웃으로 **SW에서 상당 부분 우회**됨
-  (5c/5d-1). 나머지 **register-indirect 주소**(KV append·가변길이 decode), **HW 루프**(명령 수
-  감소)는 별도 벤더 요청서.
+- **A1**(메모리 재사용) — 이전 측정상 net-negative였으나, **5d-2로 gather가 완전히 사라져
+  gather_cache가 불필요**해졌으므로 이제 **재평가 유효**(binding 재사용의 write-once 충돌 원인 소멸).
+- **A2 phase-2**는 완료(12.4×). **A2를 attention tile로 더 최적화**(전치/fold 오버헤드)는 여지 있음.
+- **HW 의존**: **행-major strided 모드는 tile-blocked 레이아웃으로 SW에서 완전 대체**됨(더 이상
+  불필요). 남는 HW 항목은 **register-indirect 주소**(KV append·가변길이 decode), **HW 루프**(명령
+  수 감소)뿐 — 별도 벤더 요청서. (SW로 가능한 net-positive 최적화는 사실상 모두 완료.)

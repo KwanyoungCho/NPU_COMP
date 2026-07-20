@@ -201,15 +201,22 @@ register-indirect→KV/가변길이)은 별도 벤더 요청서.
       gather 409,600 → 180,224 (−56%), scatter 540,672 → 131,072 (−75.8%).** gate GREEN(REDUCED byte-exact;
       MEDIUM/3B tolerance; vendor byte-exact). 회귀: `test_layout.test_tile_rmsnorm`.
 
-  - **5d-2 (다음) — tile-native attention core**. 5d-1 이후 남은 gather/scatter는 **전부 attention**:
-    | op | gather | scatter | 원인 |
-    |---|---|---|---|
-    | attn score/ctx | 131,072 | 49,152 | Qr/Kr(RoPE)·P(softmax)·Kt(transpose)가 ROW |
-    | Q/K/V proj | 0 | 81,920 | 출력이 RoPE로 감 → ROW |
-    | O proj | 49,152 | 0 | ctx(P@V) 입력 ROW |
-    필요(서로 얽힘): tile-native **RoPE**(h=64=1타일 → slice/concat 타일정렬), **transpose(Kt)**,
-    **softmax**(reduce-max tile 추가 필요), **matmul이 활성화 B를 tile로**(Kt/V; `packed_src` 재사용) +
-    assign_layouts에 strided_slice/concat/permute_dims/max를 tile-aware로. 6개 조율 변경 → 큰 작업.
+  - **5d-2 ✅ (커밋 2020496) — tile-native attention core**. attention 체인 전체(RoPE→scores→softmax→
+    ctx→O-proj)를 tile로. 6개 조율 변경:
+    - matmul이 **tile 활성화 B**(Kt/V)를 읽음(`packed_src` 재사용, `emit_matmul`이 `mp.layout`으로 b_nt),
+    - `emit_transpose` tile(각 64×64를 strided-load 열-major 전치 후 swap 위치 저장, Kt),
+    - `emit_strided_slice` tile(타일-열 정렬 slice; RoPE h=64=1타일),
+    - `emit_concat` tile→tile(입력의 열-타일 배치; RoPE rh),
+    - `emit_row_max` tile(열-타일 max 누적 후 vector-max fold; native reduce-max 부재),
+    - `assign_layouts`: permute_dims/strided_slice/concat=tile producer(입력 tile 필요), max=tile reduce,
+      matmul-B(mm_b) 소비자 tile-호환.
+    - **버그 수정(격리 테스트로 발견)**: O-proj accumulate group이 **tile ctx를 a_tiled로** 읽어야 함
+      (안 하면 tile-ctx를 row로 읽어 garbage, rel=1.11) → `emit_oproj_group`이 term별 a_tiled 전달.
+    - **실측 3B prefill layer: total 2,235,194 → 1,057,758 (−52.7%), gather 0, scatter 0 (둘 다 −100%).**
+      즉 **report_0710이 "행-major strided HW 필요"라던 gather+scatter(~48%)를 SW로 완전 제거.**
+      tolerance ~0.1%. gate GREEN. 회귀: `test_layout.test_tile_attention`.
+
+**A4 최종: 5c(byte-exact −19.8%) → 5d-1(−28.6%) → 5d-2(−52.7%, gather/scatter=0).**
 
 **검증**: 5c까지 byte-exact, 5d부터 tolerance(+참조 비교). golden 오라클 = direct 백엔드(row-major) 유지.
 
