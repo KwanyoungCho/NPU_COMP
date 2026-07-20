@@ -11,10 +11,12 @@
 
 0710 리포트가 "**남은 최대 오버헤드는 gather+scatter(≈48%)이고 이건 행-major strided HW가
 있어야 없앤다**"로 끝났는데, 이번 리팩터링에서 **그 gather/scatter를 하드웨어 변경 없이
-소프트웨어(데이터 레이아웃)로 상당 부분 제거**했다(**A4 tile-blocked 레이아웃**, 3B prefill
-layer **−19.8%**, scatter −58%, **byte-exact**). 더불어 **import 경로를 manual 경로와
-동일 lowering으로 통일**(A3)하고, **컴파일 시간을 106.3s → 8.6s(12.4×)로 단축**(A2,
-byte-exact)했다. 모든 단계가 **회귀 게이트(전체 테스트 + 벤더 byte-exact) 통과 상태로 커밋**됐다.
+소프트웨어(데이터 레이아웃)로 대폭 제거**했다(**A4 tile-blocked 레이아웃**, 3B prefill
+layer **−28.6%**, scatter **−75.8%**). FFN 체인(5c, −19.8%)은 **byte-exact**, RMSNorm/residual
+(5d-1)까지 확장하면 reduce의 FP16 재정렬로 **~1% tolerance**(수용). 더불어 **import 경로를
+manual 경로와 동일 lowering으로 통일**(A3)하고, **컴파일 시간을 106.3s → 8.6s(12.4×)로
+단축**(A2, byte-exact)했다. 모든 단계가 **회귀 게이트(전체 테스트 + 벤더 byte-exact) 통과
+상태로 커밋**됐다.
 
 ---
 
@@ -200,9 +202,40 @@ gather해야 하고(위 parity로 이득 소멸). **독립 `matmul→RMSNorm→m
 RMSNorm은 row 경로와 rel ≈ 0.18%(maxdiff 9.77e-3), tolerance-valid이나 비트 동일 아님**.
 
 **의사결정(2026-07-19)**: 5c는 **주소만 바꿔 비트 동일**이었으므로 **A4의 byte-exact 실현
-가능 구간은 5c가 끝**이다. 5d(RMSNorm·attention 타일링, 예상 추가 −~8%)는 ~1% FP16 재정렬을
-수용해야 하므로, **5c의 비트-동일 A/B 보장을 우선하여 5d는 보류**했다. 설계와 근거는
-`REFACTOR_PLAN.md`(§3.5)에 보존 — 향후 full-model fusion에서 tolerance를 수용할 때 유효.
+가능 구간은 5c가 끝**이다. 5d(RMSNorm·attention 타일링)는 ~1% FP16 재정렬을 수용해야 한다.
+이 ~1%는 **모든 프레임워크가 RMSNorm reduce를 제 나름 순서로 하는 표준적·무해한 차이**이고
+모델 품질에 영향이 없으므로, **tolerance를 수용하고 5d를 진행**하기로 했다(§5.7). 검증 기준은
+byte-exact → **참조 대비 tolerance**로 전환.
+
+---
+
+### 5.7 (5d-1) tile-native RMSNorm + residual stream — 커밋 `7042abd`
+
+RMSNorm/residual 경계를 없애려면(발견 1) 그 op들을 **tile-native**로 만들고(발견 2의 reduce
+재정렬 수용), residual 스트림 전체를 tile로 흘려야 한다.
+
+- **5d-1a 이미터**: `emit_row_sum` tile 분기(Nt개 64-열 타일을 elementwise 누적 후 각 행 reduce
+  — 전부 연속, gather 0), `emit_broadcast` tile 분기(col=ones-matmul 블록 생성 후 타일 복제,
+  row=세그먼트 복제), `alloc_const_tiled`(RMSNorm의 [S,D] 스케일 상수를 tile로 host-pack). 그리고
+  `assign_layouts`에 `broadcast_to`=TILE 생성자, `sum`=TILE 입력을 읽는 소비자, scalar/2D-64mult
+  상수는 tile elementwise를 demote시키지 않음.
+- **5d-1b 배선**: residual **입력 param x를 tile-blocked**로(호스트가 fed 데이터를 pack — 장치
+  비용 0). 단 **`pack_params` 플래그 뒤로 게이팅** — 직접(direct) 백엔드 오라클은 tile 레이아웃을
+  안 읽으므로, 입력을 pack하지 않는 비교 테스트에선 x를 row로 두어 **direct==tir byte-exact 유지**.
+  O-proj accumulate group이 **tile C를 출력**(`c_tiled`), `emit_concat`이 tile 입력을 row 출력으로
+  relayout(레이어 출력 concat), assign_layouts가 param을 fixpoint에 넣고 concat을 tile-수용 소비자로.
+
+**★ 실측(3B prefill layer, packed, pre-A4 row-major 대비)**:
+
+| | total | gather | scatter |
+|---|---:|---:|---:|
+| 5c (FFN만) | 1,792,826 (−19.8%) | 278,528 | 229,376 |
+| **5d-1 (+RMSNorm/residual)** | **1,596,062 (−28.6%)** | **180,224 (−56%)** | **131,072 (−75.8%)** |
+
+- gate GREEN: REDUCED(SEQ=8 → tile 안 됨 → hybrid==direct **byte-exact**), MEDIUM/3B tolerance,
+  vendor byte-exact 유지. 회귀 테스트 `test_layout.test_tile_rmsnorm`.
+- 남은 gather/scatter는 **전부 attention**(score/ctx gather 131k, Q/K/V scatter 82k, O-proj gather 49k)
+  → **5d-2**(tile-native RoPE·transpose·softmax + matmul 활성화-B tile)에서. 6개 op를 조율해야 하는 큰 작업.
 
 ---
 
@@ -371,11 +404,15 @@ A1이 안전해지는데, A4를 **5c(FFN)에서 확정**해 **attention의 gathe
 - `schedule_matmul`의 출력이 **항상 동일 형태**라는 사실이 컴파일 12.4× 단축의 열쇠였다
   (TIR 재순회를 파이썬 루프로 대체).
 
+**5d(§5.7) 업데이트**: ~1% FP16 재정렬을 수용하기로 하고 **5d-1(tile-native RMSNorm+residual)**
+을 진행 → 3B prefill layer **−28.6%**(5c −19.8%에서 확대), scatter **−75.8%**. 남은 gather/scatter는
+전부 attention.
+
 **남은 과제(우선순위·근거와 함께)**:
-- **5d**(attention/RMSNorm tile-native, 추가 −~8%+, 최대 항목은 attention gather 131k) —
-  ~1% FP16 tolerance 수용 시 진행 가능. 최대·최난이도.
-- **A1**(메모리 재사용) — 현재 측정상 net-negative. **5d로 attention gather까지 없앤 뒤**
+- **5d-2**(tile-native attention core: RoPE·transpose·softmax + matmul 활성화-B tile) — 남은
+  attention gather 131k/scatter 131k. 6개 op를 조율해야 하는 최대·최난이도 작업.
+- **A1**(메모리 재사용) — 현재 측정상 net-negative. **5d-2로 attention gather까지 없앤 뒤**
   gather_cache가 불필요해지면 재평가.
-- **HW 의존**: 여전히 **행-major strided 모드**(잔여 attention gather/scatter 직격),
-  **register-indirect 주소**(KV append·가변길이 decode), **HW 루프**(명령 수 감소) — 별도
-  벤더 요청서로 분리. (SW로 마무리 가능한 net-positive 최적화는 이번에 모두 완료.)
+- **HW 의존**: **행-major strided 모드**는 tile-blocked 레이아웃으로 **SW에서 상당 부분 우회**됨
+  (5c/5d-1). 나머지 **register-indirect 주소**(KV append·가변길이 decode), **HW 루프**(명령 수
+  감소)는 별도 벤더 요청서.

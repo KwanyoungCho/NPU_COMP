@@ -184,22 +184,34 @@ register-indirect→KV/가변길이)은 별도 벤더 요청서.
   경계에서 relayout은 데이터 볼륨이 같아 gather와 **비용 동일**(예: [128,3072] gather=49,152 = relayout scatter=49,152).
   → **경계를 relayout로 감싸는 건 이득 0**; 그 op들 자체를 **tile-native**(tile 레이아웃에서 직접 계산)로 만들어야 제거됨.
 
-  **5d 결정: 보류(A4는 5c에서 확정). 이유 = byte-exact 불가.**
-  - 5d는 reduce(RMSNorm의 sum, softmax의 sum/max)를 tile화해야 하는데, **tile reduce는 FP16 합산 순서를 바꿈**
-    (3072개 일괄 reduce → 48개 64-col 타일 elementwise 누적 후 행 reduce). broadcast/const-pack은 정확한 순열이라
-    무해하지만 **reduce만 산술 재정렬** → 비트 동일 불가. byte-exact를 유지하려면 reduce가 행을 gather해야 하고
-    (parity), 그러면 tile화 이득이 소멸. **독립 matmul→RMSNorm→matmul로 실증: rel≈0.18%(maxdiff 9.77e-3), tolerance-valid.**
-  - 5c는 **주소만 변경(같은 MAC 순서)** 이라 비트 동일이었음 → **A4의 byte-exact 실현 가능 구간은 5c가 끝**.
-  - 사용자 결정(2026-07-18): **5c의 비트-동일(layouts=True==False, 깨끗한 A/B 비교)을 우선**, 5d 미진행.
-  - **설계 보존(향후 full-model fusion 시 유효)**:
-    - 5d-1 tile-native RMSNorm+residual: `emit_row_sum`(Nt 타일 elementwise 누적 후 행 reduce, gather 0) +
-      `emit_broadcast` col/row tile-native + 2D-64mult elementwise 상수 tile-pack(`alloc_const_tiled`) +
-      assign_layouts에 `sum`=TILE 입력 소비자·`broadcast_to`=TILE producer 규칙 + 입력 param tile-pack(host-side 무료)
-      + O-proj group `c_tiled` 출력 + `emit_concat` tile-입력 relayout. per-layer 순이득 ~147K(−8%), 비용 ~1% FP16.
-    - 5d-2 tile-native attention core: RoPE·softmax·transpose tile화(gather 131K, 최대). head_dim=64=1 타일폭,
-      RoPE 타일 내부 반쪽 slice, softmax reduce도 tolerance-only.
+  **byte-exact 한계**: 5d는 reduce(RMSNorm의 sum, softmax의 sum/max)를 tile화해야 하는데, **tile reduce는
+  FP16 합산 순서를 바꿈** → 비트 동일 불가(broadcast/const-pack은 정확한 순열이라 무해, **reduce만 산술 재정렬**).
+  독립 실증: rel≈0.18%(D=3072), D=512에선 우연히 0. **tolerance-valid**. 5c는 주소만 바꿔 비트 동일이었던 것과 다름.
 
-**검증**: 5c까지 **출력 완전일치(byte-exact)** 확인 완료. 이후 최적화는 여기서 종료. golden 오라클 = direct 백엔드(row-major) 유지.
+  **사용자 결정(2026-07-19): ~1% FP16 재정렬은 불가피한 표준 차이 → tolerance 수용하고 5d 진행.**
+
+  - **5d-1 ✅ (커밋 7042abd) — tile-native RMSNorm + residual stream**:
+    - 5d-1a 이미터: `emit_row_sum` tile 분기(Nt 타일 elementwise 누적 후 행 reduce, gather 0), `emit_broadcast`
+      tile 분기(col=ones-matmul 블록, row=세그먼트 복제), `alloc_const_tiled`(2D-64mult ew 상수 tile-pack),
+      assign_layouts에 `broadcast_to`=TILE producer·`sum`=TILE 소비자·scalar/2D-64mult 상수는 tile ew를 demote 안 함.
+    - 5d-1b 배선: **입력 param x를 tile-blocked**(run_compiled가 fed 데이터 host-pack) — **`pack_params` 뒤로 게이팅**
+      (미패킹 시 direct 오라클과 tir이 byte-exact 유지); O-proj accumulate group이 tile C 출력(`c_tiled`);
+      `emit_concat`이 tile 입력을 row 출력으로 relayout; assign_layouts가 param을 fixpoint에 포함 + concat을 tile-수용 소비자로.
+    - **실측 3B prefill layer(pack_params, pre-A4 대비): total 2,235,194 → 1,596,062 (−28.6%, 5c는 −19.8%),
+      gather 409,600 → 180,224 (−56%), scatter 540,672 → 131,072 (−75.8%).** gate GREEN(REDUCED byte-exact;
+      MEDIUM/3B tolerance; vendor byte-exact). 회귀: `test_layout.test_tile_rmsnorm`.
+
+  - **5d-2 (다음) — tile-native attention core**. 5d-1 이후 남은 gather/scatter는 **전부 attention**:
+    | op | gather | scatter | 원인 |
+    |---|---|---|---|
+    | attn score/ctx | 131,072 | 49,152 | Qr/Kr(RoPE)·P(softmax)·Kt(transpose)가 ROW |
+    | Q/K/V proj | 0 | 81,920 | 출력이 RoPE로 감 → ROW |
+    | O proj | 49,152 | 0 | ctx(P@V) 입력 ROW |
+    필요(서로 얽힘): tile-native **RoPE**(h=64=1타일 → slice/concat 타일정렬), **transpose(Kt)**,
+    **softmax**(reduce-max tile 추가 필요), **matmul이 활성화 B를 tile로**(Kt/V; `packed_src` 재사용) +
+    assign_layouts에 strided_slice/concat/permute_dims/max를 tile-aware로. 6개 조율 변경 → 큰 작업.
+
+**검증**: 5c까지 byte-exact, 5d부터 tolerance(+참조 비교). golden 오라클 = direct 백엔드(row-major) 유지.
 
 ## 4. 리스크 관리 (중간 결과물 방지)
 - 매 Stage: 착수 전 브랜치, 완료 시 **전체 테스트 + byte-exact** 통과해야 커밋.
