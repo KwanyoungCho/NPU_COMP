@@ -33,7 +33,12 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
         func = mod[func_name]
         mp = _memplan.plan(func, pack_params=pack_params, layouts=layouts, reuse=reuse,
                            fuse_oproj=fuse_oproj)
-        asm = _codegen.compile_func(func, mp, tile=64, mm_backend="tir", fuse_oproj=fuse_oproj)
+        # A1: offset reuse breaks the gather cache's write-once invariant (a reused slot
+        # is written by >1 var, but the cache keys only on (off,stride)). Disable the
+        # activation gather cache when reuse is on. Free for the real reuse path (tiled
+        # prefill has no gather); only a row-activation gather (decode) would re-gather.
+        asm = _codegen.compile_func(func, mp, tile=64, mm_backend="tir", fuse_oproj=fuse_oproj,
+                                    reuse_act=not reuse)
         return asm, mp
     func = mod[func_name]
     return compile_func(func, tile=tile)

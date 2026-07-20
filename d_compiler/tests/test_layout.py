@@ -157,8 +157,18 @@ def test_reuse_memory():
     assert top1 < top0, f"reuse should lower mp.top ({top1} !< {top0})"
     o0 = driver.run_module(mod, ins, backend="hybrid", layouts=True, pack_params=True, reuse=False)
     o1 = driver.run_module(mod, ins, backend="hybrid", layouts=True, pack_params=True, reuse=True)
-    assert np.array_equal(o0, o1), f"reuse != no-reuse (maxdiff={np.max(np.abs(o0 - o1))})"
-    return f"reuse byte-exact; mp.top {top0:,} -> {top1:,} ({100*(top1-top0)/top0:.1f}%)"
+    assert np.array_equal(o0, o1), f"prefill reuse != no-reuse (maxdiff={np.max(np.abs(o0 - o1))})"
+
+    # ALSO the decode kernel: M=1 leaves RMSNorm outputs ROW, so its matmul-A gathers
+    # (stride=D>64) hit the shared gather cache. Offset reuse breaks the cache's write-once
+    # key (two vars share an offset) -> must disable the cache when reuse (driver does).
+    dmod = model.build_attn_ffn_module(cfg, 128)
+    dins = {p.name_hint: f16(rng.standard_normal([int(d) for d in p.struct_info.shape]) * 0.05)
+            for p in dmod["main"].params}
+    d0 = driver.run_module(dmod, dins, backend="hybrid", layouts=True, pack_params=True, reuse=False)
+    d1 = driver.run_module(dmod, dins, backend="hybrid", layouts=True, pack_params=True, reuse=True)
+    assert np.array_equal(d0, d1), f"decode reuse != no-reuse (maxdiff={np.max(np.abs(d0 - d1))})"
+    return f"reuse byte-exact (prefill+decode); mp.top {top0:,} -> {top1:,} ({100*(top1-top0)/top0:.1f}%)"
 
 
 if __name__ == "__main__":
