@@ -488,7 +488,7 @@ def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather
     wk.flush()
 
 
-def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None):
+def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None, c_tiled=None):
     """Emit  C[M,N] = sum_t (A_t[M,K_t] @ B_t[K_t,N])  with a SINGLE output flush.
 
     Used for the per-head attention output projection: instead of materialising
@@ -506,6 +506,7 @@ def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None):
     out = c_off
     cpad = None
     if Mp != M:                                            # decode: pad M, copy valid rows out
+        assert c_tiled is None, "tile-blocked group output needs 64-multiple M"
         cpad = mp.scratch_alloc(Mp * N); out = cpad
     wk = _Walker(asm, mp, {}, gather_cache=gather_cache)
     sched_cache = {}
@@ -514,7 +515,7 @@ def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None):
         pf = sched_cache.get((Mp, K_t, N))
         if pf is None:
             pf = _scheduled_gemm(Mp, K_t, N); sched_cache[(Mp, K_t, N)] = pf
-        _bind_gemm(wk, pf, a_off, b_off, out, nt)
+        _bind_gemm(wk, pf, a_off, b_off, out, nt, c_tiled=c_tiled)
         wk.suppress_fill = (i > 0)                         # only the first term zero-inits C
         wk.walk(pf.body)
     wk.flush()                                             # ONE scatter for the whole sum

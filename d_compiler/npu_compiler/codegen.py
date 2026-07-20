@@ -216,6 +216,22 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
         R, C = mp.shape[src]
         assert mp.shape[dst][-1] == 1, f"emit_row_sum expects [R,1] dst, got {mp.shape[dst]}"
         ssrc, sd = off[src], off[dst]
+        if mp.layout.get(src) == "tile":                 # A4 5d: TILE src (no gather)
+            assert R % 64 == 0 and C % 64 == 0, f"tile row_sum needs 64-mult, got {[R,C]}"
+            Ct = C // 64
+            A = mp.scratch_alloc(64 * 64)                 # per row-block [64,64] accumulator
+            for rt in range(R // 64):
+                base = ssrc + (rt * Ct) * 4096            # tile (rt,0) is contiguous
+                a.vlen(4096); a.addr(SRC1, base); a.load(0, 0)
+                a.v_copy(); a.addr(DST, A); a.save(0)     # A = tile(rt,0)
+                for ct in range(1, Ct):
+                    a.vlen(4096); a.addr(SRC1, base + ct * 4096); a.load(0, 0)
+                    a.addr(SRC2, A); a.load(0, 1); a.v_add(mode=VECTOR)
+                    a.addr(DST, A); a.save(0)             # A += tile(rt,ct)  (elementwise)
+                for ir in range(64):                      # reduce each of the 64 tile rows
+                    a.vlen(64); a.addr(SRC1, A + ir * 64); a.load(0, 0)
+                    a.v_reduce_sum(); a.addr(DST, sd + rt * 64 + ir); a.save(0)
+            return
         for r in range(R):
             a.vlen(C)
             a.addr(SRC1, ssrc + r * C); a.load(0, 0)     # contiguous row [C]
@@ -260,6 +276,31 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
         row_bcast = (sr == 1 and sc == Cd)                   # [1,C] -> [R,C]
         if not (col_bcast or row_bcast):
             raise CodegenError(f"broadcast {sshape[:2]} -> {[Rd,Cd]} unsupported")
+        if mp.layout.get(dst) == "tile":                     # A4 5d: write TILE dst (no scatter)
+            assert Rd % 64 == 0 and Cd % 64 == 0, f"tile broadcast needs 64-mult, got {[Rd,Cd]}"
+            Rt, Ct = Rd // 64, Cd // 64
+            B = mp.scratch_alloc(64 * 64)                    # one 64x64 dst tile, then replicate
+            if col_bcast:                                    # tile(rt,ct)[ir,:] = src[rt*64+ir]
+                ones = mp.scratch_alloc(64)
+                a.vlen(64); a.v_broadcast(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)
+                for rt in range(Rt):
+                    a.tile(0, 64, 1); a.tile(1, 1, 64)
+                    a.addr(SRC1, ssrc + rt * 64); a.load(1, 0)   # src col [64,1]
+                    a.addr(SRC2, ones); a.load(1, 1)             # ones [1,64]
+                    a.m_mul(mode=VECTOR); a.addr(DST, B); a.save(1)  # B[ir,:]=src[rt*64+ir]
+                    for ct in range(Ct):
+                        a.vlen(4096); a.addr(SRC1, B); a.load(0, 0)
+                        a.v_copy(); a.addr(DST, sd + (rt * Ct + ct) * 4096); a.save(0)
+            else:                                            # row_bcast: tile(rt,ct)[:,ic]=src[ct*64+ic]
+                for ct in range(Ct):
+                    seg = ssrc + ct * 64                     # src[1,C] contiguous 64-segment
+                    for ir in range(64):                     # B[ir,:] = seg
+                        a.vlen(64); a.addr(SRC1, seg); a.load(0, 0)
+                        a.v_copy(); a.addr(DST, B + ir * 64); a.save(0)
+                    for rt in range(Rt):
+                        a.vlen(4096); a.addr(SRC1, B); a.load(0, 0)
+                        a.v_copy(); a.addr(DST, sd + (rt * Ct + ct) * 4096); a.save(0)
+            return
         if row_bcast:
             for r in range(Rd):
                 a.vlen(Cd)
@@ -333,7 +374,9 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
             a.addr(DST, off[dst] + r * w); a.save(0)
 
     def emit_concat(dst, call):
-        """2D last-axis concat: copy each input's columns into the output (per-row)."""
+        """2D last-axis concat: copy each input's columns into the output (per-row).
+        dst is row-major; a TILE input (A4 5d) is relayout-read (its row r spans Ct
+        tile segments) so the concat output stays row-major."""
         srcs = list(call.args[0].fields)
         if int(call.attrs.axis) not in (1, -1):
             raise CodegenError(f"concat: only last-axis 2D (axis={call.attrs.axis})")
@@ -341,6 +384,18 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
         col = 0
         for s in srcs:
             Rs, Cs = mp.shape[s]
+            if mp.layout.get(s) == "tile":               # tile src -> relayout each row to row-major
+                assert Rs % 64 == 0 and Cs % 64 == 0, f"tile concat src needs 64-mult, got {[Rs,Cs]}"
+                Ct = Cs // 64
+                for r in range(Rs):
+                    rt, ir = divmod(r, 64)
+                    for ct in range(Ct):
+                        a.vlen(64)
+                        a.addr(SRC1, off[s] + ((rt * Ct + ct) * 64 + ir) * 64); a.load(0, 0)
+                        a.v_add(mode=IMM, imm=0)
+                        a.addr(DST, off[dst] + r * Cd + col + ct * 64); a.save(0)
+                col += Cs
+                continue
             for r in range(Rs):
                 a.vlen(Cs)
                 a.addr(SRC1, off[s] + r * Cs); a.load(0, 0)
@@ -401,8 +456,11 @@ def compile_func(func, mp, tile=None, mm_backend="direct", emit_log=None, reuse_
             av, bv = mm.args[0], mm.args[1]
             M, K = mp.shape[av]; _, N = mp.shape[bv]
             terms.append((off[av], off[bv], M, K, N, mp.packed_meta.get(bv)))
+        M, N = terms[0][2], terms[0][4]
+        c_tiled = (N // 64) if (mp.layout.get(root_var) == "tile"
+                                and M % 64 == 0 and N % 64 == 0) else None
         tir_backend.emit_matmul_accumulate_group(a, mp, off[root_var], terms,
-                                                 gather_cache=mm_gather_cache)
+                                                 gather_cache=mm_gather_cache, c_tiled=c_tiled)
         return terms[0]                                      # (.,.,M,K,N,.) for logging
 
     val_of = {b.var: b.value for blk in seq.blocks for b in blk.bindings}

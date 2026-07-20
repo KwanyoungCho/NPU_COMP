@@ -66,6 +66,9 @@ def run_compiled(asm, mp, inputs, maxrun=None):
         if p in mp.packed_meta:                    # packed weight param: reorder to tile-blocked
             K, N = mp.shape[p]
             arr = _pack2d(arr, K, N)
+        elif p in mp.tiled_inputs:                 # tile-blocked activation input (A4 5d): host-pack
+            R, N = mp.shape[p]
+            arr = _pack2d(arr, R, N)
         gbuf[off:off + arr.size] = arr
     out_var = mp.output
     out_off = mp.offset[out_var]; n_out = _numel(mp.shape[out_var])

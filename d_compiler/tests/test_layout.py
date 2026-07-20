@@ -77,8 +77,48 @@ def test_tile_mode_matmul():
     return f"TILE-mode A/C == row-major byte-exact; rel-vs-f64 {out}"
 
 
+def test_tile_rmsnorm():
+    """A4 5d: tile-native RMSNorm (tile reduce-sum + col/row broadcast to a TILE dst +
+    tile-packed elementwise const) AND a tile-blocked INPUT param (pack_params=True packs
+    the fed data host-side). matmul->RMSNorm->matmul, so the norm island tiles between two
+    matmuls and x flows in tile. Matches the row-major path within FP16 tolerance (the tile
+    reduce regroups the FP16 sum; broadcast/pack are exact permutations)."""
+    from tvm import relax
+    from npu_compiler import driver, legalize, memplan
+
+    S, D = 128, 512
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", relax.TensorStructInfo([S, D], "float16"))
+    W1 = relax.Var("W1", relax.TensorStructInfo([D, D], "float16"))
+    W2 = relax.Var("W2", relax.TensorStructInfo([D, D], "float16"))
+    w = relax.Var("w", relax.TensorStructInfo([1, D], "float16"))
+    with bb.function("main", [x, W1, W2, w]):
+        with bb.dataflow():
+            y = bb.emit(relax.op.matmul(x, W1))
+            z = legalize.rms_norm(bb, y, w, S, D)
+            gv = bb.emit_output(bb.emit(relax.op.matmul(z, W2)))
+        bb.emit_func_output(gv)
+    mod = bb.finalize()
+
+    mp = memplan.plan(mod["main"], pack_params=True, layouts=True)
+    ntile = sum(1 for l in mp.layout.values() if l == "tile")
+    assert "x" in {p.name_hint for p in mp.tiled_inputs}, "input x should be tile-blocked"
+    assert ntile >= 9, f"expected RMSNorm island + input to tile, got {ntile}"
+
+    rng = np.random.default_rng(3)
+    f16 = lambda a: np.asarray(a, np.float16)
+    ins = {"x": f16(rng.standard_normal((S, D)) * 0.1), "W1": f16(rng.standard_normal((D, D)) * 0.02),
+           "W2": f16(rng.standard_normal((D, D)) * 0.02), "w": f16(rng.uniform(0.8, 1.2, (1, D)))}
+    o_row = driver.run_module(mod, ins, backend="hybrid", layouts=False)
+    o_til = driver.run_module(mod, ins, backend="hybrid", layouts=True, pack_params=True)
+    rel = float(np.max(np.abs(o_row - o_til))) / (float(np.max(np.abs(o_row))) + 1e-9)
+    assert rel < 0.02, f"tile RMSNorm rel-diff {rel} too large"
+    return f"tile-native RMSNorm + tile input within tol ({ntile} tile, rel={rel:.4f})"
+
+
 if __name__ == "__main__":
     print("[PASS] roundtrip:", test_roundtrip())
     print("[PASS] tile-contiguous:", test_tile_contiguous())
     print("[PASS] tile-mode matmul:", test_tile_mode_matmul())
-    print("ALL LAYOUT (A4 5a/5b) TESTS PASSED")
+    print("[PASS] tile-rmsnorm:", test_tile_rmsnorm())
+    print("ALL LAYOUT (A4 5a/5b/5d) TESTS PASSED")

@@ -64,6 +64,7 @@ class MemPlan:
         self.output = None    # returned Var
         self.packed_meta = {} # Constant -> Nt (tile-blocked weight: stored [Kt,Nt,64,64])
         self.layout = {}      # Var|Constant -> 'row' (default) | 'tile' (A4 tile-blocked)
+        self.tiled_inputs = set()  # param Vars fed pre-packed (tile-blocked activation input, A4 5d)
 
     def alloc(self, var):
         shape, dtype = _shape_dtype(var.struct_info)
@@ -107,6 +108,23 @@ class MemPlan:
         self.top += _numel(shape)
         self.constants.append(c)
         self.const_data[c] = data
+
+    def alloc_const_tiled(self, c, broadcast_to=None, T=64):
+        """Store an elementwise-operand constant [R,C] in tile-blocked layout so a
+        TILE elementwise op reads it in the same tile order as its other operands
+        (A4 5d). Host-side reorder (offline) — no device cost. Requires 64-mult."""
+        shape, dtype = _shape_dtype(c.struct_info)
+        data = c.data.numpy()
+        if broadcast_to is not None and list(shape) != list(broadcast_to):
+            data = np.broadcast_to(data, broadcast_to).copy()
+            shape = list(broadcast_to)
+        self.offset[c] = self.top
+        self.shape[c] = shape
+        self.dtype[c] = dtype
+        self.layout[c] = "tile"
+        self.top += tiled_numel(shape)
+        self.constants.append(c)
+        self.const_data[c] = pack_tiled(np.asarray(data), T)
 
     def alloc_const_packed(self, c, T=64):
         """Weight pre-packing: store a matmul weight constant [K,N] in tile-blocked
@@ -158,7 +176,7 @@ def _arg_vars(val):
     return out
 
 
-def assign_layouts(bindings, output_var):
+def assign_layouts(bindings, output_var, tile_inputs=False):
     """Decide 'row'/'tile' per binding var (fixpoint). A matmul output (64-mult M,K,N)
     or a layout-transparent elementwise output is 'tile' iff EVERY consumer is
     TILE-compatible (matmul-A, or a 'tile' elementwise) and (for elementwise) every
@@ -187,19 +205,72 @@ def assign_layouts(bindings, output_var):
         c = val.get(v)
         return isinstance(c, relax.Call) and _opn(c) in _EW_LAYOUT
 
-    layout = {b.var: ("tile" if (is_mm64(b.var) or is_ew(b.var)) else "row") for b in bindings}
+    def is_bcast(v):                                    # broadcast_to producing a 64-mult 2D dst
+        c = val.get(v)
+        if not (isinstance(c, relax.Call) and _opn(c) == "relax.broadcast_to"):
+            return False
+        sh = [int(d) for d in v.struct_info.shape]
+        return len(sh) == 2 and sh[0] % 64 == 0 and sh[1] % 64 == 0
+
+    def is_reduce(v):                                  # sum reading a 64-mult 2D src (tile-native)
+        c = val.get(v)
+        if not (isinstance(c, relax.Call) and _opn(c) == "relax.sum"):
+            return False
+        sh = [int(d) for d in c.args[0].struct_info.shape]
+        return len(sh) == 2 and sh[0] % 64 == 0 and sh[1] % 64 == 0
+
+    def is_concat(v):                                  # concat relayouts its tile inputs itself
+        c = val.get(v)
+        return isinstance(c, relax.Call) and _opn(c) == "relax.concat"
+
+    # A4 5d: activation INPUT params (residual stream x) can be tile — but ONLY when the
+    # caller pre-packs the fed data host-side (tile_inputs, set on the real generation
+    # path). Otherwise the input stays row so the direct oracle (which doesn't honor tile
+    # layout) and tir agree byte-exact. Candidates: 2D 64-mult Vars read as matmul-A or an
+    # elementwise/reduce operand, NOT defined by a binding (real params) nor a weight.
+    defined = set(val.keys())
+    tile_params = set()
+    if tile_inputs:
+        for b in bindings:
+            c = b.value
+            if isinstance(c, relax.Call):
+                nm = _opn(c)
+                if nm == "relax.matmul" and isinstance(c.args[0], relax.Var):
+                    tile_params.add(c.args[0])
+                elif nm in _EW_LAYOUT or nm == "relax.sum":
+                    for a in c.args:
+                        if isinstance(a, relax.Var):
+                            tile_params.add(a)
+        tile_params = {p for p in tile_params if p not in defined
+                       and len(p.struct_info.shape) == 2
+                       and int(p.struct_info.shape[0]) % 64 == 0 and int(p.struct_info.shape[1]) % 64 == 0}
+
+    layout = {b.var: ("tile" if (is_mm64(b.var) or is_ew(b.var) or is_bcast(b.var)) else "row")
+              for b in bindings}
+    for p in tile_params:
+        layout[p] = "tile"
     layout[output_var] = "row"
+    nodes = [b.var for b in bindings] + list(tile_params)
     changed = True
     while changed:
         changed = False
-        for b in bindings:
-            v = b.var
+        for v in nodes:
             if layout.get(v) != "tile":
                 continue
             demote = (v is output_var)
-            if not demote and is_ew(v):                       # TILE ew: all inputs TILE
+            if not demote and is_ew(v):                       # TILE ew: all inputs TILE (or packable const)
                 for a in val[v].args:
-                    if isinstance(a, (relax.Var, relax.Constant)) and layout.get(a, "row") != "tile":
+                    if isinstance(a, relax.Constant):
+                        csh = [int(d) for d in a.struct_info.shape]
+                        n = 1
+                        for d in csh:
+                            n *= d
+                        if n == 1:                            # scalar: layout-agnostic
+                            continue
+                        if len(csh) == 2 and csh[0] % 64 == 0 and csh[1] % 64 == 0:
+                            continue                          # 2D 64-mult: packed tile (host-side)
+                        demote = True; break
+                    if isinstance(a, relax.Var) and layout.get(a, "row") != "tile":
                         demote = True; break
                     if isinstance(a, relax.Tuple) and any(layout.get(f, "row") != "tile" for f in a.fields):
                         demote = True; break
@@ -210,6 +281,10 @@ def assign_layouts(bindings, output_var):
                         continue                              # read as A by a 64-mult matmul
                     if is_ew(cv) and layout.get(cv) == "tile":
                         continue                              # feeds a TILE ew
+                    if is_reduce(cv):
+                        continue                              # feeds a tile-native reduce (sum)
+                    if is_concat(cv):
+                        continue                              # concat relayouts tile inputs itself
                     demote = True; break
             if demote:
                 layout[v] = "row"; changed = True
@@ -228,14 +303,11 @@ def plan(func, pack=True, pack_params=False, layouts=True):
                        (Kt*/Vc*, filled at runtime) are NOT weights -> not packed."""
     mp = MemPlan()
     param_set = set(func.params)
-    for p in func.params:
-        mp.params.append(p)
-        mp.alloc(p)
     seq = func.body
     assert isinstance(seq, relax.SeqExpr), "expected SeqExpr body"
     bindings = [b for block in seq.blocks for b in block.bindings]
 
-    # resolve output var (unwrap 1-tuple) then assign layouts (A4 5c)
+    # resolve output var (unwrap 1-tuple) then assign layouts (A4 5c/5d)
     for b in bindings:
         if isinstance(b.value, relax.Tuple):
             mp.tuple_of[b.var] = list(b.value.fields)
@@ -243,7 +315,17 @@ def plan(func, pack=True, pack_params=False, layouts=True):
     while out in mp.tuple_of:
         out = mp.tuple_of[out][0]
     assert isinstance(out, relax.Var), f"expected Var output, got {type(out)}"
-    layout = assign_layouts(bindings, out) if layouts else {}
+    layout = assign_layouts(bindings, out, tile_inputs=pack_params) if layouts else {}
+
+    # params AFTER layout so a tile-marked activation input (residual x) gets tile
+    # footprint; run_compiled packs its fed data host-side (no device relayout).
+    for p in func.params:
+        mp.params.append(p)
+        if layout.get(p) == "tile":
+            mp.alloc_tiled(p)
+            mp.tiled_inputs.add(p)
+        else:
+            mp.alloc(p)
 
     for binding in bindings:
         val = binding.value
@@ -260,10 +342,13 @@ def plan(func, pack=True, pack_params=False, layouts=True):
             opname = getattr(val.op, "name", "")
             is_ew = opname in _EW_OPS
             bsh = [int(d) for d in binding.var.struct_info.shape] if is_ew else None
+            ew_tile = is_ew and layout.get(binding.var) == "tile"
             for idx, arg in enumerate(val.args):
                 if isinstance(arg, relax.Constant) and arg not in mp.offset:
                     if pack and opname == "relax.matmul" and idx == 1 and _packable(arg):
                         mp.alloc_const_packed(arg)        # weight pre-packing (tile-blocked)
+                    elif ew_tile and bsh is not None and len(bsh) == 2 and bsh[0] % 64 == 0 and bsh[1] % 64 == 0:
+                        mp.alloc_const_tiled(arg, broadcast_to=bsh)   # TILE ew operand (A4 5d)
                     else:
                         mp.alloc_const(arg, broadcast_to=bsh)
                 elif (pack_params and opname == "relax.matmul" and idx == 1
