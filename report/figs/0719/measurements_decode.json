@@ -1,0 +1,16 @@
+{
+ "note": "3B decode step (M=1): kernels build_kv_proj_module + build_attn_ffn_module(MAX=128). MEASURED asm.tags. before=90ce86d (no decode opt), after=3279975 (a_m1 gather-skip + c_tiled scatter-skip). Only tir_backend.py differs.",
+ "kernels": {
+  "kv_proj":  {"before": {"gather": 24576, "scatter": 16384, "words": 68888},
+               "after":  {"gather": 0,     "scatter": 0,     "words": 28056}},
+  "attn_ffn": {"before": {"gather": 221184, "scatter": 253952, "words": 912776},
+               "after":  {"gather": 32768,  "scatter": 0,      "words": 473768}}
+ },
+ "roles_combined": {
+  "before": {"matmul": 418416, "scatter": 270336, "gather": 245760, "reduce": 37200,
+             "broadcast": 5185, "elementwise": 2877, "layout": 1152, "pad": 736},
+  "after":  {"matmul": 418416, "scatter": 0,      "gather": 32768,  "reduce": 37200,
+             "broadcast": 5185, "elementwise": 2877, "layout": 1152, "pad": 4224}
+ },
+ "total_words": {"before": 981664, "after": 501824}
+}

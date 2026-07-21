@@ -1,9 +1,11 @@
-# NPU 컴파일러 최적화 리팩터링 보고서 (2026-07-19) — tile-blocked 레이아웃(gather/scatter=0) · legalize 통합 · 컴파일 12.4×
+# NPU 컴파일러 최적화 리팩터링 보고서 (2026-07-19) — tile-blocked 레이아웃(gather/scatter=0) · legalize 통합 · 컴파일 12.4× · decode(M=1) gather/scatter 제거
 
-> 작성일: 2026-07-19
+> 작성일: 2026-07-19 (§9 decode 최적화 추가: 2026-07-21)
 > 대상: `d_compiler` 컴파일러(0710 ISA 반영 이후의 SW 최적화 리팩터링)
 > 선행 문서: `report/report_0710.md`(0710 ISA 반영 Phase 1–3), `d_compiler/REFACTOR_PLAN.md`(스테이지 계획)
 > **이 문서는 처음 보는 사람도 이해하도록 배경부터 서술한다. 지난 리포트(0710) 이후 추가된 모든 사항을 담는다.**
+> **07-21 갱신**: prefill 중심의 A4~A1(§5~§8)에 더해, **decode(자기회귀 생성, M=1)** 경로의 gather/scatter를
+> 제거한 A5(§9)를 추가했다. decode 스텝 명령 수 **981,664 → 501,824 (−48.9%)**, scatter 0, gather −87%.
 
 ---
 
@@ -15,8 +17,10 @@
 layer **−52.7%**, **gather 0 / scatter 0**). FFN 체인(5c, −19.8%)은 **byte-exact**,
 RMSNorm/residual(5d-1)·attention(5d-2)까지 확장하면 reduce의 FP16 재정렬로 **~0.1% tolerance**
 (수용). 더불어 **import 경로를 manual 경로와 동일 lowering으로 통일**(A3)하고, **컴파일 시간을
-106.3s → 8.6s(12.4×)로 단축**(A2, byte-exact)했다. 모든 단계가 **회귀 게이트(전체 테스트 +
-벤더 byte-exact) 통과 상태로 커밋**됐다.
+106.3s → 8.6s(12.4×)로 단축**(A2, byte-exact)했다. 마지막으로 **decode(생성, M=1) 경로**에서도 같은
+"M=1이면 0번 행만 산다" 관찰로 **gather/scatter를 제거**(A5, §9)해 3B decode 스텝 명령을
+**981,664 → 501,824(−48.9%), scatter 0 / gather −87%(잔존은 KV 캐시뿐)** 로 줄였다(byte-exact).
+모든 단계가 **회귀 게이트(전체 테스트 + 벤더 byte-exact) 통과 상태로 커밋**됐다.
 
 ---
 
@@ -53,6 +57,7 @@ RMSNorm/residual(5d-1)·attention(5d-2)까지 확장하면 reduce의 FP16 재정
 | **A3** | import legalization을 manual과 통일 | ✅ | 향후 실제 HF 모델도 동일 최적화 경로 |
 | **A2** | 컴파일 속도 | ✅ | **106.3s → 8.6s (12.4×)**, byte-exact |
 | **A1** | liveness 기반 메모리 재사용 | ✅ (5d-2 후 완료) | 3B mp.top **278MB → 228MB (−18%)**, 명령 수 불변, byte-exact(§8) |
+| **A5** | decode(M=1) gather/scatter 제거 | ✅ (07-21) | 3B decode 스텝 **981,664 → 501,824 (−48.9%)**, scatter 0 / gather −87%, byte-exact(§9) |
 
 > **원래 계획 순서는 A4 → A1 → A3 → A2** 였다. A1을 프로토타입해 3B로 측정하니 **net-negative**
 > (§8)였고 그 원인이 `gather_cache`(활성화 gather 재사용)와의 충돌이었다. A1의 안전 전제는 "A4가
@@ -444,7 +449,103 @@ A1이 실제로 공략하는 **활성화 working set peak는 73.9→23.8MB(−68
 
 ---
 
-## 9. 변경/추가된 파일 & 커밋 (0710 리포트 이후 전부)
+## 9. A5 — decode(M=1) gather/scatter 제거 — 커밋 `f50b82b`(gather)·`3279975`(scatter) ★
+
+§5~§8은 전부 **prefill**(프롬프트 병렬 처리) 레이어를 최적화했다. 실제 서빙의 대부분은 그 뒤의
+**decode**(자기회귀 생성)인데, decode는 성격이 정반대다 — 그래서 prefill 최적화(A4)가 **그대로는
+적용되지 않는다**. 이 절은 decode에 맞는 최적화다.
+
+### 9.0 동기 — decode는 왜 gather/scatter가 생기나 (prefill과 같은 코드, M만 다름)
+
+decode는 매 스텝 **토큰 1개**만 처리한다 → 모든 matmul의 **M=1**. 코드 경로는 prefill과 **동일**하다
+(같은 `emit_matmul`/`emit_gemm`, matrix unit MAC 그대로 사용). 다른 건 **행렬 크기(M)** 뿐이다.
+그런데 A4의 tile-blocked 최적화(§5)는 **64배수 차원**에서만 발동(`is_mm64`)하는데 **M=1은 64배수가
+아니므로**, decode는 tile-blocked이 아닌 **row-major fallback**으로 돈다. 이때 matmul은 M을 64로 pad해서:
+
+- **입력 A**를 `[64, K]` 타일 격자로 **gather**(0번 행만 진짜, 1~63행은 padding garbage),
+- **출력 C**를 `[64, N]`로 **scatter**(0번 행만 유효, 1~63행은 버림)
+
+한다. 하지만 M=1이면 실제로 의미 있는 건 **A의 0번 행 하나, C의 0번 행 하나**뿐 — gather/scatter의
+**63/64(≈98%)가 버려질 데이터를 위한 낭비**다. 3B decode 스텝에서 이 낭비가 gather 245,760 +
+scatter 270,336 = **명령의 절반 이상**을 차지했다.
+
+> **핵심 관찰**: A의 0번 행은 이미 메모리에 **연속**으로 있고, C도 0번 행만 쓰면 된다. "M=1이라 0번
+> 행만 산다"는 사실 하나로 gather와 scatter를 **둘 다** 없앨 수 있다(prefill 경로는 전혀 안 건드림).
+
+### 9.1 gather 제거 — 연속 단일 행 읽기 (`a_m1`) — 커밋 `f50b82b`
+
+matmul이 A 타일 `(0, ko)`를 읽을 때 원래는 stride `K`(compact 2D)로 64행을 gather한다. **M=1이면
+stride 64(연속)로** 바꾼다:
+
+- 0번 행 = `A[0, ko·64:…]` (진짜 활성화),
+- 1~63행 = 인접 메모리를 그대로 읽어 **버려질 C 1~63행**에만 기여(최종 결과 무관).
+
+`_gather_cached`는 이미 `stride==64`면 gather를 **생략**(연속이라 복사 불필요)하므로, stride만 64로
+주면 gather 명령이 사라진다.
+
+- **단일 matmul 경로**(`emit_gemm`/`_emit_tir_gemm`의 `a_m1` 플래그): Q/K/V/gate/up/down proj,
+  scores·ctx의 A쪽. Q/K/V/gate/up/down은 B가 **패킹된 가중치**라 B-gather도 없어 gather가 **완전 소멸**.
+- **fused O-proj 그룹**(`_Walker.a_m1_src` + `_bind_gemm`/`emit_matmul_accumulate_group`): walker의
+  `_bind_match`가 A를 compact offset + **stride 64**로 바인딩 → ctx gather 소멸.
+- **부수 효과(안전성 ↑)**: pad된 A의 over-read 범위가 오히려 **줄어든다**(`a_off+K+4032` vs 기존 `a_off+64·K`).
+
+**잔존 gather = KV 캐시(Kᵀ/V) B-read뿐**이다. scores(`Q@Kᵀ`)·ctx(`P@V`)는 B가 2D 캐시라 gather가
+남는데, 이건 append 복잡성 트레이드오프로 **의도적으로 남긴다**(§9.4의 잔여 32,768). 반면 kv_proj
+커널은 캐시를 **읽지 않고 K/V를 생산**하므로 gather가 **완전히 0**이 된다.
+
+### 9.2 scatter 제거 — tile-blocked C 쓰기 + 0번 행 추출 (`c_tiled`) — 커밋 `3279975`
+
+대칭적으로, C를 `[64, N]` compact(→ scatter)가 아니라 **tile-blocked**(`c_nt=N//64`)로 쓴다. 그러면
+각 64×64 타일이 **연속**(stride 64)이라 `emit_acc`가 **in-place로 누적**(cbuf 없음, flush scatter
+없음)한다. matmul 후 **logical 0번 행만** 추출:
+
+- tile `jo`의 0번 행 = `cpad + jo·4096`의 연속 64개 → `dst + jo·64` (`_copy_row0_tiled`, Nt개 복사).
+
+즉 **64행짜리 scatter → Nt개 작은 복사**로 대체. O-proj 그룹은 H개 term이 **타일별로 in-place
+누적**(term 0가 fill, 이후 term은 `suppress_fill`로 같은 타일에 MAC 누적)한 뒤 한 번만 0번 행을 추출한다.
+
+**byte-exact인 이유**: MAC 연산·누적 순서는 **완전히 동일**하고 **C 타일이 저장되는 위치만** 다르다
+(strided cpad에 scatter vs tile-blocked cpad에 in-place). 유효 데이터(0번 행)의 fp16 값은 비트 동일하다.
+
+### 9.3 정확성 검증
+
+- **byte-exact(변경 격리)**: `hybrid(a_m1 ON)` vs `hybrid(a_m1 OFF)` **maxdiff=0**; `hybrid(scatter-opt
+  ON)` vs `OFF` **maxdiff=0**. 두 최적화 모두 hybrid 출력을 **비트 불변**으로 유지(git-stash로 on/off 비교).
+- **회귀**: `test_decode.py`(M1~M6: prefill=prefill+decode 일치, 컴파일 생성=numpy, 멀티레이어 greedy
+  생성 토큰 일치) **전부 통과·결과 불변**(M3 rel 6.1e-04, M4/M6 토큰 [21,21,9]/[28,8] — 이전과 동일).
+- **prefill 무영향**: `a_m1`/`c_tiled`(decode)는 **M==1일 때만** 발동. prefill은 M=64배수라 fast path
+  → 전 게이트 GREEN + 벤더 byte-exact 유지.
+- **주의(direct-vs-hybrid ≈1.5)**: M=1에서 `direct`(논리 one-shot, dims≤255) vs 타일 경로는 **원래부터**
+  FP16 누적 순서가 달라 ~1.5 차이가 난다(이번 변경과 무관). 그래서 decode는 애초에 hybrid-vs-**numpy**로
+  검증한다. 이번 변경의 정확성은 위 **hybrid on/off maxdiff=0**로 입증했다.
+
+### 9.4 실측 — 3B decode 스텝 (kv_proj + attn_ffn, M=1, MAX=128)
+
+`asm.tags` 실측. before=`90ce86d`(decode 최적화 전), after=`3279975`(현재). 두 상태는 `tir_backend.py`만
+다르다(memplan/codegen 동일).
+
+| 커널 | gather | scatter | 총 명령(words) |
+|---|---:|---:|---:|
+| **kv_proj** (K/V 생산) before | 24,576 | 16,384 | 68,888 |
+| **kv_proj** after | **0** | **0** | **28,056 (−59%)** |
+| **attn_ffn** (attention+FFN) before | 221,184 | 253,952 | 912,776 |
+| **attn_ffn** after | **32,768** | **0** | **473,768 (−48%)** |
+| **decode 스텝 합계** before | 245,760 | 270,336 | 981,664 |
+| **decode 스텝 합계** after | **32,768 (−87%)** | **0 (−100%)** | **501,824 (−48.9%)** |
+
+![decode 스텝 per-role before/after: scatter→0(−100%), gather −87%(잔존 32,768은 KV 캐시 Kᵀ/V read뿐),
+matmul core·reduce·broadcast는 불변. 총 명령 981,664→501,824(−48.9%). M-pad+row-0 추출은 +474%지만
+절대량 4,224로 무시가능.](figs/0719/g_decode_before_after.png)
+
+→ **결론**: decode는 tile-blocked(A4)의 대상이 아닌 **row-major 경로**인데도, "M=1이면 0번 행만
+산다"는 관찰만으로 **gather+scatter를 516,096 → 32,768(−93.7%)**, **decode 스텝 명령 수를 절반
+(−48.9%)** 으로 줄였다. **matmul core(MAC)는 그대로**이므로 이는 유용한 계산은 손대지 않은 **순수
+오버헤드 제거**다. 남은 gather 32,768은 전부 KV 캐시 read로, register-indirect 주소(가변 길이 append)
+HW가 있어야 없어지는 유일한 잔여 항목이다(§11 남은 과제와 연결).
+
+---
+
+## 10. 변경/추가된 파일 & 커밋 (0710 리포트 이후 전부)
 
 | 커밋 | 내용 |
 |---|---|
@@ -474,6 +575,9 @@ A1이 실제로 공략하는 **활성화 working set peak는 73.9→23.8MB(−68
 | `efcf226` | 리뷰 수정 — reuse liveness가 `fuse_oproj`를 존중(잠재 결합 제거) |
 | `709fee6` | 리뷰 수정 — 기존 row 경로 `emit_row_max`/`emit_transpose`의 **≥256 8-bit 필드 오버플로우** 가드 |
 | `383313d` | 리뷰 수정 — **A1 reuse가 gather 캐시로 출력 손상**(decode) → reuse 시 캐시 off + decode 회귀 추가 |
+| `1f72a43`·`90ce86d` | 리포트 갱신 — 리뷰 결과 기록 + **역할별 before/after·메모리(가중치 vs 활성화) 그래프**(figs/0719/) |
+| `f50b82b` | **A5 gather**(§9.1) — decode(M=1) 활성화 gather 제거(`a_m1`: A 연속 읽기; 단일 matmul + O-proj group) |
+| `3279975` | **A5 scatter**(§9.2) — decode(M=1) 출력 scatter 제거(tile-blocked C 쓰기 + 0번 행 추출 `_copy_row0_tiled`) |
 
 **주로 바뀐 소스 파일**:
 - `npu_compiler/memplan.py` — 레이아웃 규약·`alloc_tiled`/`alloc_const_tiled`·`assign_layouts`
@@ -483,7 +587,8 @@ A1이 실제로 공략하는 **활성화 working set peak는 73.9→23.8MB(−68
   `emit_broadcast`/`emit_transpose`/`emit_strided_slice`/`emit_concat`의 tile 분기(5c~5d-2),
   O-proj group a_tiled/c_tiled(5d).
 - `npu_compiler/tir_backend.py` — TILE-mode A/C(5b), `ev` 파이썬 평가·`emit_gemm` 직접 emit(A2),
-  accumulate-group c_tiled/a_tiled(5d).
+  accumulate-group c_tiled/a_tiled(5d), **decode(M=1) `a_m1`(A 연속 읽기)·`c_tiled`+`_copy_row0_tiled`
+  (tile-blocked C→scatter 제거)·walker `a_m1_src`(A5, §9)**.
 - `npu_compiler/driver.py` — `layouts` 토글, tile 입력 param host-pack(5d-1b).
 - `npu_compiler/import_legalize.py` — manual 경로와 통일(A3).
 - `npu_compiler/runtime.py` — program 직렬화 벡터화(A2).
@@ -492,7 +597,7 @@ A1이 실제로 공략하는 **활성화 working set peak는 73.9→23.8MB(−68
 
 ---
 
-## 10. 결론 & 남은 과제
+## 11. 결론 & 남은 과제
 
 **이번 리팩터링으로 확정된 것**(전부 커밋, gate GREEN, 벤더 byte-exact 유지):
 
@@ -507,6 +612,10 @@ A1이 실제로 공략하는 **활성화 working set peak는 73.9→23.8MB(−68
    명령 수 불변.
 4. **A1 메모리 재사용** — liveness 기반 활성화 offset 재사용. A4가 gather를 0으로 만들어
    gather_cache가 사라진 덕에 **명령 수 불변(+0)**, byte-exact. **3B mp.top 278MB → 228MB (−18%)**.
+5. **A5 decode(M=1) gather/scatter 제거** — prefill(A4)과 **같은 코드 경로**지만 M=1이라 tile-blocked이
+   아닌 row-major로 도는 decode에서, "M=1이면 0번 행만 산다"는 관찰로 **활성화 gather(A 연속 읽기)와
+   출력 scatter(tile-blocked C + 0번 행 추출)를 제거**. 3B decode 스텝 **981,664 → 501,824(−48.9%),
+   scatter 0 / gather −87%**(잔존은 KV 캐시 read뿐), byte-exact.
 
 **핵심 교훈**:
 - **레이어 전체를 tile로 흘리면 gather/scatter가 원천적으로 사라진다.** row↔tile 경계의 relayout은
@@ -522,11 +631,17 @@ A1이 실제로 공략하는 **활성화 working set peak는 73.9→23.8MB(−68
   (TIR 재순회를 파이썬 루프로 대체).
 - **한 최적화가 다른 최적화를 풀어준다.** A1은 원래 net-negative(gather_cache 충돌로 +90% 명령)라
   보류했는데, A4가 gather를 0으로 만들자 그 충돌 원인이 사라져 **A1이 명령 수 불변 순이득으로 전환**됐다.
+- **같은 코드라도 shape가 최적화 축을 바꾼다.** prefill과 decode는 **동일한 matmul 코드**를 쓰지만,
+  prefill(M=64배수)은 tile-blocked(A4)로, decode(M=1)는 그 대상이 아니라 **"0번 행만 산다"는 row-liveness**
+  (A5)로 gather/scatter를 없앤다. 최적화는 연산이 아니라 **그 순간의 텐서 모양**에 맞춰야 한다.
 
-**최종 종료 상태**: **A4(−52.7%, gather/scatter 0) · A3(legalize 통일) · A2(컴파일 12.4×) · A1(mp.top
-−18%)** 를 모두 완료. 전 스테이지 커밋·gate GREEN·벤더 byte-exact.
+**최종 종료 상태**: **A4(prefill −52.7%, gather/scatter 0) · A3(legalize 통일) · A2(컴파일 12.4×) ·
+A1(mp.top −18%) · A5(decode −48.9%, scatter 0/gather −87%)** 를 모두 완료. 전 스테이지 커밋·gate
+GREEN·벤더 byte-exact. **prefill·decode 두 경로 모두** gather/scatter 오버헤드를 SW로 제거했다
+(decode의 잔존 gather는 KV 캐시 read 하나뿐).
 
 **남은 것(전부 HW 의존 — SW로 net-positive한 최적화는 완료)**:
 - **행-major strided 모드**는 tile-blocked 레이아웃으로 **SW에서 완전 대체**됨(더 이상 불필요).
-- 남는 HW 항목은 **register-indirect 주소**(KV append·가변길이 decode), **HW 루프**(명령 수 감소)뿐
-  — 별도 벤더 요청서. 그 외 미세 여지: A2의 tile-native op(전치/fold) 오버헤드.
+- 남는 HW 항목은 **register-indirect 주소**뿐 — 구체적으로 **decode의 KV 캐시 gather(3B 스텝당
+  32,768, §9.4)**. 캐시가 가변 길이 2D라 append/read에 간접 주소가 필요하고, 이것만 있으면 decode
+  gather도 0이 된다. 그 외 **HW 루프**(명령 수 감소), 미세하게 A2의 tile-native op(전치/fold) 오버헤드.
