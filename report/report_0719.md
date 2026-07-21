@@ -56,7 +56,7 @@ RMSNorm/residual(5d-1)·attention(5d-2)까지 확장하면 reduce의 FP16 재정
 | **A4** | tile-blocked 레이아웃 전파 | ✅ (5c→5d-1→5d-2) | 3B layer **−52.7%, gather 0 / scatter 0** (5c byte-exact, 5d ~0.1% tol) |
 | **A3** | import legalization을 manual과 통일 | ✅ | 향후 실제 HF 모델도 동일 최적화 경로 |
 | **A2** | 컴파일 속도 | ✅ | **106.3s → 8.6s (12.4×)**, byte-exact |
-| **A1** | liveness 기반 메모리 재사용 | ✅ (5d-2 후 완료) | 3B mp.top **278MB → 228MB (−18%)**, 명령 수 불변, byte-exact(§8) |
+| **A1** | liveness 기반 메모리 재사용 | ✅ (5d-2 후 완료) | 3B mp.top **277MB → 227MB (−18%)**, 명령 수 불변, byte-exact(§8) |
 | **A5** | decode(M=1) gather/scatter 제거 | ✅ (07-21) | 3B decode 스텝 **981,664 → 501,824 (−48.9%)**, scatter 0 / gather −87%, byte-exact(§9) |
 
 > **원래 계획 순서는 A4 → A1 → A3 → A2** 였다. A1을 프로토타입해 3B로 측정하니 **net-negative**
@@ -425,7 +425,7 @@ for (io,jo) in grid(Mt,Nt):
   (`driver`가 `reuse_act=not reuse`). tiled prefill은 gather=0이라 캐시 미사용 → **비용 0**; row gather만
   재-gather. liveness 자체는 캐시 off 시 30개 config byte-exact로 정확성 입증됨. 회귀 테스트에 **decode
   커널 reuse 검증 추가**(이전엔 prefill만 돌려 이 버그를 놓쳤음).
-- **실측(3B prefill layer): mp.top 278MB → 228MB (−18%), 명령 수 완전 불변(+0)**(tiled prefill=gather 없음),
+- **실측(3B prefill layer): mp.top 277MB → 227MB (−18%), 명령 수 완전 불변(+0)**(tiled prefill=gather 없음),
   byte-exact(prefill+decode 모두). gate GREEN. 회귀 `test_layout.test_reuse_memory`.
 
 **8.3 메모리 분해 — weight vs peak activation (이번이 첫 메모리 최적화라 별도 실측)**
@@ -436,16 +436,29 @@ G-buffer를 **가중치·상수·활성화**로 쪼개 실측했다(`memplan.pla
 |---|---:|---|
 | **weights (+ tiled 입력 x)** | **202.1 MB (73%)** | 레이어 상주 불가피 — **재사용 불가** |
 | constants | 1.6 MB | 베이크된 상수 |
-| **activations — bump(재사용 X)** | **73.9 MB** | 모든 binding var를 free 없이 누적한 총량 |
-| **activations — A1 peak(재사용 O)** | **23.8 MB** | 동시 live 활성화의 **peak working set** |
+| **activations — no reuse** | **73.1 MB** | 모든 binding var를 free 없이 누적한 총량 |
+| **activations — reuse(현재)** | **23.0 MB** | liveness 재사용으로 예약된 활성화 영역 |
+| **activations — ideal(이론 하한)** | **7.6 MB** | 동시에 live인 활성화의 최대 footprint(완벽한 allocator 하한) |
 
-![3B prefill layer 메모리: 가중치(회색)가 지배(202MB, 상주 불가피)라 total은 278→228MB(−18%)에 그치지만,
-A1이 실제로 공략하는 **활성화 working set peak는 73.9→23.8MB(−68%)**.](figs/0719/g_memory.png)
+![3B prefill layer 메모리: 가중치(회색)가 지배(202MB, 상주 불가피)라 total은 277→227MB에 그치지만,
+활성화 working set은 no reuse 73.1 → reuse 23.0MB(−69%). ideal 바(빗금)는 동시 live 최대치 7.6MB로,
+reuse(23.0)와의 차이는 exact-size free-list가 남기는 fragmentation.](figs/0719/g_memory.png)
 
-→ **핵심(이 실험의 결론)**: A1의 진짜 효과는 **활성화 peak −68%**(73.9→23.8MB)인데, **전체로는 가중치가
+**재사용률 실측**: 위 활성화 570개(O-proj 융합으로 46개 접힘) 중 **512개(90%)가 기존 슬롯을 재사용**하고
+**58개만 새 슬롯(bump)**. 한 슬롯을 최대 116개 텐서가 돌려쓴다(특히 attention 중간값 `[S,S]` 397개가
+슬롯 45개로). exact-size 매칭이 잘 먹히는 건 활성화 크기가 몇 종(`[S,D]/[S,F]/[S,HD]/[S,S]/[S,1]`)뿐이기 때문.
+
+**ideal과의 gap(정직한 한계)**: 현재 reuse가 예약하는 활성화 영역은 **23.0 MB**인데, 실제 동시-live 최대는
+**7.6 MB**뿐이다(≈3×). 차이는 **fragmentation** — ① 상수는 항상 bump(free-list 미확인), ② exact-size라 한
+크기의 빈 슬롯이 다른 크기 요청을 못 메움, ③ "배정 후 반납"(in-place 회피). 이 gap은 안전(§in-place 회피)과
+단순성을 위해 감수한 것이고, 전체는 어차피 가중치(73%)가 지배해 총 메모리 상한이 −18%라 ROI가 낮다.
+
+→ **핵심(이 실험의 결론)**: A1의 진짜 효과는 **활성화 −69%**(73.1→23.0MB)인데, **전체로는 가중치가
 73%를 차지해 −18%로 희석**된다. 즉 이 NPU에서 **레이어 메모리는 근본적으로 가중치가 지배**하고(모든
 레이어가 가중치를 상주시켜야 함), 활성화 재사용은 "동시에 살아있는 활성화 집합(peak)"을 줄이는 것이라
-비율 이득은 크지만 절대 총량 이득은 가중치에 가려진다. (가중치까지 줄이려면 양자화/오프로딩 등 별도 축이 필요.)
+비율 이득은 크지만 절대 총량 이득은 가중치에 가려진다. 게다가 완벽한 allocator의 이론 하한(7.6MB)까지는
+아직 fragmentation만큼 여유가 있으나, 그 여유(≈15MB)조차 가중치 202MB에 가려 총량엔 거의 무의미하다.
+(가중치까지 줄이려면 양자화/오프로딩 등 별도 축이 필요.)
 
 ---
 
@@ -611,7 +624,7 @@ HW가 있어야 없어지는 유일한 잔여 항목이다(§11 남은 과제와
 3. **A2 컴파일 속도** — canonical GEMM을 파이썬으로 직접 emit해 **106.3s → 8.6s (12.4×)**,
    명령 수 불변.
 4. **A1 메모리 재사용** — liveness 기반 활성화 offset 재사용. A4가 gather를 0으로 만들어
-   gather_cache가 사라진 덕에 **명령 수 불변(+0)**, byte-exact. **3B mp.top 278MB → 228MB (−18%)**.
+   gather_cache가 사라진 덕에 **명령 수 불변(+0)**, byte-exact. **3B mp.top 277MB → 227MB (−18%)**.
 5. **A5 decode(M=1) gather/scatter 제거** — prefill(A4)과 **같은 코드 경로**지만 M=1이라 tile-blocked이
    아닌 row-major로 도는 decode에서, "M=1이면 0번 행만 산다"는 관찰로 **활성화 gather(A 연속 읽기)와
    출력 scatter(tile-blocked C + 0번 행 추출)를 제거**. 3B decode 스텝 **981,664 → 501,824(−48.9%),

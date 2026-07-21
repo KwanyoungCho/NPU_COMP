@@ -31,9 +31,11 @@
  "memory_elems": {
   "weights": 101062656,
   "constants": 819968,
-  "act_bump": 36957888,
-  "act_peak": 11916864,
-  "top_bump": 138840512,
-  "top_reuse": 113799488
+  "act_noreuse": 36527104,
+  "act_reuse": 11486080,
+  "act_ideal": 3801088,
+  "top_noreuse": 138409728,
+  "top_reuse": 113368704,
+  "top_ideal": 105683712
  }
 }

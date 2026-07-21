@@ -1,10 +1,14 @@
-"""G-buffer memory of the 3B prefill layer: weights (always-live) vs activations
-(A1 liveness reuse). MEASURED (memplan.plan footprints). Reads measurements_detail.json.
+"""G-buffer memory of the 3B prefill layer: weights (always-live) vs activations,
+across three scenarios — no reuse / liveness reuse (current) / theoretical ideal.
+MEASURED (memplan.plan footprints). Reads measurements_detail.json.
 
-The point: weights (the packed static params + tiled input) dominate at ~202 MB and are
-irreducible (every layer needs them resident), so the OVERALL saving is only -18%. The
-activation working set, however, is the part A1 actually attacks: its PEAK drops -68%
-(73.9 -> 23.8 MB) once liveness reuse frees each binding var's slot at its last read."""
+Point 1: weights (packed static params + tiled input) dominate at ~202 MB and are
+irreducible (every layer needs them resident), so the OVERALL saving is only modest.
+Point 2: the activation working set is what reuse attacks — 73.1 -> 23.0 MB. The
+'ideal' bar is the theoretical floor = max simultaneously-live activation footprint
+(7.6 MB, what a perfect allocator would need); the gap between reuse (23.0) and ideal
+(7.6) is fragmentation the exact-size free-list leaves (constants always bump; freed
+slots of one size don't fill another size's need)."""
 import json, os
 import matplotlib
 matplotlib.use("Agg")
@@ -14,40 +18,47 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 M = json.load(open(os.path.join(HERE, "measurements_detail.json")))["memory_elems"]
 mb = lambda e: e * 2 / 1e6                       # fp16 elements -> MB
 W, C = mb(M["weights"]), mb(M["constants"])
-A_bump, A_peak = mb(M["act_bump"]), mb(M["act_peak"])
-tot_bump, tot_reuse = mb(M["top_bump"]), mb(M["top_reuse"])
+acts = [mb(M["act_noreuse"]), mb(M["act_reuse"]), mb(M["act_ideal"])]
+tots = [mb(M["top_noreuse"]), mb(M["top_reuse"]), mb(M["top_ideal"])]
 
 C_W = "#d8d8d5"    # weights: recessive neutral (irreducible)
 C_C = "#b9b9b3"    # constants
-C_A = "#2a78d6"    # activations: categorical slot 1 (the part A1 optimizes)
+C_A = "#2a78d6"    # activations: categorical slot 1 (the part reuse optimizes)
 INK, MUTED = "#0b0b0b", "#52514e"
 
-fig, ax = plt.subplots(figsize=(7.6, 6.6))
-x = [0, 1]
-labels = ["bump\n(no reuse)", "A1 reuse\n(liveness)"]
-acts = [A_bump, A_peak]
-bw = 0.55
+fig, ax = plt.subplots(figsize=(8.4, 6.6))
+x = [0, 1, 2]
+labels = ["no reuse", "reuse\n(current)", "ideal\n(theoretical min)"]
+bw = 0.56
 for i in x:
     ax.bar(i, W, bw, color=C_W, edgecolor="white", linewidth=2, label="weights (+tiled input)" if i == 0 else None)
     ax.bar(i, C, bw, bottom=W, color=C_C, edgecolor="white", linewidth=2, label="constants" if i == 0 else None)
-    ax.bar(i, acts[i], bw, bottom=W + C, color=C_A, edgecolor="white", linewidth=2, label="activations" if i == 0 else None)
+    # the ideal bar is hypothetical -> hatch it so it reads as "not what we allocate today"
+    hatch = "///" if i == 2 else None
+    ax.bar(i, acts[i], bw, bottom=W + C, color=C_A, edgecolor="white", linewidth=2, hatch=hatch,
+           label="activations" if i == 0 else None)
     ax.text(i, W / 2, f"weights\n{W:.0f} MB", ha="center", va="center", fontsize=9.5, color=MUTED, fontweight="bold")
-    ax.text(i, W + C + acts[i] / 2, f"act\n{acts[i]:.1f}", ha="center", va="center", fontsize=9.5,
-            color="white", fontweight="bold")
-    tot = W + C + acts[i]
-    ax.text(i, tot + 4, f"{tot:.1f} MB", ha="center", va="bottom", fontsize=11, color=INK, fontweight="bold")
-# activation-reduction callout
-ax.annotate(f"activations −68%\n{A_bump:.1f} → {A_peak:.1f} MB",
-            xy=(1, W + C + A_peak), xytext=(1.42, W + 45), ha="center", va="center",
-            fontsize=10, color=C_A, fontweight="bold",
-            arrowprops=dict(arrowstyle="->", color=C_A, lw=1.6))
+    ax.text(i, W + C + acts[i] + 5, f"act {acts[i]:.1f}", ha="center", va="bottom", fontsize=10,
+            color=C_A, fontweight="bold")
+    ax.text(i, tots[i] + 20, f"{tots[i]:.0f} MB", ha="center", va="bottom", fontsize=11, color=INK, fontweight="bold")
 
-ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=11)
+# activation-progression callout (the story lives in the small top sliver)
+ax.annotate("", xy=(1, W + C + acts[1]), xytext=(0, W + C + acts[0]),
+            arrowprops=dict(arrowstyle="->", color=C_A, lw=1.6))
+ax.annotate("", xy=(2, W + C + acts[2]), xytext=(1, W + C + acts[1]),
+            arrowprops=dict(arrowstyle="->", color=C_A, lw=1.6))
+ax.text(0.5, W + C + acts[0] + 22, f"−{100*(1-acts[1]/acts[0]):.0f}%", ha="center", fontsize=10,
+        color=C_A, fontweight="bold")
+ax.text(1.5, W + C + acts[1] + 14, "fragmentation\nheadroom", ha="center", va="bottom", fontsize=8.5,
+        color=MUTED)
+
+ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=10.5)
 ax.set_ylabel("G-buffer (fp16, MB)", fontsize=11, color=MUTED)
-ax.set_ylim(0, 320); ax.set_xlim(-0.6, 2.0)
-ax.set_title("3B prefill-layer memory — A1 liveness reuse\n"
-             f"weights dominate (irreducible) → total {tot_bump:.0f} → {tot_reuse:.0f} MB (−18%),\n"
-             f"but the activation working set peak drops −68%", fontsize=11.5)
+ax.set_ylim(0, 330); ax.set_xlim(-0.6, 2.6)
+ax.set_title("3B prefill-layer memory — activation reuse vs theoretical minimum\n"
+             f"weights ~{W:.0f} MB dominate (irreducible) → total {tots[0]:.0f} → {tots[1]:.0f} MB\n"
+             f"activation working set {acts[0]:.1f} → {acts[1]:.1f} MB (reuse);  "
+             f"ideal floor = {acts[2]:.1f} MB", fontsize=10.5)
 ax.legend(loc="upper right", fontsize=9.5, frameon=False)
 ax.grid(axis="y", alpha=0.25)
 ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
