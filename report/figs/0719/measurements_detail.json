@@ -1,0 +1,39 @@
+{
+ "note": "3B prefill layer (S=128, pack_params). roles: MEASURED asm.tags; memory: fp16 element counts.",
+ "roles": {
+  "row": {
+   "broadcast": 206639,
+   "elementwise": 12690,
+   "reduce": 63608,
+   "gather": 409600,
+   "mmul": 594432,
+   "accum": 242400,
+   "scatter": 540672,
+   "layout": 148480,
+   "transpose": 16672,
+   "other": 1
+  },
+  "tile": {
+   "broadcast": 56327,
+   "elementwise": 12690,
+   "reduce": 67652,
+   "mmul": 594432,
+   "accum": 242400,
+   "layout": 83968,
+   "transpose": 288,
+   "other": 1
+  }
+ },
+ "total": {
+  "row": 2235194,
+  "tile": 1057758
+ },
+ "memory_elems": {
+  "weights": 101062656,
+  "constants": 819968,
+  "act_bump": 36957888,
+  "act_peak": 11916864,
+  "top_bump": 138840512,
+  "top_reuse": 113799488
+ }
+}

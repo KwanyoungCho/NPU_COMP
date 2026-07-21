@@ -277,6 +277,25 @@ tile ctx를 `a_tiled`로 읽지 않고 row로 읽어** garbage를 낸 것(5d-1�
 *(그래프: `report/figs/0719/plot_a4_progression.py` — 실측값 `measurements.json`에서 읽어 재생성.
 색은 dataviz reference categorical slot 1(파랑)/2(초록), 검증 통과 ΔE 9.1.)*
 
+**role별 분해 — −52.7%가 어디서 왔나 (0710 리포트의 before/after 그래프와 동일 양식)**:
+
+![role별 before(row)/after(tile). gather/scatter→0, transpose −98%·broadcast −73%·RoPE −43%로
+오히려 저렴, reduce만 +6%(tile fold 비용), matmul core 불변.](figs/0719/g_role_before_after.png)
+
+| role | before(row) | after(tile) | Δ | 해석 |
+|---|---:|---:|---:|---|
+| matmul core (mmul+accum) | 836,832 | 836,832 | **0%** | 실제 MAC — 레이아웃 무관, 불변 |
+| **scatter (출력)** | 540,672 | **0** | **−100%** | tile 저장 = 흩어 쓰기 소멸 |
+| **gather (입력)** | 409,600 | **0** | **−100%** | tile 저장 = 긁어모으기 소멸 |
+| broadcast | 206,639 | 56,327 | −73% | tile col/row broadcast가 per-tile로 더 저렴 |
+| layout (RoPE slice/concat) | 148,480 | 83,968 | −43% | tile 열-타일 배치가 per-element보다 저렴 |
+| **reduce (norm/softmax)** | 63,608 | 67,652 | **+6%** | **tile-native의 유일한 비용**(열-타일 fold) |
+| transpose (Kᵀ) | 16,672 | 288 | −98% | tile당 strided-load 1회(부분타일 copy 소멸) |
+| elementwise (SiLU) | 12,690 | 12,690 | 0% | 레이아웃 투명, 불변 |
+
+→ **핵심**: gather/scatter가 사라진 것뿐 아니라 **transpose·broadcast·RoPE도 tile-native가 더 효율적**이다.
+유일한 비용은 **reduce +6%**(FP16 합산 순서 재정렬을 유발하는 바로 그 부분). matmul MAC은 당연히 불변.
+
 - **0710 리포트가 "행-major strided HW가 있어야 없앤다"던 gather+scatter(≈48%)를 하드웨어 변경
   없이 SW(tile-blocked 레이아웃)로 100% 제거.** 남은 것은 순수 useful 계산 + tile-native op 오버헤드.
 - tolerance ~0.1%(tile reduce 재정렬). gate GREEN(REDUCED byte-exact, MEDIUM/attention/3B tolerance,
@@ -403,7 +422,25 @@ for (io,jo) in grid(Mt,Nt):
   커널 reuse 검증 추가**(이전엔 prefill만 돌려 이 버그를 놓쳤음).
 - **실측(3B prefill layer): mp.top 278MB → 228MB (−18%), 명령 수 완전 불변(+0)**(tiled prefill=gather 없음),
   byte-exact(prefill+decode 모두). gate GREEN. 회귀 `test_layout.test_reuse_memory`.
-- 메모리는 여전히 **가중치(73%, ~200MB, 레이어 상주 불가피)** 지배라 −18%가 상한에 가깝다.
+
+**8.3 메모리 분해 — weight vs peak activation (이번이 첫 메모리 최적화라 별도 실측)**
+
+G-buffer를 **가중치·상수·활성화**로 쪼개 실측했다(`memplan.plan` footprint, fp16 MB):
+
+| 구성 | 크기 | 성격 |
+|---|---:|---|
+| **weights (+ tiled 입력 x)** | **202.1 MB (73%)** | 레이어 상주 불가피 — **재사용 불가** |
+| constants | 1.6 MB | 베이크된 상수 |
+| **activations — bump(재사용 X)** | **73.9 MB** | 모든 binding var를 free 없이 누적한 총량 |
+| **activations — A1 peak(재사용 O)** | **23.8 MB** | 동시 live 활성화의 **peak working set** |
+
+![3B prefill layer 메모리: 가중치(회색)가 지배(202MB, 상주 불가피)라 total은 278→228MB(−18%)에 그치지만,
+A1이 실제로 공략하는 **활성화 working set peak는 73.9→23.8MB(−68%)**.](figs/0719/g_memory.png)
+
+→ **핵심(이 실험의 결론)**: A1의 진짜 효과는 **활성화 peak −68%**(73.9→23.8MB)인데, **전체로는 가중치가
+73%를 차지해 −18%로 희석**된다. 즉 이 NPU에서 **레이어 메모리는 근본적으로 가중치가 지배**하고(모든
+레이어가 가중치를 상주시켜야 함), 활성화 재사용은 "동시에 살아있는 활성화 집합(peak)"을 줄이는 것이라
+비율 이득은 크지만 절대 총량 이득은 가중치에 가려진다. (가중치까지 줄이려면 양자화/오프로딩 등 별도 축이 필요.)
 
 ---
 
