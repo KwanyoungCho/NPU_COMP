@@ -145,6 +145,7 @@ class _Walker:
         self.zeroed = set()                # C-tile offsets currently == 0 (fill not yet materialized)
         self.cbuf = {}                     # strided C-tile addr -> (contiguous accum scratch, stride)
         self.packed_src = {}               # buffer.data -> (packed_base, Nt) for tile-blocked weights
+        self.a_m1_src = set()              # buffer.data of a single-row (decode M=1) A -> read contiguous
         self.suppress_fill = False         # group-accumulate: keep prior C accumulator across matmuls
 
     # ---- expression / pointer evaluation ----
@@ -239,6 +240,11 @@ class _Walker:
             off = (self.ev(r0min) // TILE * Nt + self.ev(r1min) // TILE) * TILE * TILE
             base[bdata] = packed_base
             strd = TILE                                      # stride==64 -> gather skipped
+        elif sdata in self.a_m1_src:                         # decode M=1: single contiguous row
+            row_stride = int(sbuf.shape[1])                  # r0min==0 (one M-tile) -> off = r1min;
+            off = self.ev(r0min) * row_stride + self.ev(r1min)  # row 0 is the true A[0,ko-seg],
+            base[bdata] = base[sdata]                        # rows 1..63 feed discarded C rows
+            strd = TILE                                      # contiguous -> gather skipped
         else:
             row_stride = int(sbuf.shape[1])                  # compact 2D
             off = self.ev(r0min) * row_stride + self.ev(r1min)
@@ -347,7 +353,8 @@ class _Walker:
                     a.addr(DST, c + r * sc); a.save(0)
         self.cbuf.clear()
 
-    def emit_gemm(self, Mp, Kp, Np, a_off, b_off, c_off, a_nt=None, b_nt=None, c_nt=None):
+    def emit_gemm(self, Mp, Kp, Np, a_off, b_off, c_off, a_nt=None, b_nt=None, c_nt=None,
+                  a_m1=False):
         """Emit the canonical scheduled GEMM directly, WITHOUT walking the TIR.
         schedule_matmul always produces the same nest: for (io,jo) in grid(Mt,Nt):
         fill C[io,jo]; for ko in Kt: gemm_acc(C[io,jo], A[io,ko], B[ko,jo]). This
@@ -355,8 +362,14 @@ class _Walker:
         as _bind_match (compact: row-major offset + row_stride; tile-blocked *_nt:
         (r*Nt+c)*4096 + stride 64) — so it is byte-identical to walk(pf.body) but
         skips ~1.8M TVM-FFI wrapper allocations. *_nt=<tiles-per-row> marks an operand
-        tile-blocked; None = compact 2D (a: KxN? no -> stride Kp for A, Np for B/C)."""
+        tile-blocked; None = compact 2D (a: KxN? no -> stride Kp for A, Np for B/C).
+
+        a_m1 (decode M=1): the real A is a single contiguous row (Mt==1); only C row 0
+        is kept downstream, so each A tile can be read with stride 64 (contiguous) —
+        its row 0 is the true A[0, ko-seg], rows 1..63 read on into adjacent memory and
+        feed the discarded C rows 1..63. This drops the M=1 activation gather entirely."""
         Mt, Nt, Kt, T2 = Mp // TILE, Np // TILE, Kp // TILE, TILE * TILE
+        assert not (a_m1 and (Mt != 1 or a_nt is not None)), "a_m1 needs compact single M-tile"
         for io in range(Mt):
             for jo in range(Nt):
                 c, sc = ((c_off + (io * c_nt + jo) * T2, TILE) if c_nt is not None
@@ -364,7 +377,7 @@ class _Walker:
                 self.emit_fill(c, sc)
                 for ko in range(Kt):
                     a, sa = ((a_off + (io * a_nt + ko) * T2, TILE) if a_nt is not None
-                             else (a_off + io * TILE * Kp + ko * TILE, Kp))
+                             else (a_off + io * TILE * Kp + ko * TILE, TILE if a_m1 else Kp))
                     b, sb = ((b_off + (ko * b_nt + jo) * T2, TILE) if b_nt is not None
                              else (b_off + ko * TILE * Np + jo * TILE, Np))
                     self.emit_acc(c, sc, a, sa, b, sb)
@@ -422,7 +435,10 @@ def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gath
         f"tile-blocked A/C need 64-multiple M,K,N; got {M}x{K}x{N}"
     if Kp == K and Np == N:                       # M-only padding (cheap: no input copy)
         cpad = mp.scratch_alloc(Mp * N)
-        _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt, gather_cache=gather_cache)
+        # decode (M=1): A is one contiguous row -> read it contiguous, skip the activation
+        # gather (only C row 0 is kept; rows 1..63 feed discarded output rows).
+        _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt,
+                       gather_cache=gather_cache, a_m1=(M == 1))
         _copy_block(asm, c_off, cpad, M * N)                    # first M rows are contiguous
         return
     # general padding: stage A,B in fresh(=zero) scratch so padded K is 0, slice C out
@@ -458,33 +474,39 @@ def _scheduled_gemm(M, K, N):
     return sched[gvar.name_hint]
 
 
-def _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt=None, a_tiled=None, c_tiled=None):
+def _bind_gemm(wk, pf, a_off, b_off, c_off, b_pack_nt=None, a_tiled=None, c_tiled=None, a_m1=False):
     """Point a (reused) walker's root buffers at this matmul's G-buffer offsets.
     a_tiled/c_tiled (A4): if set (=K//64 / =N//64), A/C are tile-blocked so each 64x64
-    tile is contiguous -> the walker skips the A-gather / C-scatter (stride==64)."""
+    tile is contiguous -> the walker skips the A-gather / C-scatter (stride==64).
+    a_m1 (decode M=1): A is a single contiguous row -> read contiguous, no A-gather."""
     aD = pf.buffer_map[pf.params[0]].data
     bD = pf.buffer_map[pf.params[1]].data
     cD = pf.buffer_map[pf.params[2]].data
     wk.base[aD] = a_off; wk.base[bD] = b_off; wk.base[cD] = c_off
     wk.packed_src = {}
+    wk.a_m1_src = set()
     if b_pack_nt is not None:                               # B tile-blocked weight -> no gather
         wk.packed_src[bD] = (b_off, b_pack_nt)
     if a_tiled is not None:                                 # A tile-blocked -> no A-gather
         wk.packed_src[aD] = (a_off, a_tiled)
+    elif a_m1:                                              # M=1 contiguous row -> no A-gather
+        wk.a_m1_src.add(aD)
     if c_tiled is not None:                                 # C tile-blocked -> no C-scatter
         wk.packed_src[cD] = (c_off, c_tiled)
 
 
 def _emit_tir_gemm(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None,
-                   a_tiled=None, c_tiled=None):
+                   a_tiled=None, c_tiled=None, a_m1=False):
     """Core emit for a 64-multiple matmul (no padding). Emits the canonical scheduled
     GEMM directly (walker.emit_gemm) instead of walking the TIR — byte-identical, far
     faster. a_tiled/c_tiled (=tiles-per-row) mark A/C tile-blocked; b_pack_nt marks B
-    a pre-packed weight; None => compact 2D."""
+    a pre-packed weight; None => compact 2D. a_m1: A is a single contiguous row (decode
+    M padded to 64) -> read A contiguous, no gather."""
     for d in (M, K, N):
         assert d % TILE == 0, f"_emit_tir_gemm needs 64-multiples, got {M}x{K}x{N}"
     wk = _Walker(asm, mp, {}, gather_cache=gather_cache)
-    wk.emit_gemm(M, K, N, a_off, b_off, c_off, a_nt=a_tiled, b_nt=b_pack_nt, c_nt=c_tiled)
+    wk.emit_gemm(M, K, N, a_off, b_off, c_off, a_nt=a_tiled, b_nt=b_pack_nt, c_nt=c_tiled,
+                 a_m1=a_m1)
     wk.flush()
 
 
@@ -505,6 +527,7 @@ def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None, c_til
     assert N % TILE == 0, f"group N must be 64-multiple, got {N}"
     out = c_off
     cpad = None
+    a_m1 = (M == 1)                                        # decode: A terms are single rows
     if Mp != M:                                            # decode: pad M, copy valid rows out
         assert c_tiled is None, "tile-blocked group output needs 64-multiple M"
         cpad = mp.scratch_alloc(Mp * N); out = cpad
@@ -515,7 +538,7 @@ def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None, c_til
         pf = sched_cache.get((Mp, K_t, N))
         if pf is None:
             pf = _scheduled_gemm(Mp, K_t, N); sched_cache[(Mp, K_t, N)] = pf
-        _bind_gemm(wk, pf, a_off, b_off, out, nt, a_tiled=a_tiled, c_tiled=c_tiled)
+        _bind_gemm(wk, pf, a_off, b_off, out, nt, a_tiled=a_tiled, c_tiled=c_tiled, a_m1=a_m1)
         wk.suppress_fill = (i > 0)                         # only the first term zero-inits C
         wk.walk(pf.body)
     wk.flush()                                             # ONE scatter for the whole sum
