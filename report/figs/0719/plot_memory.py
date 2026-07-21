@@ -42,23 +42,10 @@ for i in x:
             color=C_A, fontweight="bold")
     ax.text(i, tots[i] + 20, f"{tots[i]:.0f} MB", ha="center", va="bottom", fontsize=11, color=INK, fontweight="bold")
 
-# activation-progression callout (the story lives in the small top sliver)
-ax.annotate("", xy=(1, W + C + acts[1]), xytext=(0, W + C + acts[0]),
-            arrowprops=dict(arrowstyle="->", color=C_A, lw=1.6))
-ax.annotate("", xy=(2, W + C + acts[2]), xytext=(1, W + C + acts[1]),
-            arrowprops=dict(arrowstyle="->", color=C_A, lw=1.6))
-ax.text(0.5, W + C + acts[0] + 22, f"−{100*(1-acts[1]/acts[0]):.0f}%", ha="center", fontsize=10,
-        color=C_A, fontweight="bold")
-ax.text(1.5, W + C + acts[1] + 14, "fragmentation\nheadroom", ha="center", va="bottom", fontsize=8.5,
-        color=MUTED)
-
 ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=10.5)
 ax.set_ylabel("G-buffer (fp16, MB)", fontsize=11, color=MUTED)
 ax.set_ylim(0, 330); ax.set_xlim(-0.6, 2.6)
-ax.set_title("3B prefill-layer memory — activation reuse vs theoretical minimum\n"
-             f"weights ~{W:.0f} MB dominate (irreducible) → total {tots[0]:.0f} → {tots[1]:.0f} MB\n"
-             f"activation working set {acts[0]:.1f} → {acts[1]:.1f} MB (reuse);  "
-             f"ideal floor = {acts[2]:.1f} MB", fontsize=10.5)
+ax.set_title("3B prefill layer memory", fontsize=13, fontweight="bold")
 ax.legend(loc="upper right", fontsize=9.5, frameon=False)
 ax.grid(axis="y", alpha=0.25)
 ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
