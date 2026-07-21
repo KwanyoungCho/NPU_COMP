@@ -409,6 +409,18 @@ def _copy_block(asm, dst_off, src_off, n, CH=8192):
             asm.addr(DST, dst_off + base); asm.save(0)
 
 
+def _copy_row0_tiled(asm, dst_off, cpad, Nt):
+    """Decode (M=1): extract logical row 0 from a tile-blocked [1,Nt,64,64] C buffer.
+    Tile jo's row 0 is the 64 contiguous elems at cpad+jo*4096 -> dst[jo*64:]. Nt small
+    copies replace the 64-row-per-tile scatter (only row 0 is kept downstream)."""
+    with asm.role("pad"):
+        for jo in range(Nt):
+            asm.vlen(TILE)
+            asm.addr(SRC1, cpad + jo * TILE * TILE); asm.load(0, 0)
+            asm.v_add(mode=IMM, imm=0)
+            asm.addr(DST, dst_off + jo * TILE); asm.save(0)
+
+
 # ============================ single-matmul emit (hybrid entry) ============================
 def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gather_cache=None,
                      a_tiled=False, c_tiled=False):
@@ -435,11 +447,17 @@ def emit_matmul_into(asm, mp, c_off, a_off, b_off, M, K, N, b_pack_nt=None, gath
         f"tile-blocked A/C need 64-multiple M,K,N; got {M}x{K}x{N}"
     if Kp == K and Np == N:                       # M-only padding (cheap: no input copy)
         cpad = mp.scratch_alloc(Mp * N)
-        # decode (M=1): A is one contiguous row -> read it contiguous, skip the activation
-        # gather (only C row 0 is kept; rows 1..63 feed discarded output rows).
-        _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt,
-                       gather_cache=gather_cache, a_m1=(M == 1))
-        _copy_block(asm, c_off, cpad, M * N)                    # first M rows are contiguous
+        if M == 1:                                # decode: A one row in, C one row out
+            # skip the activation gather (read A contiguous) AND the output scatter (write
+            # C tile-blocked, each tile contiguous), then extract logical row 0 (Nt copies).
+            Nt = N // TILE
+            _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt,
+                           gather_cache=gather_cache, a_m1=True, c_tiled=Nt)
+            _copy_row0_tiled(asm, c_off, cpad, Nt)
+        else:
+            _emit_tir_gemm(asm, mp, cpad, a_off, b_off, Mp, K, N, b_pack_nt=b_pack_nt,
+                           gather_cache=gather_cache)
+            _copy_block(asm, c_off, cpad, M * N)                # first M rows are contiguous
         return
     # general padding: stage A,B in fresh(=zero) scratch so padded K is 0, slice C out
     # (B packing not applied here — only triggers when N or K non-64, never for weights)
@@ -531,6 +549,8 @@ def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None, c_til
     if Mp != M:                                            # decode: pad M, copy valid rows out
         assert c_tiled is None, "tile-blocked group output needs 64-multiple M"
         cpad = mp.scratch_alloc(Mp * N); out = cpad
+        if M == 1:                                         # write C tile-blocked -> no scatter;
+            c_tiled = N // TILE                            # all H terms accumulate in-place per tile
     wk = _Walker(asm, mp, {}, gather_cache=gather_cache)
     sched_cache = {}
     for i, (a_off, b_off, M_t, K_t, N_t, nt, a_tiled) in enumerate(terms):
@@ -541,9 +561,12 @@ def emit_matmul_accumulate_group(asm, mp, c_off, terms, gather_cache=None, c_til
         _bind_gemm(wk, pf, a_off, b_off, out, nt, a_tiled=a_tiled, c_tiled=c_tiled, a_m1=a_m1)
         wk.suppress_fill = (i > 0)                         # only the first term zero-inits C
         wk.walk(pf.body)
-    wk.flush()                                             # ONE scatter for the whole sum
+    wk.flush()                                             # ONE scatter (none if tile-blocked)
     if cpad is not None:
-        _copy_block(asm, c_off, cpad, M * N)
+        if M == 1:
+            _copy_row0_tiled(asm, c_off, cpad, N // TILE)
+        else:
+            _copy_block(asm, c_off, cpad, M * N)
 
 
 # ============================ compile entry ============================
