@@ -30,8 +30,8 @@ after = np.array([ma[k] for k in labels], float)
 y = np.arange(len(labels))[::-1]; h = 0.38
 
 fig, ax = plt.subplots(figsize=(12, 6.8))
-ax.barh(y + h/2, before, h, color="#9e9e9e", label=f"Before  (pre-A4 row-major, total {TB:,})")
-ax.barh(y - h/2, after, h, color="#2ca02c", label=f"After  (A4 tile 5d-2, total {TA:,})")
+ax.barh(y + h/2, before, h, color="#9e9e9e", label=f"Before  (row-major, total {TB:,})")
+ax.barh(y - h/2, after, h, color="#2ca02c", label=f"After  (tile-blocked, total {TA:,})")
 for i, (bf, af) in enumerate(zip(before, after)):
     yy = y[i]
     ax.text(bf + 9000, yy + h/2, f"{bf:,.0f}", va="center", fontsize=9, color="#555")
@@ -42,9 +42,8 @@ for i, (bf, af) in enumerate(zip(before, after)):
     ax.text(af + 9000, yy - h/2, lab, va="center", fontsize=9, color=col)
 ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=11)
 ax.set_xlabel("commands per 3B prefill layer")
-ax.set_title("A4 tile-blocked layout — per-role before/after  (3B prefill layer, S=128)\n"
-             f"total {TB:,} → {TA:,}  (−{100*(1-TA/TB):.1f}%):  gather+scatter → 0,  "
-             "transpose/broadcast/RoPE cheaper,  reduce +6%", fontsize=11.5)
+ax.set_title(f"3B prefill layer — commands per role  (total −{100*(1-TA/TB):.1f}%)",
+             fontsize=13, fontweight="bold")
 ax.legend(loc="lower right", fontsize=10)
 ax.set_xlim(0, 950_000); ax.grid(axis="x", alpha=0.3)
 ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)

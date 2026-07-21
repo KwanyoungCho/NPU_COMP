@@ -40,7 +40,8 @@ for i in x:
     ax.text(i, W / 2, f"weights\n{W:.0f} MB", ha="center", va="center", fontsize=9.5, color=MUTED, fontweight="bold")
     ax.text(i, W + C + acts[i] + 5, f"act {acts[i]:.1f} MB", ha="center", va="bottom", fontsize=10,
             color=C_A, fontweight="bold")
-    ax.text(i, tots[i] + 20, f"{tots[i]:.0f} MB", ha="center", va="bottom", fontsize=11, color=INK, fontweight="bold")
+    tl = f"{tots[i]:.0f} MB" if i == 0 else f"{tots[i]:.0f} MB  (−{100*(1-tots[i]/tots[0]):.0f}%)"
+    ax.text(i, tots[i] + 20, tl, ha="center", va="bottom", fontsize=11, color=INK, fontweight="bold")
 
 ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=10.5)
 ax.set_ylabel("G-buffer (fp16, MB)", fontsize=11, color=MUTED)
