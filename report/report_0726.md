@@ -80,6 +80,7 @@
 | 2026-07-26 | 환경 API 서베이 | 0 | TVM 0.19.0, 필수 API 전부 존재 | §0 |
 | 2026-07-26 | Probe A (matmul tensorize) | 0 | **GO** — 64×64 MAC이 TensorIntrin으로 tensorize됨(단 `decompose_reduction` 필수). 생성 call `(C_ptr,C_s,A_ptr,A_s,B_ptr,B_s)` = v1 `npu_gemm_acc`와 동일 → walker 재사용 가능. multi-K/N OK. → V2-001/002 | 스크립트 spike_tensorize.py |
 | 2026-07-26 | Probe B (memory planning) | 0 | **GO-caveats** — `StaticPlanBlockMemory`가 실제 liveness+재사용(5중간→2 storage, residual 최적). best-fit(match_range 16)로 v1 exact-size보다 유연(fragmentation↓ 여지). 파이프라인 prefix(→CallTIRRewrite→plan) 필수. N객체→offset post-pass(V2-007), tile footprint 정합(V2-006), decode 동적(V2-008) | exp2_plan.py, exp3_residual.py |
+| 2026-07-26 | v1 코드 확인 (tir_backend.py:44-126) | 0/2 | **★ v1은 이미 tensorize matmul 컴파일러** — `npu_gemm_acc`/`npu_fill_zero` TensorIntrin 등록 + `schedule_matmul`(canonical recipe) + walker lowering, byte-exact. → Phase 2 "matmul tensorize" step 사실상 완료. 남은 건 non-matmul op 일반화 | tir_backend.py |
 | 2026-07-26 | Probe C (codegen 일반화 평가) | 0 | **MEDIUM/GO** — walker가 이미 tensorized matmul TIR을 프로덕션 lower(O-proj group, byte-exact 검증). ~90% 재사용. 새 작업=cache stage(V2-003). 전략=fast-path 유지+walker fallback(V2-004). byte-exact는 schedule 변경 시 상실→tolerance(V2-005) | — |
 
 ---
