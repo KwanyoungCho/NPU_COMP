@@ -50,6 +50,7 @@
 | V2-006 | open | **중** | **tile-blocked footprint vs TVM logical-size 정합** — TVM는 논리 byte-size로 플래닝, v1은 padded `tiled_numel`. offset 충돌 방지 위해 sinfo에 padded shape 반영 필요. Probe B 카베아트(E) | Phase 3 |
 | V2-007 | open | 소 | **offset post-pass** — StaticPlanBlockMemory는 N개 storage 객체 반환(플랫 offset 아님) → survivor에 base offset bump(~30줄). 또는 USMP로 진짜 offset. | Phase 3 |
 | V2-008 | open | 소 | decode 동적 shape는 `tir_var_upper_bound` func_attr 필요(플래너 sizing). Probe B 카베아트(F) | Phase 3 |
+| V2-009 | open | **중** | **tile-native 검증** — packed `[Rt,Ct,64,64]` 위 op(특히 reduce=tile+inner축 리덕션)이 스케줄+walker로 **효율적 native ISA fold**로 lower되는지. (ii) 확정용 | Phase 3 |
 
 > 규칙: 새 이슈는 `V2-NNN`. 상태 ∈ {open, in-progress, resolved, wontfix}. resolve 시 커밋 해시 기록.
 
@@ -65,6 +66,7 @@
 | 2026-07-26 | **Phase 0 = GO → Path A 확정** | 3/3 probe 통과: matmul tensorize 성립(A), TVM 메모리 플래닝 동작(B), codegen 일반화 MEDIUM(C). 모두 TVM 0.19.0 실측 |
 | 2026-07-27 | **★ codegen 교정 — v1 emitter를 통째로 옮기지 않는다** | ISA(isa.py)가 elementwise·reduce_sum(0x14)·copy(0x17)·strided-load(0x90)·matmul mac/act(0x42)를 **네이티브 지원**. v1의 tile-fold·ones-matmul·relayout 복잡함은 **ISA가 아니라 tile-blocked 레이아웃 산물**. → v2 codegen = **"op→TIR→네이티브 ISA 1명령" 얇은 매핑 + 레이아웃은 Relax `layout_transform` 패스**. broadcast/transpose/concat의 tile 시퀀스는 포팅 안 함(패스로 흡수). col-broadcast의 0x15 주소지정 한계만 진짜 특별 처리. (사용자 지적) |
 | 2026-07-27 | 남은 fork: tile-native (i)경계 relayout vs (ii)tile-native 생성 | (ii)가 A4 gather=0 보존이나 TVM 생성 가능성 확인 필요 → 레이아웃 spike |
+| 2026-07-27 | **레이아웃 표현은 `layout_transform`로 확정.** fork는 **(ii) 지향** | spike: tile-blocked가 표준 op로 표현·legalize됨. (ii)는 packed `[Rt,Ct,64,64]` 위에서 op을 돌림(elementwise=layout-transparent 자명, reduce=tile+inner축 리덕션=fold를 **TVM이 생성**). A4 gather=0 보존. 단 "op-on-packed가 효율적 native fold로 lower되나"는 V2-009로 검증 |
 
 ### Phase 0 결론 (go/no-go)
 **GO.** Path A(TVM MetaSchedule)의 세 load-bearing 가정이 실측으로 검증됨:
@@ -84,6 +86,7 @@
 | 2026-07-26 | Probe B (memory planning) | 0 | **GO-caveats** — `StaticPlanBlockMemory`가 실제 liveness+재사용(5중간→2 storage, residual 최적). best-fit(match_range 16)로 v1 exact-size보다 유연(fragmentation↓ 여지). 파이프라인 prefix(→CallTIRRewrite→plan) 필수. N객체→offset post-pass(V2-007), tile footprint 정합(V2-006), decode 동적(V2-008) | exp2_plan.py, exp3_residual.py |
 | 2026-07-26 | **Phase 2-A.1 — elementwise → 통합 walker** | 2 | ✅ `v2_backend.V2Walker`가 elementwise 8종(add/sub/mul/div/sqrt/exp/neg/cos/sin/silu)을 `npu_ew*` marker로 lower. **v1 emit_ew와 ISA byte-exact + mysim 수치 일치**. v1 무변경(오라클). **gate GREEN(15/15+vendor)**. test_v2 게이트 편입 | v2_backend.py, tests/test_v2.py |
 | 2026-07-27 | **Phase 2-A.2 — reduce → 통합 walker** | 2 | ✅ `npu_rsum/rmax_row/tile` 4경로(row·tile × sum·max, scratch 사용)를 marker로 lower. **v1 emit_row_sum/max와 ISA byte-exact + mysim==numpy**. gate GREEN | v2_backend.py, tests/test_v2.py |
+| 2026-07-27 | **레이아웃 spike — Relax layout_transform** | 2 | ✅ `layout_transform(index_map (r,c)->(r//64,c//64,r%64,c%64))`가 tile-blocked `[Rt,Ct,64,64]` 표현 → **표준 TIR copy-reindex로 legalize**(순수 copy, //·%는 인덱스만). v1 수제 pack/relayout을 **TVM 표준 op로 대체 가능** 확정. → V2-009 | spike_layout.py |
 | 2026-07-26 | v1 코드 확인 (tir_backend.py:44-126) | 0/2 | **★ v1은 이미 tensorize matmul 컴파일러** — `npu_gemm_acc`/`npu_fill_zero` TensorIntrin 등록 + `schedule_matmul`(canonical recipe) + walker lowering, byte-exact. → Phase 2 "matmul tensorize" step 사실상 완료. 남은 건 non-matmul op 일반화 | tir_backend.py |
 | 2026-07-26 | Probe C (codegen 일반화 평가) | 0 | **MEDIUM/GO** — walker가 이미 tensorized matmul TIR을 프로덕션 lower(O-proj group, byte-exact 검증). ~90% 재사용. 새 작업=cache stage(V2-003). 전략=fast-path 유지+walker fallback(V2-004). byte-exact는 schedule 변경 시 상실→tolerance(V2-005) | — |
 
