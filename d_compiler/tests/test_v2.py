@@ -209,9 +209,30 @@ def test_reduce_byte_exact_and_numeric():
     return "reduce (rsum/rmax x row/tile): ISA byte-exact vs v1 + mysim==numpy"
 
 
+def test_native_primitives():
+    """Thin native primitives: copy (0x17) = identity, ttile (strided-load 0x90) = 64x64 transpose."""
+    rng = np.random.default_rng(4)
+    # copy
+    n = 20000; o0, od = 0, n
+    A = _f16(rng.standard_normal(n))
+    gbuf = np.zeros(od + n, np.float32); gbuf[o0:o0 + n] = A
+    a2 = Asm(); v2.walk_marker(a2, v2.copy_marker(n), [o0, od])
+    out = runtime.run(a2.words, gbuf, gn=od + n)[od:od + n]
+    assert np.array_equal(out.astype(np.float16), A), "copy: not identity"
+    # ttile: transpose one 64x64 tile
+    o0, od = 0, 4096
+    X = _f16(rng.standard_normal((64, 64)))
+    gbuf = np.zeros(od + 4096, np.float32); gbuf[o0:o0 + 4096] = X.reshape(-1)
+    a2 = Asm(); v2.walk_marker(a2, v2.ttile_marker(), [o0, od])
+    out = runtime.run(a2.words, gbuf, gn=od + 4096)[od:od + 4096].reshape(64, 64)
+    assert np.array_equal(out.astype(np.float16), X.T), "ttile: not transpose"
+    return "native primitives: copy==identity + ttile==transpose (mysim)"
+
+
 if __name__ == "__main__":
     print("[PASS]", test_ew2_byte_exact_and_numeric())
     print("[PASS]", test_ew1_byte_exact_and_numeric())
     print("[PASS]", test_silu_byte_exact_and_numeric())
     print("[PASS]", test_reduce_byte_exact_and_numeric())
-    print("ALL v2 Phase 2-A (elementwise + reduce via unified walker) TESTS PASSED")
+    print("[PASS]", test_native_primitives())
+    print("ALL v2 Phase 2-A (elementwise + reduce + native primitives) TESTS PASSED")

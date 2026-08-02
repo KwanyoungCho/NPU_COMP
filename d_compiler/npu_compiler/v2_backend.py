@@ -38,6 +38,10 @@ class V2Walker(_Walker):
                 return self._emit_ew1(_EW1[name[8:]], call)
             if name == "npu_silu":
                 return self._emit_silu(call)
+            if name == "npu_copy":
+                return self._emit_copy(call)
+            if name == "npu_ttile":
+                return self._emit_ttile(call)
             if name == "npu_rsum_row":
                 return self._emit_rsum_row(call)
             if name == "npu_rsum_tile":
@@ -75,6 +79,21 @@ class V2Walker(_Walker):
             a.addr(SRC1, x0 + base); a.load(0, 0)
             a.m_add(mode=IMM, imm=0, act=True)          # 0710 native SiLU (act bit on m_add+0)
             a.addr(DST, c + base); a.save(0)
+
+    # ---- thin native primitives (layout building blocks) ----
+    def _emit_copy(self, call):                         # vector copy (0x17), n elems
+        c = self.ptr(call.args[1]); s = self.ptr(call.args[2]); n = self.ev(call.args[3]); a = self.a
+        for base in range(0, n, CH):
+            a.vlen(min(CH, n - base))
+            a.addr(SRC1, s + base); a.load(0, 0); a.v_copy()
+            a.addr(DST, c + base); a.save(0)
+
+    def _emit_ttile(self, call):                        # transpose one 64x64 tile (strided-load 0x90)
+        d = self.ptr(call.args[1]); s = self.ptr(call.args[2]); a = self.a
+        a.tile(0, 64, 64); a.addr(SRC1, s)
+        a.load(1, 0, strided=1, ncols=64, start=0)      # column-major read = 64x64 transpose
+        a.vlen(4096); a.v_copy()
+        a.addr(DST, d); a.save(0)
 
     # ---- reduce (row/tile x sum/max) — verbatim relocation of codegen.emit_row_sum/max ----
     def _emit_rsum_row(self, call):                     # src[R,C] row-major -> dst[R,1]
@@ -171,6 +190,28 @@ def ew1_marker(op, N):
         with T.block("root"):
             T.reads(A[0:N]); T.writes(C[0:N])
             T.evaluate(T.call_extern("int32", intrin, C.access_ptr("w"), A.access_ptr("r"), N))
+    return f
+
+
+def copy_marker(n):
+    @T.prim_func
+    def f(x0: T.handle, y: T.handle):
+        A = T.match_buffer(x0, (n,), "float16")
+        C = T.match_buffer(y, (n,), "float16")
+        with T.block("root"):
+            T.reads(A[0:n]); T.writes(C[0:n])
+            T.evaluate(T.call_extern("int32", "npu_copy", C.access_ptr("w"), A.access_ptr("r"), n))
+    return f
+
+
+def ttile_marker():
+    @T.prim_func
+    def f(x0: T.handle, y: T.handle):
+        A = T.match_buffer(x0, (4096,), "float16")
+        C = T.match_buffer(y, (4096,), "float16")
+        with T.block("root"):
+            T.reads(A[0:4096]); T.writes(C[0:4096])
+            T.evaluate(T.call_extern("int32", "npu_ttile", C.access_ptr("w"), A.access_ptr("r")))
     return f
 
 

@@ -63,6 +63,8 @@
 | 2026-07-26 | **브랜치 작업 후 검증 완료 시 merge** | 안전 |
 | 2026-07-26 | (예정) auto-sched 도입 시 **벤더 byte-exact → tolerance 전환** | schedule 유연화 = FP16 순서 변동 (Probe C가 재확인, V2-005) |
 | 2026-07-26 | **Phase 0 = GO → Path A 확정** | 3/3 probe 통과: matmul tensorize 성립(A), TVM 메모리 플래닝 동작(B), codegen 일반화 MEDIUM(C). 모두 TVM 0.19.0 실측 |
+| 2026-07-27 | **★ codegen 교정 — v1 emitter를 통째로 옮기지 않는다** | ISA(isa.py)가 elementwise·reduce_sum(0x14)·copy(0x17)·strided-load(0x90)·matmul mac/act(0x42)를 **네이티브 지원**. v1의 tile-fold·ones-matmul·relayout 복잡함은 **ISA가 아니라 tile-blocked 레이아웃 산물**. → v2 codegen = **"op→TIR→네이티브 ISA 1명령" 얇은 매핑 + 레이아웃은 Relax `layout_transform` 패스**. broadcast/transpose/concat의 tile 시퀀스는 포팅 안 함(패스로 흡수). col-broadcast의 0x15 주소지정 한계만 진짜 특별 처리. (사용자 지적) |
+| 2026-07-27 | 남은 fork: tile-native (i)경계 relayout vs (ii)tile-native 생성 | (ii)가 A4 gather=0 보존이나 TVM 생성 가능성 확인 필요 → 레이아웃 spike |
 
 ### Phase 0 결론 (go/no-go)
 **GO.** Path A(TVM MetaSchedule)의 세 load-bearing 가정이 실측으로 검증됨:
