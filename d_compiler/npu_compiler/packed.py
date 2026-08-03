@@ -1,25 +1,27 @@
-"""F4 (Stage 4 Phase 4.3): _build_packed(mod) — a PRE-LEGALIZE Relax transform that
-rewrites the high-level layer graph (model.build_layer_module) into TILE-BLOCKED
-(packed 4D [Rt,Ct,64,64]) form, so that after relax.transform.LegalizeOps() the tile
-ops become native TIR (packed einsum matmul, layout-transparent 4D elementwise/reduce/
-broadcast) and the residual stream stays tile end-to-end.
+"""F4 layout pass: _build_packed(mod) — a PRE-LEGALIZE Relax IRModule->IRModule transform
+that rewrites the high-level layer graph into TILE-BLOCKED (packed 4D [Rt,Ct,64,64]) form,
+so that after relax.transform.LegalizeOps() the tile ops become native TIR (packed einsum
+matmul, layout-transparent 4D elementwise/reduce/broadcast) and the residual stream stays
+tile end-to-end (gather=0/scatter=0). This is the FRONT of compile_packed — the DEFAULT
+(model-agnostic) compile path; compile_module (op-list) stays as the numeric oracle +
+sub-tile-head-dim fallback.
 
-Design (validated below):
-  * Params keep their ORIGINAL 2D shape in the signature; every layout conversion is an
-    in-graph relax.op.layout_transform. => feeds are BYTE-IDENTICAL to the row module,
-    output is unpacked back to [seq,d] row (compare straight to model.ref_layer).
-  * Generic pack map (r,c)->(r//64,c//64,r%64,c%64) covers every 2D shape:
-        [R,C]->[Rt,Ct,64,64]   [R,1]->[Rt,1,64,1]   [1,C]->[1,Ct,1,64]   [1,1]->[1,1,1,1]
-    and its inverse (a,b,i,j)->(a*64+i,b*64+j) unpacks any of them.
+Design:
+  * Returns (packed_module, pack_names). Most params keep their ORIGINAL 2D shape, EXCEPT
+    weights used only as matmul operands (both dims 64-mult): those are HOST-PACKED — declared
+    with the 4D _t4 shape and fed pre-tiled (free, no on-device layout_transform), named in
+    pack_names. Full-2D CONSTANTS are likewise host-packed at compile time (_emit_pack).
+  * Generic pack map (r,c)->(r//64,c//64,r%64,c%64) for FULL 2D ([R>1,C>1]); a row/col/scalar
+    vector is packed by a plain reshape (a %64 map would pad its size-1 axis to 64 = garbage).
   * Per-op layout policy:
-      matmul                           -> TILE  (packed einsum "acik,cdkj->adij")
-      strided_slice/concat/permute_dims-> ROW   (rebuilt verbatim on row-coerced inputs)
-      everything else (ew/unary/cos/sin/sum/max/broadcast_to) -> LAYOUT-FOLLOWING:
-          output = row iff any INTERMEDIATE-var input is row, else tile
-          (param/const leaves do not vote; they are coerced to the chosen layout)
-    => the rotate-half (slice/negative/concat) + K permute_dims form a ROW ISLAND reached
-       by unpacking Q/K at the slice/add boundary; the residual/RMSNorm/FFN/proj/o-proj
-       stream stays TILE with zero interior unpack.
+      matmul                              -> TILE  (packed einsum "acik,cdkj->adij")
+      strided_slice/concat/permute_dims   -> TILE  when 64-tile-aligned (Phase 4.4 tile-RoPE:
+          whole-tile-column slice, tile-axis concat, permute_dims([1,0,3,2])), else ROW island
+      ew/unary/cos/sin/sum/max/broadcast_to -> LAYOUT-FOLLOWING:
+          output = row iff any INTERMEDIATE-var input is row, else tile (leaves don't vote)
+      any other/unknown op (model-agnostic) -> ROW island (rebuilt verbatim on row inputs)
+    => at hd=128 (h/2=64 tile-aligned) the rotate-half + K transpose are fully TILE (no row
+       island); only sub-tile head dims (h/2 not a 64-mult) fall back to a Q/K row island.
 """
 import numpy as np
 import tvm
