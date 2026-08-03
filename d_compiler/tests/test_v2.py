@@ -275,7 +275,7 @@ def test_v2_compile_pipeline():
             gv = bb.emit_output(y)
         bb.emit_func_output(gv)
     mod = relax.transform.LegalizeOps()(bb.finalize())
-    asm, off, shp, top, outn = v2.compile_module(mod)
+    asm, off, shp, top, outn, _ = v2.compile_module(mod)
     rng = np.random.default_rng(7); g = lambda: _f16(rng.standard_normal((D, D)) * 0.1)
     X, W1, B, W2 = g(), g(), g(), g()
     gbuf = np.zeros(top + 20000, np.float32)
@@ -305,7 +305,7 @@ def test_v2_compile_swiglu():
             gv = bb.emit_output(y)
         bb.emit_func_output(gv)
     mod = relax.transform.LegalizeOps()(bb.finalize())
-    asm, off, shp, top, outn = v2.compile_module(mod)
+    asm, off, shp, top, outn, _ = v2.compile_module(mod)
     rng = np.random.default_rng(9)
     X = _f16(rng.standard_normal((D, D)) * 0.1); WG = _f16(rng.standard_normal((D, F)) * 0.1)
     WU = _f16(rng.standard_normal((D, F)) * 0.1); WD = _f16(rng.standard_normal((F, D)) * 0.1)
@@ -320,6 +320,35 @@ def test_v2_compile_swiglu():
     return f"v2.compile_module SwiGLU FFN -> mysim==numpy (tol, maxdiff={md:.3f})"
 
 
+def test_v2_compile_rmsnorm():
+    """v2.compile_module on v1's legalize.rms_norm: exercises reduce(sum) + broadcast
+    (col [R,1]->[R,D] and row [1,D]->[R,D]) + constants (1/d, eps, ones)."""
+    from npu_compiler import legalize
+    S, D, eps = 64, 128, 1e-5
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", relax.TensorStructInfo([S, D], "float16"))
+    w = relax.Var("w", relax.TensorStructInfo([1, D], "float16"))
+    with bb.function("main", [x, w]):
+        with bb.dataflow():
+            gv = bb.emit_output(legalize.rms_norm(bb, x, w, S, D, eps=eps))
+        bb.emit_func_output(gv)
+    mod = relax.transform.LegalizeOps()(bb.finalize())
+    asm, off, shp, top, outn, consts = v2.compile_module(mod)
+    rng = np.random.default_rng(11)
+    X = _f16(rng.standard_normal((S, D))); W = _f16(rng.standard_normal((1, D)))
+    gbuf = np.zeros(top + 20000, np.float32)
+    for co, arr in consts:
+        gbuf[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
+    gbuf[off["x"]:off["x"] + S * D] = X.reshape(-1)
+    gbuf[off["w"]:off["w"] + D] = W.reshape(-1)
+    out = runtime.run(asm.words, gbuf, gn=top)[off[outn]:off[outn] + S * D].reshape(S, D)
+    Xf = X.astype(np.float32); ms = np.mean(Xf ** 2, axis=1, keepdims=True) + eps
+    exp = Xf / np.sqrt(ms) * W.astype(np.float32)
+    md = np.max(np.abs(out.astype(np.float32) - exp))
+    assert md < 0.05 * np.max(np.abs(exp)) + 0.1, f"rmsnorm maxdiff={md}"
+    return f"v2.compile_module RMSNorm (reduce+broadcast+consts) -> mysim==numpy (tol, maxdiff={md:.3f})"
+
+
 if __name__ == "__main__":
     print("[PASS]", test_ew2_byte_exact_and_numeric())
     print("[PASS]", test_ew1_byte_exact_and_numeric())
@@ -329,4 +358,5 @@ if __name__ == "__main__":
     print("[PASS]", test_e2e_elementwise_real_pipeline())
     print("[PASS]", test_v2_compile_pipeline())
     print("[PASS]", test_v2_compile_swiglu())
+    print("[PASS]", test_v2_compile_rmsnorm())
     print("ALL v2 (unified walker + REAL pipeline + v2.compile_module) TESTS PASSED")

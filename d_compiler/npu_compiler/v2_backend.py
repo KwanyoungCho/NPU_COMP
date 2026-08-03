@@ -90,6 +90,10 @@ class V2Walker(_Walker):
                 return self._emit_rmax_row(call)
             if name == "npu_rmax_tile":
                 return self._emit_rmax_tile(call)
+            if name == "npu_bcast_row":
+                return self._emit_bcast_row(call)
+            if name == "npu_bcast_col":
+                return self._emit_bcast_col(call)
         return super()._intrinsic(call)
 
     def _emit_ew2(self, method, call):
@@ -134,6 +138,42 @@ class V2Walker(_Walker):
         a.load(1, 0, strided=1, ncols=64, start=0)      # column-major read = 64x64 transpose
         a.vlen(4096); a.v_copy()
         a.addr(DST, d); a.save(0)
+
+    def _copy2d(self, dst_off, dst_stride, src_off, src_stride, rows, cols):
+        a = self.a
+        for r in range(rows):
+            a.vlen(cols)
+            a.addr(SRC1, src_off + r * src_stride); a.load(0, 0)
+            a.v_add(mode=IMM, imm=0)
+            a.addr(DST, dst_off + r * dst_stride); a.save(0)
+
+    # ---- broadcast (row-major) — relocation of codegen.emit_broadcast row/col branches ----
+    def _emit_bcast_row(self, call):                    # src[1,C] -> dst[R,C] (native copy)
+        d = self.ptr(call.args[1]); s = self.ptr(call.args[2])
+        R = self.ev(call.args[3]); C = self.ev(call.args[4]); a = self.a
+        for r in range(R):
+            a.vlen(C); a.addr(SRC1, s); a.load(0, 0); a.v_copy()
+            a.addr(DST, d + r * C); a.save(0)
+
+    def _emit_bcast_col(self, call):                    # src[R,1] -> dst[R,C] (ones-matmul: 0x15 imm can't address per-row)
+        d = self.ptr(call.args[1]); s = self.ptr(call.args[2])
+        Rd = self.ev(call.args[3]); Cd = self.ev(call.args[4]); a = self.a
+        T = TILE
+        ones = self.mp.scratch_alloc(T); sP = self.mp.scratch_alloc(T * T)
+        a.vlen(T); a.v_broadcast(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)
+        for mi in range(0, Rd, T):
+            mt = min(T, Rd - mi)
+            for nj in range(0, Cd, T):
+                nt = min(T, Cd - nj)
+                a.tile(0, mt, 1); a.tile(1, 1, nt)
+                a.addr(SRC1, s + mi); a.load(1, 0)
+                a.addr(SRC2, ones); a.load(1, 1)
+                a.m_mul(mode=VECTOR)
+                if nt == Cd:
+                    a.addr(DST, d + mi * Cd); a.save(1)
+                else:
+                    a.addr(DST, sP); a.save(1)
+                    self._copy2d(d + mi * Cd + nj, Cd, sP, nt, mt, nt)
 
     # ---- reduce (row/tile x sum/max) — verbatim relocation of codegen.emit_row_sum/max ----
     def _emit_rsum_row(self, call):                     # src[R,C] row-major -> dst[R,1]
@@ -266,6 +306,17 @@ def reduce_marker(intrin, R, C, src_numel):
     return f
 
 
+def bcast_marker(intrin, Rd, Cd, src_numel):
+    @T.prim_func
+    def f(s: T.handle, d: T.handle):
+        S = T.match_buffer(s, (src_numel,), "float16")
+        D = T.match_buffer(d, (Rd * Cd,), "float16")
+        with T.block("root"):
+            T.reads(S[0:src_numel]); T.writes(D[0:Rd * Cd])
+            T.evaluate(T.call_extern("int32", intrin, D.access_ptr("w"), S.access_ptr("r"), Rd, Cd))
+    return f
+
+
 def walk_marker(asm, pf, offsets, mp=None):
     """Lower a marker PrimFunc into `asm` with each param bound to a G-buffer offset.
     mp: MemPlan providing scratch_alloc (needed by reduce tile/row-max paths)."""
@@ -364,15 +415,30 @@ def compile_module(mod):
              and getattr(bd.value.op, "name", "") == "relax.call_tir"]
     for bd in binds:
         alloc(bd.var.name_hint, [int(d) for d in bd.var.struct_info.shape])
+    # constants (materialized full-size by legalize). Key by (binding, arg) POSITION:
+    # TVM re-wraps FFI nodes on each access so id()/identity is unstable across passes.
+    const_inits = []
+    for i, bd in enumerate(binds):
+        for j, a in enumerate(bd.value.args[1].fields):
+            if isinstance(a, _relax.Constant):
+                arr = a.data.numpy()
+                nm = "__const_%d_%d" % (i, j)
+                alloc(nm, list(arr.shape))
+                const_inits.append((off[nm], arr))
+
+    def ref(i, j, a):                                        # call_tir arg -> offset-key
+        return "__const_%d_%d" % (i, j) if isinstance(a, _relax.Constant) else a.name_hint
 
     mp = _memplan.MemPlan(); mp.top = top[0]
     asm = Asm()
     _EW1_OPS = set(_EW1) | {"silu"}
-    for bd in binds:
+    for i, bd in enumerate(binds):
         val = bd.value
         gvar = val.args[0].name_hint
         opname = gvar.rstrip("0123456789")                   # "matmul1" -> "matmul"
-        ins = [a.name_hint for a in val.args[1].fields]
+        if opname.startswith("tir_"):                        # "tir_sqrt" -> "sqrt"
+            opname = opname[4:]
+        ins = [ref(i, j, a) for j, a in enumerate(val.args[1].fields)]
         outn = bd.var.name_hint
         if opname == "matmul":                               # matmul -> v1 proven path
             M, K = shp[ins[0]]; _, N = shp[ins[1]]
@@ -383,6 +449,20 @@ def compile_module(mod):
         elif opname in _EW1_OPS:                             # unary elementwise -> marker
             walk_marker(asm, ew1_marker(opname, _numel(shp[outn])),
                         [off[ins[0]], off[outn]], mp)
+        elif opname == "sum":                                # reduce-sum over last axis -> [R,1]
+            R, C = shp[ins[0]]
+            walk_marker(asm, reduce_marker("npu_rsum_row", R, C, R * C),
+                        [off[ins[0]], off[outn]], mp)
+        elif opname == "max":
+            R, C = shp[ins[0]]
+            walk_marker(asm, reduce_marker("npu_rmax_row", R, C, R * C),
+                        [off[ins[0]], off[outn]], mp)
+        elif opname == "broadcast_to":                       # [R,1]->col or [1,C]->row
+            Rd, Cd = shp[outn]; si = shp[ins[0]]
+            col = len(si) == 2 and si[1] == 1
+            intrin = "npu_bcast_col" if col else "npu_bcast_row"
+            walk_marker(asm, bcast_marker(intrin, Rd, Cd, Rd if col else Cd),
+                        [off[ins[0]], off[outn]], mp)
         else:
             raise TirBackendError(f"v2.compile_module: op '{opname}' not handled yet")
 
@@ -390,4 +470,4 @@ def compile_module(mod):
     val_of = {bd.var: bd.value for blk in main.body.blocks for bd in blk.bindings}
     while isinstance(val_of.get(out), _relax.Var):
         out = val_of[out]
-    return asm, off, shp, top[0], out.name_hint
+    return asm, off, shp, top[0], out.name_hint, const_inits
