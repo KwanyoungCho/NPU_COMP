@@ -32,11 +32,44 @@
 | **1** | path-무관 안전 정리 | ⚪ 선택적/후순위 | layout·liveness는 이미 별도 함수 → ROI 낮음, 필요시만 |
 | **2** | NPU ISA→TIR intrinsic + `_Walker` 일반화 | 🟢 대부분 | matmul + elementwise + reduce + broadcast + transpose/slice/concat 전부 walker로 |
 | **3** | v2.compile() 파이프라인 조립 | 🟢 **완전한 레이어 컴파일** | `build_layer_module` → v2.compile_module → mysim, **ref_layer 대비 rel=0.0011** |
-| **3-R** | **compile_module 리팩토링 → 명시적 pass 파이프라인 + v1 최적화 이식** | 🟢 **완료** | Stage 1(A1 liveness, act −47~63%) · Stage 2a(F4+A4 tile-blocked, −42~52% 명령어, ≥256·HD128 해금) · Stage 3(F3 O-proj fusion) · 마커 캐싱(컴파일 v1보다 1.5~2× 빠름) · **Stage 4 Phase 4.1(residual tile, 실 3B gather 2.16M→98K, v1 after 근접)**. 잔여=Phase 4.2-4.5(layout_transform 네이티브·RoPE tile, 균일성 refactor, correctness 이득 0) |
+| **3-R** | **compile_module 리팩토링 → 명시적 pass 파이프라인 + v1 최적화 이식** | 🟡 **거의 완료(4.4-4.5 남음)** | Stage 1(A1) · Stage 2a(F4+A4 tile-blocked) · Stage 3(F3 fusion) · 마커 캐싱(v1보다 1.5~2× 빠름) · **Stage 4 4.0/4.1/4.2a/4.3**(residual tile로 실 3B gather −95%, packed matmul byte-exact, F4 패스 relax-VM 검증). **잔여=Phase 4.4-4.5**(packed-aware codegen 통합 + RoPE tile + 수제 emitter 삭제; correctness 이득 0, 구조 이득). **재개 가이드 §1.5** |
 | **3** | Relax 파이프라인 완성 + 메모리 TVM화 | ⚪ 대기 | — |
 | **4** | cost 기반 타깃 선택 (cycle 도착 후) | ⚪ 유보 | cost model 필요 |
 
 범례: ⚪대기 🟡진행 🟢완료 🔴블록
+
+---
+
+## 1.5 현재 상태 & 재개 가이드 (다음: Phase 4.4–4.5)
+
+### 지금 프로덕션에서 되는 것 (compile_module, 전부 커밋·gate GREEN)
+- **파이프라인**: `_parse`(F5) → `_assign_layouts`(F4) → `_detect_oproj_groups`(F3) → `_plan_memory`(M1) → `_emit`(C1). 토글 `compile_module(mod, reuse=True, tile=True, fuse=True)`.
+- **이식된 v1 최적화**: A1 liveness 재사용 · A4 tile-blocked · weight packing · F3 O-proj fusion · A2 컴파일 fast-path. **T1 shared gather-cache는 v1도 reuse 경로에선 끔**(실질 parity).
+- **성능**: 실 3B **gather 2.16M→98K(−95%)**, total 3.5M→1.29M(v1 "after" 1.06M 근접). 컴파일 v1보다 1.5~2× 빠름.
+- **검증**: adversarial 3회(A4 300+·fusion 240·parity 40항목) silent 오답 0. v1 소스 무변경(오라클).
+
+### Stage 4 세부 (4.0–4.3 완료, 4.4–4.5 남음)
+- ✅ **4.0** packed matmul(einsum→`npu_gemm_acc`) byte-exact + `_bind_match` 4D 수정 — `v2_backend.py`
+- ✅ **4.1** residual tile(fixpoint 1줄, `v2_backend.py:664`) — gather 95% 닫음
+- ✅ **4.2a** fully-tile matmul을 `emit_packed_matmul`로(byte-exact)
+- ✅ **4.3** F4 pre-legalize packed 패스 `npu_compiler/packed.py:_build_packed` — **relax-VM에서 row와 bit-identical 검증**(6 config CONFIRMED)
+- ⏳ **4.4–4.5 (다음 세션)** — 아래
+
+### 다음 세션 착수점 (Phase 4.4–4.5)
+**목표**: `packed.py`의 F4 패스를 **실제 NPU-ISA codegen에 통합** → 수제 tile emitter 삭제 + 균일 codegen + 마지막 gather=0.
+
+**정확한 갭(측정됨)**: `_build_packed`→LegalizeOps가 내는 op을 현 `_emit`이 못 lower함 — 새로 처리할 op: `einsum`(→ `packed_matmul`/`emit_packed_matmul` 재사용, 이미 byte-exact), `te_layout_transform`(→ device reindex copy 또는 host 경계), `reshape`(→ no-op/copy), 그리고 4D shape의 `ew`/`sum`/`max`/`broadcast_to`(→ walker 마커, 4D 축 처리).
+
+**해야 할 일**:
+1. **S1 tensorize 디스패처** — legalized packed PrimFunc별로 tensorize: einsum→`npu_gemm_acc`(있음), ew loop→`npu_vadd`류(`schedule_ew_binary` 있음, 나머지 op 확장), reduce fold→새 schedule, layout_transform copy→`npu_copy64`(spike `s4_B2_reindex_copy.py`에 있음).
+2. **packed-aware `_emit`/walker** — 위 tensorized PrimFunc을 walk. `_bind_match` 4D는 이미 됨.
+3. **`compile_module`에 `packed=True` 경로** 신설(현 경로는 오라클로 유지) → 5-config mysim vs 현 tile 경로 대조(fp16 tolerance).
+4. **Phase 4.4**: RoPE도 packed(slice/concat/transpose tile) → 마지막 98K gather=0.
+5. **Phase 4.5**: 수제 emitter 5개(`_emit_bcast_col_tile`/`_emit_bcast_row_tile`/`_emit_rsum_tile`/`_emit_rmax_tile`) + `_emit`의 op별 row/tile 분기 삭제.
+
+**자산 위치**: 검증된 spike 코드 = `scratchpad/s4_*.py`(packed matmul/tensorize/walk/reindex-copy/rope-packed/full), F4 패스 = `npu_compiler/packed.py`, 설계 워크플로우 결과 = task `w5crt9bx4`(설계) `w3xsm7u0y`(F4 빌드).
+
+**주의**: correctness/gather 이득은 이미 확보(4.1). 4.4–4.5는 **구조(균일 codegen + auto-sched 기반)** 이득. 오라클-주도로 각 단계 gate GREEN 유지.
 
 ---
 
@@ -150,4 +183,13 @@
 | `10c5942` | 레이아웃 spike — tile-blocked = Relax layout_transform 확정, fork→(ii) |
 | `cea3547` | **★ REAL 파이프라인 e2e** — Relax→LegalizeOps→tensorize→walker→mysim + `_bind_match` N-D |
 | `82340b9`~`5ef22ca` | Phase 3 — compile_module e2e → unary ew → consts/reduce/broadcast → **FULL LAYER** → 5-config 검증 → correctness hardening(guard 복원) |
-| *(this)* | **Stage 1 리팩토링** — compile_module을 `_parse`/`_plan_memory`/`_emit` 3-pass로 분해 + **A1 liveness 메모리 재사용 이식**(act −47~63%, byte-exact) |
+| `38fc9d6` | **Stage 1** — compile_module 3-pass 분해(`_parse`/`_plan_memory`/`_emit`) + **A1 liveness 재사용**(act −47~63%, byte-exact) |
+| `7e0a94a` | **Stage 2a** — F4 layout fixpoint + **A4 tile-blocked**(matmul/ew/broadcast/reduce + weight packing, −42~52% 명령어, ≥256 해금) |
+| `f4427b4` | Stage 2a fix **V2-019** — HD≥128(실 Llama) tile 크래시 수정(RoPE row 유지) |
+| `50f32fb` | **Stage 3** — F3 **O-proj fusion**(H matmul→1 group, fusion-aware liveness) |
+| `b5db48e` | 컴파일 속도 — **마커 lru_cache** → v2가 v1보다 1.5~2× 빠름 |
+| `b8a6f46` | report — O-proj fusion adversarial(~240 config, 0 버그) |
+| `788ce34` | **Stage 4 Phase 4.1** — residual tile → **실 3B gather 2.16M→98K(−95%)** |
+| `aa1be2d` | **Stage 4 Phase 4.0** — packed matmul foundation(byte-exact) + `_bind_match` 4D |
+| `dc9ca2b` | **Stage 4 Phase 4.2a** — fully-tile matmul을 packed nest로(byte-exact) |
+| `987ba95` | **Stage 4 Phase 4.3** — F4 pre-legalize packed 패스(`packed.py`, relax-VM 검증) |
