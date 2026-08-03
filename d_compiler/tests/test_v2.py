@@ -539,7 +539,8 @@ def test_v2_packed_model_agnostic():
             h = bb.emit(relax.op.matmul(x, w))               # -> einsum (tile)
             gv = bb.emit_output(bb.emit(relax.op.tanh(h)))   # unknown op -> row island
         bb.emit_func_output(gv)
-    leg = relax.transform.LegalizeOps()(packed._build_packed(bb.finalize()))   # must not crash
+    pk, _pack_names = packed._build_packed(bb.finalize())
+    leg = relax.transform.LegalizeOps()(pk)                                     # must not crash
     p, ops, shp, ca, outn = v2._parse(leg)
     fams = set(o.opname for o in ops)
     assert "einsum" in fams and "tanh" in fams, f"expected matmul tiled + tanh row, got {fams}"
@@ -559,13 +560,14 @@ def test_v2_compile_packed():
     rels = []
     for cfg in cfgs:
         cos, sin, rot = model.rope_tables(cfg); W = model.make_weights(cfg, seed=7)
-        asm, off, shp, top, outn, consts = v2.compile_packed(model.build_layer_module(cfg))
+        asm, off, shp, top, outn, consts, pack_names = v2.compile_packed(model.build_layer_module(cfg))
         g = np.zeros(top + 300000, np.float32)
         for co, arr in consts:
             g[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
         for nm, arr in W.items():
             if nm in off:
-                g[off[nm]:off[nm] + np.asarray(arr).size] = np.asarray(arr, np.float32).reshape(-1)
+                a = memplan.pack_tiled(np.asarray(arr), 64) if nm in pack_names else np.asarray(arr).reshape(-1)
+                g[off[nm]:off[nm] + a.size] = np.asarray(a, np.float32).reshape(-1)
         R, C = shp[outn]
         out = runtime.run(asm.words, g, gn=top)[off[outn]:off[outn] + R * C]
         exp = np.asarray(model.ref_layer(cfg, W, cos, sin), np.float32).reshape(-1)

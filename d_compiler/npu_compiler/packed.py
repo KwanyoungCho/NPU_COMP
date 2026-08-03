@@ -104,15 +104,44 @@ def _coerce(bb, info, want):
 
 
 def _build_packed(mod, target_name=None):
+    """Returns (packed_module, pack_names). pack_names = weight params (used ONLY as matmul
+    operands, 64-mult 2D) declared with the packed 4D shape and seeded already-tile, so they
+    are fed PRE-PACKED (host, free) instead of packed on-device via layout_transform."""
     old = mod["main"]
     params = list(old.params)
+    uses = {}                                   # param Var -> [used-as-matmul-operand? ...]
+    for b in old.body.blocks[0].bindings:
+        c = b.value
+        if isinstance(c, relax.Call):
+            mm = getattr(c.op, "name", "") == _MATMUL
+            for a in c.args:
+                if isinstance(a, relax.Var):
+                    uses.setdefault(a, []).append(mm)
+                elif isinstance(a, relax.Tuple):
+                    for f in a.fields:
+                        if isinstance(f, relax.Var):
+                            uses.setdefault(f, []).append(False)
+    pack_names, packed_of, new_params = set(), {}, []
+    for p in params:
+        sh = _shape2(p); u = uses.get(p, [])
+        if u and all(u) and len(sh) == 2 and sh[0] % 64 == 0 and sh[1] % 64 == 0:
+            pv = relax.Var(p.name_hint, relax.TensorStructInfo(_t4(sh), p.struct_info.dtype))
+            pack_names.add(p.name_hint); packed_of[p] = pv; new_params.append(pv)
+        else:
+            new_params.append(p)
+
     bb = relax.BlockBuilder()
     env = {}                                    # old Var -> _Info
 
-    with bb.function("main", params):
+    with bb.function("main", new_params):
         with bb.dataflow():
             for p in params:
-                inf = _Info(_shape2(p)); inf.mat["leaf"] = p; env[p] = inf
+                inf = _Info(_shape2(p))
+                if p in packed_of:
+                    inf.mat["tile"] = packed_of[p]   # fed pre-packed -> already tile (no transform)
+                else:
+                    inf.mat["leaf"] = p
+                env[p] = inf
 
             target_info = None
             for binding in old.body.blocks[0].bindings:
@@ -179,7 +208,7 @@ def _build_packed(mod, target_name=None):
             y = _coerce(bb, chosen, "row")
             gv = bb.emit_output(y)
         bb.emit_func_output(gv)
-    return bb.finalize()
+    return bb.finalize(), pack_names
 
 
 def _iter_tensor_args(call):
@@ -240,10 +269,16 @@ def _param_order(cfg):
 
 
 def _run_vm(mod, cfg, W):
-    mod = relax.transform.LegalizeOps()(mod)
-    ex = relax.build(mod, target="llvm")
+    from . import memplan
+    feeds = []
+    for p in mod["main"].params:                    # feed by param rank: 4D weight -> pre-packed
+        arr = np.asarray(W[p.name_hint], np.float16)
+        if len(p.struct_info.shape) == 4:
+            R, C = W[p.name_hint].shape
+            arr = memplan.pack_tiled(arr, 64).reshape(R // 64, C // 64, 64, 64)
+        feeds.append(tvm.nd.array(arr))
+    ex = relax.build(relax.transform.LegalizeOps()(mod), target="llvm")
     vm = relax.VirtualMachine(ex, tvm.cpu())
-    feeds = [tvm.nd.array(np.asarray(W[n], np.float16)) for n in _param_order(cfg)]
     return vm["main"](*feeds).numpy()
 
 
@@ -258,7 +293,7 @@ def validate(cfg):
     W = model.make_weights(cfg, seed=7)
     hi = model.build_layer_module(cfg)
 
-    packed = _build_packed(hi)
+    packed, _pack_names = _build_packed(hi)
     n_lt, n_rs = _count_lt(packed)
 
     out_packed = _run_vm(packed, cfg, W)

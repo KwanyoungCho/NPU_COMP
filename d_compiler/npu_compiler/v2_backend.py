@@ -1175,8 +1175,9 @@ def compile_packed(mod):
     in-graph layout_transform ops do all packing on-device), so the host feeds/reads raw.
     Returns (asm, off, shp, top, out_name, const_inits)."""
     from . import packed as _packed
-    leg = _relax.transform.LegalizeOps()(_packed._build_packed(mod))
+    pk_mod, pack_names = _packed._build_packed(mod)
+    leg = _relax.transform.LegalizeOps()(pk_mod)
     params, ops, shp, const_arrs, out_name = _parse(leg)
     off, top, const_inits = _plan_memory_packed(params, ops, shp, const_arrs, out_name)
     asm = _emit_packed(leg, ops, off, shp, top)
-    return asm, off, shp, top, out_name, const_inits
+    return asm, off, shp, top, out_name, const_inits, pack_names
