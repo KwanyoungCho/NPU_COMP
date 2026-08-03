@@ -177,35 +177,39 @@ SEQ128 D128: tile 33,610w vs row 100,844w (**−66%**) · HD128: 58,159w vs 225,
 
 ---
 
-## 5. 현재 상태 & 다음 단계 (Phase 4.4–4.5)
+## 5. 현재 상태 & 다음 단계 (정석 IR→IR 이행)
+
+### 전략 (2026-08-03 사용자와 재정렬)
+남은 작업의 목표는 단순한 "gather=0"이 아니라 **미들 패스를 진짜 IR→IR(`IRModule→IRModule`)로 이행**하는 것이다 — 그래야 **Llama 전용이 아니라 임의 모델에 유연한 범용 NPU 컴파일러**가 된다. 지금 파이프라인은 `build_layer_module`이 내는 특정 op 집합에 맞춘 **커스텀 op-list** 위에서 돈다. IR 위에서 돌면 TVM frontend가 import하는 아무 모델이나 흐르고, 그래프 변환(layout/fusion/memory)이 모델과 무관해진다. (단 "범용"엔 frontend import + op 커버리지도 필요 — IR→IR은 그 **필수 기반**.)
 
 ### 지금 프로덕션에서 되는 것 (전부 커밋·gate GREEN)
-- **파이프라인**: `_parse`(F5) → `_assign_layouts`(F4) → `_detect_oproj_groups`(F3) → `_plan_memory`(M1) → `_emit`(C1). 토글 `compile_module(mod, reuse=True, tile=True, fuse=True)` — 각각 A1 메모리 / A4 tile / F3 fusion을 켜고 끔(기존 row 레이아웃은 `tile=False`).
-- **이식된 v1 최적화**: A1 · A4 · weight packing · F3 fusion · A2 fast-path. (T1 cross-matmul gather-cache는 v1도 reuse 경로에선 끄므로 실질 parity.)
-- **성능**: §4 — 실 3B gather −95%, 컴파일 v1보다 빠름.
+- **파이프라인**: `_parse`(F5) → `_assign_layouts`(F4) → `_detect_oproj_groups`(F3) → `_plan_memory`(M1) → `_emit`(C1). 토글 `compile_module(mod, reuse=True, tile=True, fuse=True)`.
+- **최적화**: A1 메모리 재사용 · A4 tile-blocked · weight packing · F3 fusion · A2 fast-path.
+- **성능**: §4 — 실 3B gather −95%(2.16M→98K), 컴파일 v1보다 1.5~2× 빠름.
 
-### Stage 4 세부 (4.0–4.3 완료 / 4.4–4.5 남음)
-- ✅ **4.0** packed matmul(einsum→`npu_gemm_acc`) byte-exact + `_bind_match` 4D 수정 — `v2_backend.py`
-- ✅ **4.1** residual tile(fixpoint 1줄, `v2_backend.py:706`) — 실 3B gather −95%
-- ✅ **4.2a** fully-tile matmul을 `emit_packed_matmul`로(byte-exact)
-- ✅ **4.3** F4 pre-legalize packed 패스 `npu_compiler/packed.py:_build_packed` — relax-VM에서 row와 **bit-identical**(6 config)
-- ⏳ **4.4–4.5 (다음 세션)** — 아래
+### 이미 IR 위에 있는 것 vs op-list 위에 있는 것
+- ✅ **`packed.py:_build_packed`** = 진짜 `IRModule→IRModule` Relax 패스 (레이아웃을 packed 4D + `layout_transform`으로). relax-VM bit-identical 검증됨.
+- ⏳ **`_assign_layouts`/`_plan_memory`/`_emit`** = 아직 커스텀 op-list 위 → IR로 이행 대상.
 
-### 다음 세션 착수점 (Phase 4.4–4.5)
-**목표**: `packed.py`의 F4 패스를 **실제 NPU-ISA codegen에 통합** → 수제 tile emitter 삭제 + 균일 codegen + 마지막 gather=0.
+### 착수점 — packed-IR codegen (Step 2, 진행 중)
+**Step 0 완료(발견)**: `_build_packed`→LegalizeOps 결과를 lower하는 데 필요한 조각이 **전부 존재**. 단 **legalized einsum은 `npu_gemm_acc`로 직접 tensorize 안 됨**(구조 불일치) → packed codegen은 "tensorize 디스패처"가 아니라 **op-family dispatch**:
+| packed op (LegalizeOps 출력) | lowering | 상태 |
+|---|---|---|
+| `einsum` | `emit_packed_matmul` (byte-exact) | ✅ 있음 |
+| 4D `ew`(add/mul/…) | walker 마커 (연속 stream) | ✅ 있음 |
+| 4D `sum`/`max`(axis=[1,3]) | `_emit_rsum/rmax_tile` 마커 | ✅ 있음 |
+| 4D `broadcast_to` | `_emit_bcast_*_tile` 마커 | ✅ 있음 |
+| `layout_transform`/`reshape` | `schedule_reindex_copy`+`npu_copy64` | ✅ **추가됨(d0e0a27)** |
 
-**정확한 갭(측정됨)**: `_build_packed`→LegalizeOps가 내는 op을 현 `_emit`이 못 lower함. 새로 처리할 op: `einsum`(→ 이미 있는 `emit_packed_matmul` 재사용, byte-exact), `te_layout_transform`(→ device reindex copy 또는 host 경계), `reshape`(→ no-op/copy), 그리고 4D shape의 `ew`/`sum`/`max`/`broadcast_to`.
+**남은 순서**:
+- **Step 2 (진행 중)** — packed codegen 드라이버: `_build_packed`→LegalizeOps 모듈을 parse→op-family dispatch→ISA. 작은 subgraph → full layer, 현 tile 경로를 오라클로 mysim 대조.
+- **Step 3** — 메모리를 packed IR 위 패스로 (4D shape offset, A1 liveness 유지).
+- **Step 4** — `packed.py`를 정식 model-agnostic 레이아웃 패스로 승격(모르는 op→row fallback), op-list layout 경로 은퇴.
+- **Step 5** — fusion을 Relax 패스로 + Phase 4.4(tile RoPE, gather=0) + Phase 4.5(수제 emitter 5개 삭제).
 
-**해야 할 일**:
-1. **S1 tensorize 디스패처** — legalized packed PrimFunc별 tensorize: einsum→`npu_gemm_acc`(있음), ew loop→`npu_vadd`류(`schedule_ew_binary` 확장), reduce fold→새 schedule, layout_transform copy→`npu_copy64`(spike `s4_B2_reindex_copy.py`).
-2. **packed-aware `_emit`/walker** — 위 tensorized PrimFunc을 walk. `_bind_match` 4D는 이미 됨.
-3. **`compile_module`에 `packed=True` 경로** 신설(현 경로는 오라클로 유지) → 5-config mysim vs 현 tile 경로 대조(fp16 tolerance).
-4. **Phase 4.4**: RoPE도 packed(slice/concat/transpose tile) → 마지막 98K gather=0. (transpose는 ISA 네이티브 지원 + v1에 이식 소스 있음.)
-5. **Phase 4.5**: 수제 emitter 5개(`_emit_bcast_col_tile`/`_emit_bcast_row_tile`/`_emit_rsum_tile`/`_emit_rmax_tile`) + `_emit`의 op별 row/tile 분기 삭제 → codegen 단일 루프.
+**자산**: F4 패스=`npu_compiler/packed.py`, packed matmul=`packed_matmul`/`emit_packed_matmul`, reindex copy=`schedule_reindex_copy`, spike=`scratchpad/s4_*.py`(휘발성 — `packed.py`/이 문서에서 재생성), 워크플로우 task `w5crt9bx4`(설계)·`w3xsm7u0y`(F4 빌드).
 
-**자산 위치**: 검증된 spike = `scratchpad/s4_*.py`(다음 세션엔 없을 수 있음 — `packed.py`/이 문서에서 재생성), F4 패스 = `npu_compiler/packed.py`, 워크플로우 결과 = task `w5crt9bx4`(설계)·`w3xsm7u0y`(F4 빌드).
-
-**주의**: correctness/gather 이득은 이미 확보(4.1). 4.4–4.5는 **구조(균일 codegen + auto-sched 기반)** 이득. 오라클-주도로 각 단계 gate GREEN.
+**주의**: correctness/gather 이득은 이미 확보. IR→IR 이행은 **범용성·구조** 이득. 오라클-주도로 각 단계 gate GREEN.
 
 ---
 
