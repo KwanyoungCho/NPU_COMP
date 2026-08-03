@@ -1107,6 +1107,21 @@ def _plan_memory_packed(params, ops, shp, const_arrs, out_name, reuse=True):
     return off, top[0], const_inits
 
 
+def _emit_reindex(asm, dst, src, R, C, pack):
+    """Direct pack/unpack (row [R,C] <-> tile-blocked [Rt,Ct,64,64]) via native npu_copy,
+    WITHOUT walking a tensorized reindex PrimFunc — the TIR walk's per-node FFI is the packed
+    path's dominant compile cost, and these boundary copies are the bulk of the walks."""
+    Rt, Ct = R // 64, C // 64
+    for rt in range(Rt):
+        for ir in range(64):
+            for ct in range(Ct):
+                tile_off = (rt * Ct + ct) * 4096 + ir * 64   # tile (rt,ct), inner row ir
+                row_off = (rt * 64 + ir) * C + ct * 64
+                s, d = (row_off, tile_off) if pack else (tile_off, row_off)
+                asm.vlen(64); asm.addr(SRC1, src + s); asm.load(0, 0); asm.v_copy()
+                asm.addr(DST, dst + d); asm.save(0)
+
+
 def _emit_packed(mod, ops, off, shp, top):
     """C1 for the packed graph: dispatch each op-family to its existing lowering. Shape RANK
     selects tile vs row (4D [Rt,Ct,64,64] packed vs 2D row island). Reuses emit_packed_matmul
@@ -1123,8 +1138,11 @@ def _emit_packed(mod, ops, off, shp, top):
             emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]],   # fast Python replay
                              Mt * 64, Kt * 64, Nt * 64,                       # (byte-exact vs the
                              b_pack_nt=Nt, a_tiled=True, c_tiled=True)        # walked packed_matmul)
-        elif opname == "te_layout_transform":               # pack/unpack reindex copy
-            walk_marker(asm, schedule_reindex_copy(mod[op.gvar]), [off[ins[0]], off[outn]], mp)
+        elif opname == "te_layout_transform":               # pack (row->tile) / unpack (tile->row)
+            if len(shp[outn]) == 4:
+                R, C = shp[ins[0]]; _emit_reindex(asm, off[outn], off[ins[0]], R, C, pack=True)
+            else:
+                R, C = shp[outn]; _emit_reindex(asm, off[outn], off[ins[0]], R, C, pack=False)
         elif opname in _EW2:                                 # ew (any rank): count = numel
             n = _numel(shp[outn])
             walk_marker(asm, ew2_marker(opname, n), [off[ins[0]], off[ins[1]], off[outn]], mp)
