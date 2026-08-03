@@ -94,6 +94,10 @@ class V2Walker(_Walker):
                 return self._emit_bcast_row(call)
             if name == "npu_bcast_col":
                 return self._emit_bcast_col(call)
+            if name == "npu_bcast_row_tile":
+                return self._emit_bcast_row_tile(call)
+            if name == "npu_bcast_col_tile":
+                return self._emit_bcast_col_tile(call)
             if name == "npu_transpose":
                 return self._emit_transpose_row(call)
             if name == "npu_slice":
@@ -180,6 +184,36 @@ class V2Walker(_Walker):
                 else:
                     a.addr(DST, sP); a.save(1)
                     self._copy2d(d + mi * Cd + nj, Cd, sP, nt, mt, nt)
+
+    # ---- broadcast (tile-blocked dst, A4) — relocation of codegen.emit_broadcast tile branch ----
+    def _emit_bcast_col_tile(self, call):               # src[R,1] row -> tile dst[R,C] (ones-matmul per row-tile)
+        d = self.ptr(call.args[1]); s = self.ptr(call.args[2])
+        Rd = self.ev(call.args[3]); Cd = self.ev(call.args[4]); a = self.a
+        Rt, Ct = Rd // 64, Cd // 64
+        B = self.mp.scratch_alloc(64 * 64); ones = self.mp.scratch_alloc(64)
+        a.vlen(64); a.v_broadcast(mode=IMM, imm=1); a.addr(DST, ones); a.save(0)
+        for rt in range(Rt):
+            a.tile(0, 64, 1); a.tile(1, 1, 64)
+            a.addr(SRC1, s + rt * 64); a.load(1, 0)         # src col [64,1]
+            a.addr(SRC2, ones); a.load(1, 1)                # ones [1,64]
+            a.m_mul(mode=VECTOR); a.addr(DST, B); a.save(1)  # B[ir,:]=src[rt*64+ir]
+            for ct in range(Ct):
+                a.vlen(4096); a.addr(SRC1, B); a.load(0, 0)
+                a.v_copy(); a.addr(DST, d + (rt * Ct + ct) * 4096); a.save(0)
+
+    def _emit_bcast_row_tile(self, call):               # src[1,C] row -> tile dst[R,C]
+        d = self.ptr(call.args[1]); s = self.ptr(call.args[2])
+        Rd = self.ev(call.args[3]); Cd = self.ev(call.args[4]); a = self.a
+        Rt, Ct = Rd // 64, Cd // 64
+        B = self.mp.scratch_alloc(64 * 64)
+        for ct in range(Ct):
+            seg = s + ct * 64                               # src[1,C] contiguous 64-segment
+            for ir in range(64):                            # B[ir,:] = seg
+                a.vlen(64); a.addr(SRC1, seg); a.load(0, 0)
+                a.v_copy(); a.addr(DST, B + ir * 64); a.save(0)
+            for rt in range(Rt):
+                a.vlen(4096); a.addr(SRC1, B); a.load(0, 0)
+                a.v_copy(); a.addr(DST, d + (rt * Ct + ct) * 4096); a.save(0)
 
     # ---- data-movement (row-major): transpose / slice / concat-place ----
     def _emit_transpose_row(self, call):                # src[R,C] -> dst[C,R] (strided load 0x90)
@@ -537,7 +571,158 @@ def _parse(mod):
     return params, ops, shp, const_arrs, out.name_hint
 
 
-def _plan_memory(params, ops, shp, const_arrs, out_name, reuse=True):
+# op families that are layout-transparent elementwise (tile iff all inputs tile)
+_EW_LAYOUT = {"add", "subtract", "multiply", "divide",
+              "silu", "exp", "sqrt", "negative", "cos", "sin"}
+
+
+def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
+    """Pass F4: decide 'row'/'tile' per tensor (port of memplan.assign_layouts to the v2
+    legalized op list). A tensor seeds 'tile' if its producer is tile-capable, then a
+    demotion fixpoint drops it to 'row' unless EVERY consumer is tile-compatible and (for
+    elementwise/transpose/slice/concat producers) its own inputs are tile. The invariant
+    (tile tensors only feed tile consumers) means NO explicit relayout is needed at
+    boundaries — a matmul reads a row operand via its own gather, a tile operand skips it.
+    Also returns packed_params{name->Nt}: 64-mult matmul-weight PARAMS read pre-packed."""
+    param_set, const_set = set(params), set(const_arrs)
+    prod = {op.outn: op for op in ops}                       # producer op of each binding var
+
+    def _is64_2d(key):
+        sh = shp[key]
+        return len(sh) == 2 and sh[0] % 64 == 0 and sh[1] % 64 == 0
+
+    def is_mm64(key):
+        op = prod.get(key)
+        if op is None or op.opname != "matmul":
+            return False
+        M, K = shp[op.ins[0]]; _, N = shp[op.ins[1]]
+        return M % 64 == 0 and K % 64 == 0 and N % 64 == 0
+
+    def is_ew(key):
+        op = prod.get(key); return op is not None and op.opname in _EW_LAYOUT
+
+    def is_bcast(key):
+        op = prod.get(key); return op is not None and op.opname == "broadcast_to" and _is64_2d(key)
+
+    def is_transpose(key):
+        op = prod.get(key); return op is not None and op.opname == "transpose" and _is64_2d(key)
+
+    def is_tslice(key):
+        op = prod.get(key)
+        return (op is not None and op.opname == "strided_slice"
+                and _is64_2d(key) and op.begin % 64 == 0)    # tile-column-aligned last axis
+
+    def is_concat64(key):
+        op = prod.get(key); return op is not None and op.opname == "concatenate" and _is64_2d(key)
+
+    def is_concat(key):
+        op = prod.get(key); return op is not None and op.opname == "concatenate"
+
+    def _reduce_src64(key, name):
+        op = prod.get(key)
+        if op is None or op.opname != name:
+            return False
+        sh = shp[op.ins[0]]
+        return len(sh) == 2 and sh[0] % 64 == 0 and sh[1] % 64 == 0
+
+    is_reduce = lambda k: _reduce_src64(k, "sum")
+    is_max = lambda k: _reduce_src64(k, "max")
+
+    consumers = {}                                           # key -> list of consumer ops
+    for op in ops:
+        for k in op.ins:
+            consumers.setdefault(k, []).append(op)
+
+    layout = {}
+    for op in ops:
+        v = op.outn
+        layout[v] = "tile" if (is_mm64(v) or is_ew(v) or is_bcast(v) or is_transpose(v)
+                               or is_tslice(v) or is_concat64(v)) else "row"
+    for k in param_set | const_set:
+        layout.setdefault(k, "row")
+    tile_params = set()
+    if tile_inputs:                                          # activation input params fed pre-packed (A4 5d)
+        for op in ops:
+            if op.opname == "matmul" and op.ins[0] in param_set:
+                tile_params.add(op.ins[0])
+            elif op.opname in _EW_LAYOUT or op.opname == "sum":
+                tile_params |= {k for k in op.ins if k in param_set}
+        tile_params = {p for p in tile_params if _is64_2d(p)}
+        for p in tile_params:
+            layout[p] = "tile"
+    layout[out_name] = "row"
+    nodes = [op.outn for op in ops] + list(tile_params)
+
+    changed = True
+    while changed:
+        changed = False
+        for v in nodes:
+            if layout.get(v) != "tile":
+                continue
+            demote = (v == out_name)
+            op = prod.get(v)
+            if not demote and is_ew(v):                      # tile ew: every input tile (or scalar/packable const)
+                for k in op.ins:
+                    if k in const_set:
+                        csh = shp[k]; n = 1
+                        for dd in csh:
+                            n *= dd
+                        if n == 1 or (len(csh) == 2 and csh[0] % 64 == 0 and csh[1] % 64 == 0):
+                            continue                         # scalar (layout-agnostic) / 2D 64-mult (packed tile)
+                        demote = True; break
+                    if layout.get(k, "row") != "tile":
+                        demote = True; break
+            if not demote and (is_transpose(v) or is_tslice(v)):
+                if layout.get(op.ins[0], "row") != "tile":
+                    demote = True
+            if not demote and is_concat64(v):
+                if any(layout.get(k, "row") != "tile" for k in op.ins):
+                    demote = True
+            if not demote:
+                for cv in consumers.get(v, []):              # every consumer tile-compatible
+                    if cv.opname == "matmul" and cv.ins[0] == v and is_mm64(cv.outn):
+                        continue                             # read as A by a 64-mult matmul
+                    if cv.opname == "matmul" and cv.ins[1] == v and is_mm64(cv.outn):
+                        continue                             # read as B (tile activation / weight)
+                    if is_ew(cv.outn) and layout.get(cv.outn) == "tile":
+                        continue                             # feeds a tile elementwise
+                    if is_reduce(cv.outn) or is_max(cv.outn):
+                        continue                             # feeds a tile-native reduce (reads tile src)
+                    if (is_transpose(cv.outn) or is_tslice(cv.outn)) and layout.get(cv.outn) == "tile":
+                        continue
+                    if is_concat(cv.outn):
+                        continue                             # concat relayouts its tile inputs
+                    demote = True; break
+            if demote:
+                layout[v] = "row"; changed = True
+
+    # a 2D-64-mult CONSTANT feeding a tile elementwise must be stored tile-blocked too
+    # (else the layout-transparent ew reads a row-major const in tile order) — v1's
+    # alloc_const_tiled. Mark it tile so _plan_memory packs it (pack_tiled).
+    for op in ops:
+        if op.opname in _EW_LAYOUT and layout.get(op.outn) == "tile":
+            for k in op.ins:
+                if k in const_set and len(shp[k]) == 2 and shp[k][0] % 64 == 0 and shp[k][1] % 64 == 0:
+                    layout[k] = "tile"
+
+    packed_params = {}                                       # 64-mult matmul-weight params -> Nt (pre-packed B)
+    for op in ops:
+        if op.opname == "matmul" and op.ins[1] in param_set and _is64_2d(op.ins[1]):
+            packed_params[op.ins[1]] = shp[op.ins[1]][1] // 64
+    ok = {k: True for k in packed_params}                    # pack only if used EXCLUSIVELY as matmul B
+    for op in ops:
+        for i, k in enumerate(op.ins):
+            if k in ok and not (op.opname == "matmul" and i == 1):
+                ok[k] = False
+    packed_params = {k: nt for k, nt in packed_params.items() if ok[k]}
+    return layout, packed_params
+
+
+def _footprint(key, shp, layout):
+    return _memplan.tiled_numel(shp[key]) if layout.get(key) == "tile" else _numel(shp[key])
+
+
+def _plan_memory(params, ops, shp, const_arrs, out_name, layout, packed_params, reuse=True):
     """Pass M1: assign a flat G-buffer offset to every tensor.
 
     Params are all live at t=0 (host loads them up-front) and constants are materialized
@@ -545,11 +730,14 @@ def _plan_memory(params, ops, shp, const_arrs, out_name, reuse=True):
     A1 optimization for INTERMEDIATES: liveness (last read per tensor) + an exact-size
     free-list, so a tensor's slot is handed to a later same-size tensor once it's dead.
     Value-invariant (relocates data only) -> byte-exact vs reuse=False; only `top` shrinks.
-    Returns (off, top, const_inits, no_reuse_top)."""
+    Tile tensors get a tile-blocked footprint (tiled_numel, == numel for 64-mult dims);
+    tile elementwise-operand constants are stored pre-packed (pack_tiled). Returns
+    (off, top, const_inits, no_reuse_top, tiled_feed)."""
     off, top = {}, [0]
+    fp = lambda k: _footprint(k, shp, layout)
 
     def bump(nm):
-        off[nm] = top[0]; top[0] += _numel(shp[nm])
+        off[nm] = top[0]; top[0] += fp(nm)
 
     for p in params:
         bump(p)
@@ -561,10 +749,10 @@ def _plan_memory(params, ops, shp, const_arrs, out_name, reuse=True):
     for i, op in enumerate(ops):
         for k in op.ins:
             last_read[k] = i
-    no_reuse_top = top[0] + sum(_numel(shp[op.outn]) for op in ops)   # bump-only footprint
+    no_reuse_top = top[0] + sum(fp(op.outn) for op in ops)   # bump-only footprint
     free = {}                                                # footprint -> [freed offsets]
     for i, op in enumerate(ops):
-        sz = _numel(shp[op.outn])                            # allocate output BEFORE freeing
+        sz = fp(op.outn)                                     # allocate output BEFORE freeing
         lst = free.get(sz) if reuse else None                # inputs (no self-alias in one op)
         off[op.outn] = lst.pop() if lst else top[0]
         if not lst:
@@ -572,55 +760,82 @@ def _plan_memory(params, ops, shp, const_arrs, out_name, reuse=True):
         if reuse:
             for k in dict.fromkeys(op.ins):                  # dedup: free each dead input once
                 if last_read.get(k) == i and k not in keep:
-                    free.setdefault(_numel(shp[k]), []).append(off[k])
-    const_inits = [(off[k], const_arrs[k]) for k in const_keys]
-    return off, top[0], const_inits, no_reuse_top
+                    free.setdefault(fp(k), []).append(off[k])
+    const_inits = []                                         # tile ew-operand consts stored pre-packed
+    for k in const_keys:
+        arr = const_arrs[k]
+        if layout.get(k) == "tile":
+            arr = _memplan.pack_tiled(arr, 64)
+        const_inits.append((off[k], arr))
+    tiled_feed = set(packed_params) | {p for p in params if layout.get(p) == "tile"}
+    return off, top[0], const_inits, no_reuse_top, tiled_feed
 
 
-def _emit(ops, off, shp, top):
-    """Pass C1: lower each op to NPU ISA via the unified walker (markers) / v1 matmul.
-    `mp` supplies codegen-internal scratch above the planned `top`."""
+def _emit(ops, off, shp, top, layout, packed_params):
+    """Pass C1: lower each op to NPU ISA via the unified walker (markers) / v1 matmul,
+    routing to a ROW or TILE path per the layout map. `mp` supplies codegen-internal
+    scratch above the planned `top`."""
     mp = _memplan.MemPlan(); mp.top = top
     asm = Asm()
     _EW1_OPS = set(_EW1) | {"silu"}
+    lay = lambda k: layout.get(k, "row")
+    cnt = lambda k: _memplan.tiled_numel(shp[k]) if lay(k) == "tile" else _numel(shp[k])
     for op in ops:
         opname, ins, outn = op.opname, op.ins, op.outn
-        if opname == "matmul":                               # matmul -> v1 proven path
+        if opname == "matmul":                               # v1 matmul, tile flags per operand layout
             M, K = shp[ins[0]]; _, N = shp[ins[1]]
-            emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]], M, K, N)
-        elif opname in _EW2:                                 # binary elementwise -> marker
-            N = _numel(shp[outn])                            # operands must be full output size
-            assert _numel(shp[ins[0]]) == N and _numel(shp[ins[1]]) == N, \
-                f"v2 {opname}: broadcast operand (size != output) unsupported; legalize must materialize full-size"
-            walk_marker(asm, ew2_marker(opname, N), [off[ins[0]], off[ins[1]], off[outn]], mp)
-        elif opname in _EW1_OPS:                             # unary elementwise -> marker
-            N = _numel(shp[outn])
-            assert _numel(shp[ins[0]]) == N, f"v2 {opname}: operand size != output"
-            walk_marker(asm, ew1_marker(opname, N), [off[ins[0]], off[outn]], mp)
+            a_tiled = lay(ins[0]) == "tile"
+            c_tiled = lay(outn) == "tile"
+            b_pack_nt = (N // 64) if (lay(ins[1]) == "tile" or ins[1] in packed_params) else None
+            emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]], M, K, N,
+                             b_pack_nt=b_pack_nt, a_tiled=a_tiled, c_tiled=c_tiled)
+        elif opname in _EW2:                                 # binary elementwise (layout-transparent)
+            n = cnt(outn)
+            assert cnt(ins[0]) == n and cnt(ins[1]) == n, \
+                f"v2 {opname}: operand size != output ({cnt(ins[0])},{cnt(ins[1])} vs {n})"
+            walk_marker(asm, ew2_marker(opname, n), [off[ins[0]], off[ins[1]], off[outn]], mp)
+        elif opname in _EW1_OPS:                             # unary elementwise
+            n = cnt(outn)
+            assert cnt(ins[0]) == n, f"v2 {opname}: operand size != output"
+            walk_marker(asm, ew1_marker(opname, n), [off[ins[0]], off[outn]], mp)
         elif opname in ("sum", "max"):                       # reduce over LAST axis -> [R,1]
             assert len(shp[ins[0]]) == 2 and shp[outn][-1] == 1, \
                 f"v2 {opname}: only last-axis 2D reduce (keepdims), got {shp[ins[0]]}->{shp[outn]}"
             R, C = shp[ins[0]]
-            walk_marker(asm, reduce_marker("npu_rsum_row" if opname == "sum" else "npu_rmax_row",
-                                           R, C, R * C), [off[ins[0]], off[outn]], mp)
+            if lay(ins[0]) == "tile":                        # tile src: cross-tile fold (no 256 field limit)
+                intrin = "npu_rsum_tile" if opname == "sum" else "npu_rmax_tile"
+                srcn = _memplan.tiled_numel(shp[ins[0]])
+            else:
+                intrin = "npu_rsum_row" if opname == "sum" else "npu_rmax_row"
+                srcn = R * C
+            walk_marker(asm, reduce_marker(intrin, R, C, srcn), [off[ins[0]], off[outn]], mp)
         elif opname == "broadcast_to":                       # [R,1]->col or [1,C]->row (reject scalar/other)
             Rd, Cd = shp[outn]; si = list(shp[ins[0]]) + [1, 1]
             sr, sc = si[0], si[1]
             col = sc == 1 and sr == Rd
             row = sr == 1 and sc == Cd
             assert col or row, f"v2 broadcast_to: only [R,1]->[R,C] or [1,C]->[R,C], got {shp[ins[0]]}->{shp[outn]}"
-            walk_marker(asm, bcast_marker("npu_bcast_col" if col else "npu_bcast_row",
-                                          Rd, Cd, Rd if col else Cd), [off[ins[0]], off[outn]], mp)
+            if lay(outn) == "tile":                          # tile dst (softmax max/sum -> tile island)
+                intrin = "npu_bcast_col_tile" if col else "npu_bcast_row_tile"
+            else:
+                intrin = "npu_bcast_col" if col else "npu_bcast_row"
+            walk_marker(asm, bcast_marker(intrin, Rd, Cd, Rd if col else Cd), [off[ins[0]], off[outn]], mp)
         elif opname == "transpose":                          # permute_dims [1,0]: [R,C]->[C,R]
+            assert lay(ins[0]) != "tile" and lay(outn) != "tile", \
+                "v2 tile transpose not implemented (fixpoint keeps RoPE transpose row)"
             R, C = shp[ins[0]]
             walk_marker(asm, transpose_marker(R, C), [off[ins[0]], off[outn]], mp)
         elif opname == "strided_slice":                      # last-axis x[:, b:b+w] only
+            assert lay(outn) != "tile", \
+                "v2 tile strided_slice not implemented (RoPE half-slice is 32-wide, stays row)"
             R, C = shp[ins[0]]
             assert len(shp[outn]) == 2 and shp[outn][0] == R, \
                 f"v2 strided_slice: only last-axis (rows unchanged), got {shp[ins[0]]}->{shp[outn]}"
             w = shp[outn][1]
             walk_marker(asm, slice_marker(R, C, op.begin, w), [off[ins[0]], off[outn]], mp)
         elif opname == "concatenate":                        # last-axis concat -> place columns
+            assert lay(outn) != "tile" and all(lay(k) != "tile" for k in ins), \
+                "v2 tile concat not implemented (RoPE concat stays row)"
             Rd, Cd = shp[outn]; ccol = 0
             assert all(shp[ins[k]][0] == Rd for k in range(len(ins))), \
                 "v2 concatenate: only last-axis (all inputs share row count)"
@@ -633,16 +848,23 @@ def _emit(ops, off, shp, top):
     return asm
 
 
-def compile_module(mod, reuse=True):
+def compile_module(mod, reuse=True, tile=True):
     """Compile a `LegalizeOps`'d Relax IRModule ("main" = call_tir sequence) to NPU ISA
-    through an explicit 3-pass pipeline:
-      _parse   (F5-read) : legalized Relax -> ops + tensor table + constants
-      _plan_memory (M1)  : liveness + exact-size free-list -> offsets (A1 reuse)
-      _emit    (C1)      : unified TIR->ISA lowering (walker markers / v1 matmul)
-    reuse=False disables A1 (flat bump) — used to measure the reuse win.
+    through an explicit 4-pass pipeline:
+      _parse         (F5-read): legalized Relax -> ops + tensor table + constants
+      _assign_layouts (F4)    : row/tile per tensor + packed weights (A4 tile-blocked)
+      _plan_memory   (M1)     : liveness + exact-size free-list -> offsets (A1 reuse)
+      _emit          (C1)     : unified TIR->ISA lowering (row/tile per layout)
+    tile=False forces all-row (no A4); reuse=False disables A1 (flat bump).
 
-    Returns (asm, offsets{name->off}, shapes{name->shape}, top, out_name, const_inits)."""
+    Returns (asm, off, shp, top, out_name, const_inits, tiled_feed). tiled_feed = the set
+    of PARAM names whose fed data must be pre-packed tile-blocked (memplan.pack_tiled)."""
     params, ops, shp, const_arrs, out_name = _parse(mod)
-    off, top, const_inits, _ = _plan_memory(params, ops, shp, const_arrs, out_name, reuse)
-    asm = _emit(ops, off, shp, top)
-    return asm, off, shp, top, out_name, const_inits
+    if tile:
+        layout, packed_params = _assign_layouts(params, ops, shp, const_arrs, out_name)
+    else:
+        layout, packed_params = {}, {}                       # all-row (default row via .get)
+    off, top, const_inits, _, tiled_feed = _plan_memory(
+        params, ops, shp, const_arrs, out_name, layout, packed_params, reuse)
+    asm = _emit(ops, off, shp, top, layout, packed_params)
+    return asm, off, shp, top, out_name, const_inits, tiled_feed

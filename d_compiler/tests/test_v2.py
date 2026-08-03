@@ -15,6 +15,16 @@ from npu_compiler import v2_backend as v2, runtime, memplan
 
 _f16 = lambda a: np.asarray(a, np.float16)
 
+
+def _feed(gbuf, off, tiled_feed, items):
+    """Load named param arrays into the G-buffer, pre-packing tile-blocked params
+    (names in tiled_feed) with memplan.pack_tiled — mirrors v1 run_compiled host packing."""
+    for nm, arr in items:
+        if nm not in off:
+            continue
+        a = memplan.pack_tiled(np.asarray(arr), 64) if nm in tiled_feed else np.asarray(arr).reshape(-1)
+        gbuf[off[nm]:off[nm] + a.size] = np.asarray(a, np.float32).reshape(-1)
+
 # numpy semantics per marker op (for the numerical check)
 _NP2 = {"add": np.add, "subtract": np.subtract, "multiply": np.multiply, "divide": np.divide}
 _NP1 = {"sqrt": np.sqrt, "exp": np.exp, "negative": np.negative, "cos": np.cos, "sin": np.sin,
@@ -275,12 +285,11 @@ def test_v2_compile_pipeline():
             gv = bb.emit_output(y)
         bb.emit_func_output(gv)
     mod = relax.transform.LegalizeOps()(bb.finalize())
-    asm, off, shp, top, outn, _ = v2.compile_module(mod)
+    asm, off, shp, top, outn, _, tf = v2.compile_module(mod)
     rng = np.random.default_rng(7); g = lambda: _f16(rng.standard_normal((D, D)) * 0.1)
     X, W1, B, W2 = g(), g(), g(), g()
     gbuf = np.zeros(top + 20000, np.float32)
-    for nm, arr in [("x", X), ("w1", W1), ("b", B), ("w2", W2)]:
-        gbuf[off[nm]:off[nm] + D * D] = arr.reshape(-1)
+    _feed(gbuf, off, tf, [("x", X), ("w1", W1), ("b", B), ("w2", W2)])
     out = runtime.run(asm.words, gbuf, gn=top)[off[outn]:off[outn] + D * D].reshape(D, D)
     exp = (X.astype(np.float32) @ W1.astype(np.float32) + B.astype(np.float32)) @ W2.astype(np.float32)
     md = np.max(np.abs(out.astype(np.float32) - exp))
@@ -305,13 +314,12 @@ def test_v2_compile_swiglu():
             gv = bb.emit_output(y)
         bb.emit_func_output(gv)
     mod = relax.transform.LegalizeOps()(bb.finalize())
-    asm, off, shp, top, outn, _ = v2.compile_module(mod)
+    asm, off, shp, top, outn, _, tf = v2.compile_module(mod)
     rng = np.random.default_rng(9)
     X = _f16(rng.standard_normal((D, D)) * 0.1); WG = _f16(rng.standard_normal((D, F)) * 0.1)
     WU = _f16(rng.standard_normal((D, F)) * 0.1); WD = _f16(rng.standard_normal((F, D)) * 0.1)
     gbuf = np.zeros(top + 20000, np.float32)
-    for nm, arr in [("x", X), ("Wg", WG), ("Wu", WU), ("Wd", WD)]:
-        gbuf[off[nm]:off[nm] + arr.size] = arr.reshape(-1)
+    _feed(gbuf, off, tf, [("x", X), ("Wg", WG), ("Wu", WU), ("Wd", WD)])
     out = runtime.run(asm.words, gbuf, gn=top)[off[outn]:off[outn] + D * D].reshape(D, D)
     gate = X.astype(np.float32) @ WG.astype(np.float32)
     exp = ((gate / (1.0 + np.exp(-gate))) * (X.astype(np.float32) @ WU.astype(np.float32))) @ WD.astype(np.float32)
@@ -333,14 +341,13 @@ def test_v2_compile_rmsnorm():
             gv = bb.emit_output(legalize.rms_norm(bb, x, w, S, D, eps=eps))
         bb.emit_func_output(gv)
     mod = relax.transform.LegalizeOps()(bb.finalize())
-    asm, off, shp, top, outn, consts = v2.compile_module(mod)
+    asm, off, shp, top, outn, consts, tf = v2.compile_module(mod)
     rng = np.random.default_rng(11)
     X = _f16(rng.standard_normal((S, D))); W = _f16(rng.standard_normal((1, D)))
     gbuf = np.zeros(top + 20000, np.float32)
     for co, arr in consts:
         gbuf[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
-    gbuf[off["x"]:off["x"] + S * D] = X.reshape(-1)
-    gbuf[off["w"]:off["w"] + D] = W.reshape(-1)
+    _feed(gbuf, off, tf, [("x", X), ("w", W)])
     out = runtime.run(asm.words, gbuf, gn=top)[off[outn]:off[outn] + S * D].reshape(S, D)
     Xf = X.astype(np.float32); ms = np.mean(Xf ** 2, axis=1, keepdims=True) + eps
     exp = Xf / np.sqrt(ms) * W.astype(np.float32)
@@ -358,13 +365,11 @@ def test_v2_compile_full_layer():
     cos, sin, rot = model.rope_tables(cfg)
     W = model.make_weights(cfg, seed=7)
     mod = relax.transform.LegalizeOps()(model.build_layer_module(cfg))
-    asm, off, shp, top, outn, consts = v2.compile_module(mod)
+    asm, off, shp, top, outn, consts, tf = v2.compile_module(mod)
     gbuf = np.zeros(top + 50000, np.float32)
     for co, arr in consts:
         gbuf[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
-    for nm, arr in W.items():
-        if nm in off:
-            gbuf[off[nm]:off[nm] + np.asarray(arr).size] = np.asarray(arr, np.float32).reshape(-1)
+    _feed(gbuf, off, tf, list(W.items()))
     on = int(np.prod(shp[outn]))
     out = runtime.run(asm.words, gbuf, gn=top)[off[outn]:off[outn] + on]
     exp = np.asarray(model.ref_layer(cfg, W, cos, sin), np.float32).reshape(-1)
@@ -415,22 +420,79 @@ def test_v2_memory_reuse():
     mod = relax.transform.LegalizeOps()(model.build_layer_module(cfg))
 
     params, ops, shp, ca, outn = v2._parse(mod)
-    _, top0, _, _ = v2._plan_memory(params, ops, shp, ca, outn, reuse=False)
-    _, top1, _, _ = v2._plan_memory(params, ops, shp, ca, outn, reuse=True)
+    layout, packed = {}, {}                                   # all-row: isolate A1 (no A4)
+    _, top0, _, _, _ = v2._plan_memory(params, ops, shp, ca, outn, layout, packed, reuse=False)
+    _, top1, _, _, _ = v2._plan_memory(params, ops, shp, ca, outn, layout, packed, reuse=True)
     assert top1 < top0, f"A1 reuse did not shrink peak ({top1} !< {top0})"
 
     def run(reuse):
-        asm, off, shp_, top, on, consts = v2.compile_module(mod, reuse=reuse)
+        asm, off, shp_, top, on, consts, tf = v2.compile_module(mod, reuse=reuse, tile=False)
         g = np.zeros(top + 80000, np.float32)
         for co, arr in consts: g[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
-        for nm, arr in W.items():
-            if nm in off: g[off[nm]:off[nm] + np.asarray(arr).size] = np.asarray(arr, np.float32).reshape(-1)
+        _feed(g, off, tf, list(W.items()))
         n = int(np.prod(shp_[on]))
         return runtime.run(asm.words, g, gn=top)[off[on]:off[on] + n].copy()
 
     a, b = run(False), run(True)
     assert np.array_equal(a, b), "A1 reuse must be byte-exact vs flat bump"
     return f"M1 A1 reuse: peak {top0}->{top1} ({100*(top0-top1)/top0:.0f}% smaller), byte-exact"
+
+
+def _run_layer(cfg, tile):
+    """Compile a full layer for cfg and run it on mysim; return (rel-vs-ref_layer, #words)."""
+    from npu_compiler import model
+    cos, sin, rot = model.rope_tables(cfg); W = model.make_weights(cfg, seed=7)
+    mod = relax.transform.LegalizeOps()(model.build_layer_module(cfg))
+    asm, off, shp, top, outn, consts, tf = v2.compile_module(mod, tile=tile)
+    g = np.zeros(top + 200000, np.float32)
+    for co, arr in consts:
+        g[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
+    _feed(g, off, tf, list(W.items()))
+    on = int(np.prod(shp[outn]))
+    out = runtime.run(asm.words, g, gn=top)[off[outn]:off[outn] + on]
+    exp = np.asarray(model.ref_layer(cfg, W, cos, sin), np.float32).reshape(-1)
+    rel = float(np.max(np.abs(out.astype(np.float32) - exp))) / (float(np.max(np.abs(exp))) + 1e-9)
+    return rel, len(asm.words)
+
+
+def test_v2_a4_multitile():
+    """★ A4 tile-blocked layout on a MULTI-tile layer (SEQ=128 -> 2x2 score tiles, so
+    tile order != row order — MEDIUM's 64x64 single-tile case can't catch layout bugs).
+    Validates: tile=True is correct vs ref_layer AND vs the row path, and emits FEWER
+    instructions (gather/scatter elimination = the A4 benefit)."""
+    from npu_compiler import model
+    cfg = model.LayerConfig("s128", SEQ=128, D=128, H=2, KV=2, HD=64, F=256,
+                            eps=1e-5, rope_base=1e4, rope_scale=False)
+    # tile layout actually fires + weights get packed
+    mod = relax.transform.LegalizeOps()(model.build_layer_module(cfg))
+    params, ops, shp, ca, outn = v2._parse(mod)
+    lay, pk = v2._assign_layouts(params, ops, shp, ca, outn)
+    ntile = sum(1 for v in lay.values() if v == "tile")
+    assert ntile >= 10 and len(pk) >= 5, f"A4 did not engage (tile={ntile}, packed={len(pk)})"
+    rt, nr = _run_layer(cfg, tile=True)
+    rf, nf = _run_layer(cfg, tile=False)
+    assert rt < 0.05, f"A4 tile full layer wrong: rel={rt}"
+    assert nr < nf, f"A4 tile must emit fewer words (gather elim): {nr} !< {nf}"
+    return (f"A4 multi-tile SEQ128: tile rel={rt:.4f} == row rel={rf:.4f}, "
+            f"{nr}w vs {nf}w ({100*(nf-nr)//nf}% fewer, gather elim)")
+
+
+def test_v2_a4_unblocks_256():
+    """A4 unblocks SEQ>=256: the tile softmax reduce/matmul use only 16-bit vlen + 64-wide
+    tile fields (no 8-bit R/C wrap), so tile=True compiles+runs correctly where the row
+    path (tile=False) must AssertionError on the 8-bit reduce-max field."""
+    from npu_compiler import model
+    cfg = model.LayerConfig("s256", SEQ=256, D=128, H=2, KV=2, HD=64, F=256,
+                            eps=1e-5, rope_base=1e4, rope_scale=False)
+    rt, nr = _run_layer(cfg, tile=True)
+    assert rt < 0.05, f"A4 SEQ=256 wrong: rel={rt}"
+    row_failed = False
+    try:
+        _run_layer(cfg, tile=False)
+    except AssertionError:
+        row_failed = True
+    assert row_failed, "row path must reject SEQ>=256 (8-bit field), A4 must accept it"
+    return f"A4 unblocks SEQ=256: tile rel={rt:.4f} OK; row path AssertionError (8-bit field)"
 
 
 if __name__ == "__main__":
@@ -445,5 +507,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_compile_rmsnorm())
     print("[PASS]", test_v2_compile_full_layer())
     print("[PASS]", test_v2_memory_reuse())
+    print("[PASS]", test_v2_a4_multitile())
+    print("[PASS]", test_v2_a4_unblocks_256())
     print("[PASS]", test_v2_guards_reject_unsupported())
     print("ALL v2 (unified walker + REAL pipeline + v2.compile_module) TESTS PASSED")

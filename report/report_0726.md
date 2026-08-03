@@ -32,7 +32,7 @@
 | **1** | path-무관 안전 정리 | ⚪ 선택적/후순위 | layout·liveness는 이미 별도 함수 → ROI 낮음, 필요시만 |
 | **2** | NPU ISA→TIR intrinsic + `_Walker` 일반화 | 🟢 대부분 | matmul + elementwise + reduce + broadcast + transpose/slice/concat 전부 walker로 |
 | **3** | v2.compile() 파이프라인 조립 | 🟢 **완전한 레이어 컴파일** | `build_layer_module` → v2.compile_module → mysim, **ref_layer 대비 rel=0.0011** |
-| **3-R** | **compile_module 리팩토링 → 명시적 pass 파이프라인 + v1 최적화 이식** | 🟡 진행 | Stage 1 완료(파이프라인 분해 `_parse`/`_plan_memory`/`_emit` + **A1 liveness 재사용**, act −47~63%, byte-exact). Stage 2=A4 tile, Stage 3=fusion |
+| **3-R** | **compile_module 리팩토링 → 명시적 pass 파이프라인 + v1 최적화 이식** | 🟡 진행 | Stage 1 완료(A1 liveness, act −47~63%). **Stage 2a 완료(F4 layout fixpoint + A4 tile-blocked**: tile matmul/ew/broadcast/reduce + weight packing → 멀티-타일 −42~46% 명령어, **≥256 해금**). Stage 2b=default flip, Stage 3=fusion |
 | **3** | Relax 파이프라인 완성 + 메모리 TVM화 | ⚪ 대기 | — |
 | **4** | cost 기반 타깃 선택 (cycle 도착 후) | ⚪ 유보 | cost model 필요 |
 
@@ -61,6 +61,7 @@
 | V2-015 | resolved | 중 | broadcast_to `[1,1]` scalar 오분류 → source 초과 read. col=`sc==1 and sr==Rd` + valid assert | broadcast_to dispatch |
 | V2-016 | resolved | 소 | sum/max axis/rank 미검사 → non-last-axis 오답. last-axis 2D assert | sum/max dispatch |
 | V2-017 | open | 소 | strided_slice stride≠1 → contiguous 복사(v1 공유 한계). 현 경로 미사용 | later |
+| V2-018 | **resolved** | **높** | **tile ew의 2D-64-mult 상수가 packing 안 됨** → tile ew가 row-major 상수를 tile 순서로 read → 멀티-타일(≥128) 오답(rel≈1.0). 64×64(tile==row)에선 잠복. fixpoint 후 tile-ew 상수를 tile 마킹→`_plan_memory`가 pack_tiled. v1 `alloc_const_tiled` 대응 | `_assign_layouts` 상수 마킹 |
 
 > 이슈 V2-010~017은 **adversarial-review workflow(15 agents, 8 distinct 확정 버그)** 가 발견. 공통 원인: v2가 v1의 **guard(assert/CodegenError)와 tile-path fallback을 떨어뜨림** → 범위 밖 값이 silent 오답. **모두 guard 복원으로 loud-fail 처리**(≥256 진짜 지원은 tile-blocked 레이아웃 대기). 현 5-config(SEQ≤128 등)는 전부 안전, 검증 rel≤0.0043 유지.
 
@@ -106,6 +107,8 @@
 | 2026-07-26 | v1 코드 확인 (tir_backend.py:44-126) | 0/2 | **★ v1은 이미 tensorize matmul 컴파일러** — `npu_gemm_acc`/`npu_fill_zero` TensorIntrin 등록 + `schedule_matmul`(canonical recipe) + walker lowering, byte-exact. → Phase 2 "matmul tensorize" step 사실상 완료. 남은 건 non-matmul op 일반화 | tir_backend.py |
 | 2026-08-03 | **자기검토 — compile_module이 계획대로인가?** | 3-R | ❗ 진단: `compile_module`이 계획한 pass 파이프라인이 아니라 **모놀리식 op-dispatcher**(자체 bump 메모리·op별 손 marker·layout/fusion 패스 없음)로 흐름 = **v1 "복잡한 단일 pass" 재현**. v1 `plan()`의 A1/A4/packing을 **전혀 안 씀**. 사용자 지적 타당 → 리팩토링 착수 | — |
 | 2026-08-03 | **Stage 1 — 파이프라인 분해 + A1 메모리 재사용** | 3-R | ✅ `compile_module`을 3-pass로 분해: `_parse`(F5-read: legalized Relax→ops+tensor table+consts) → `_plan_memory`(M1: **liveness last-read + exact-size free-list**, params/consts/output persist) → `_emit`(C1: walker/matmul). **A1이 legalized 그래프에서 이식됨**(high-level op 이름 불필요). 측정: activation 영역 **−47~63%**(REDUCED 47.9·MEDIUM 63.2·GQA 50.0·wide 52.8·HD32 47.1%), reuse⟺bump **비트 동일 5/5**. gate GREEN, `test_v2_memory_reuse` 편입 | v2_backend.py(_Op/_parse/_plan_memory/_emit), test_v2.py |
+| 2026-08-03 | **A4 tile 기계장치 매핑 (workflow, 4 agents)** | 3-R | ✅ v1 tile-blocked 계약 exhaustive 매핑: `emit_matmul_into`(b_pack_nt/a_tiled/c_tiled/gather_cache 완전 tile-capable), walker `_bind_match` packed_src 공식, v1 codegen row/tile dispatch(2단계: op-name → `mp.layout.get`), runtime host packing, **실제 MEDIUM 레이어 layout 맵**(tile=softmax+SwiGLU 두 섬, 필요 tile 경로=matmul/ew/broadcast/reduce뿐). ≥256이 순수 row 아티팩트(8-bit 필드)임 확정 | workflow w4dr2kft5 |
+| 2026-08-03 | **Stage 2a — F4 layout pass + A4 tile-blocked** | 3-R | ✅ `_assign_layouts`(memplan.assign_layouts fixpoint를 legalized op list로 이식) + `_plan_memory` tile footprint/const packing + `_emit` tile 라우팅(matmul a/c_tiled·b_pack_nt, tile ew count, tile broadcast col/row, tile reduce) + weight packing(tiled_feed). **멀티-타일 검증**: SEQ128 tile=True rel==tile=False(0.0045), 명령어 **−42~46%**(gather/scatter 제거). **≥256 해금**: SEQ256 tile=True rel=0.011(정확), row는 AssertionError. gate GREEN | v2_backend.py, test_v2.py(a4_multitile/unblocks_256) |
 | 2026-07-26 | Probe C (codegen 일반화 평가) | 0 | **MEDIUM/GO** — walker가 이미 tensorized matmul TIR을 프로덕션 lower(O-proj group, byte-exact 검증). ~90% 재사용. 새 작업=cache stage(V2-003). 전략=fast-path 유지+walker fallback(V2-004). byte-exact는 schedule 변경 시 상실→tolerance(V2-005) | — |
 
 ---
@@ -119,6 +122,8 @@
 | 2026-07-27 | **v2.compile_module 완전한 레이어 (multi-config)** | v1 `ref_layer` 대비 rel<0.05 | ✅ **5/5 PASS**: REDUCED 0.0011 · MEDIUM 0.0012 · GQA(H4/KV2) 0.0009 · wide(D192/F384) 0.0043 · HD32 0.0024 |
 | 2026-07-27 | v2 adversarial 코드리뷰 (workflow, 15 agents) | 확인된 correctness 버그 | **8 distinct 버그 발견·전부 검증** → guard 복원으로 loud-fail 처리(V2-010~017). SEQ=256이 이제 silent 오답 대신 AssertionError |
 | 2026-08-03 | **Stage 1 리팩토링 — A1 메모리 재사용** | reuse⟺bump 비트 동일 + peak 감소 | ✅ **5/5 비트 동일**(REDUCED/MEDIUM/GQA/wide/HD32 maxdiff=0.0), activation −47~63%. 전체 gate GREEN(15/15+vendor byte-exact) |
+| 2026-08-03 | **Stage 2a A4 — 멀티-타일 + ≥256** | tile=True rel<0.05 vs ref_layer, tile<row 명령어 | ✅ SEQ128 D128 rel=0.0045(row 0.0045, 60080w vs 102894w) · SEQ128 D64 0.0012(19010w vs 35297w) · SEQ256 0.011(row=AssertionError). 개별 tile emitter 격리검증 8+4=all rel<0.001. 전체 gate GREEN | 
+| 2026-08-03 | **Stage 2a A4 — adversarial 리뷰** | 조합/레이아웃 miscompile | ⏳ 진행 예정 (const 버그 V2-018이 멀티-타일 테스트로만 잡힘 → workflow로 추가 사냥) |
 
 ---
 
