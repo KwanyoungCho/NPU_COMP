@@ -16,7 +16,7 @@ import tvm.tir as tir
 from tvm.script import tir as T
 
 from .isa import SRC1, SRC2, DST, IMM, VECTOR
-from .tir_backend import _Walker
+from .tir_backend import _Walker, TILE, TirBackendError
 
 CH = 8192  # PE-buffer chunk; matches codegen.emit_ew (16-bit vlen field)
 
@@ -28,6 +28,44 @@ _EW1 = {"sqrt": "v_sqrt", "exp": "v_exp", "negative": "v_sign_inv", "cos": "v_co
 class V2Walker(_Walker):
     """v1 `_Walker` + elementwise markers. Unknown markers fall through to v1
     (`npu_gemm_acc`/`npu_fill_zero`), so matmul lowering is unchanged."""
+
+    def _bind_match(self, mbr):
+        """N-D generalization of v1's 2D-only _bind_match: resolve a match_buffer view
+        over a root buffer to (base, elem_offset, leading-stride) for ANY rank (1D
+        elementwise, 2D matmul, ...). Keeps v1's packed_src (tile-blocked) / a_m1_src
+        special cases; the general branch is compact row-major over the region mins."""
+        src = mbr.source
+        sbuf = src.buffer
+        sdata = sbuf.data
+        if sdata not in self.base:
+            raise TirBackendError(f"match_buffer source not a root param: {sbuf.name}")
+        buf = mbr.buffer
+        bdata = buf.data
+        region = src.region
+        packed = self.packed_src.get(sdata)
+        if packed is not None:                                # 2D tile-blocked (matmul)
+            packed_base, Nt = packed
+            off = (self.ev(region[0].min) // TILE * Nt + self.ev(region[1].min) // TILE) * TILE * TILE
+            self.base[bdata] = packed_base; strd = TILE
+        elif sdata in self.a_m1_src:                          # 2D decode M=1
+            rs = int(sbuf.shape[1])
+            off = self.ev(region[0].min) * rs + self.ev(region[1].min)
+            self.base[bdata] = self.base[sdata]; strd = TILE
+        else:                                                 # general compact row-major, any rank
+            shape = [int(s) for s in sbuf.shape]
+            nd = len(region)
+            strides = [1] * nd
+            for k in range(nd - 2, -1, -1):
+                strides[k] = strides[k + 1] * shape[k + 1]
+            off = sum(self.ev(region[k].min) * strides[k] for k in range(nd))
+            self.base[bdata] = self.base[sdata]
+            strd = strides[0] if nd >= 2 else 1
+        eoff = buf.elem_offset
+        if isinstance(eoff, tir.Var):
+            self._bind(eoff, off)
+        bstrides = buf.strides
+        if len(bstrides) and isinstance(bstrides[0], tir.Var):
+            self._bind(bstrides[0], strd)
 
     def _intrinsic(self, call):
         if isinstance(call, tir.Call) and call.op.name == "tir.call_extern":
@@ -234,3 +272,52 @@ def walk_marker(asm, pf, offsets, mp=None):
         wk.base[pf.buffer_map[p].data] = off
     wk.walk(pf.body)
     wk.flush()
+
+
+# ==== REAL pipeline: native vector-op tensor intrinsics (tensorize legalized ew TIR) ====
+# desc = CH-elem compute (matches the legalized elementwise block); impl = the walker's
+# call_extern marker. Split the legalized loop by CH + tensorize -> the marker -> walker.
+@T.prim_func
+def _vadd_desc(a: T.handle, b: T.handle, c: T.handle):
+    A = T.match_buffer(a, (CH,), "float16", offset_factor=1)
+    B = T.match_buffer(b, (CH,), "float16", offset_factor=1)
+    C = T.match_buffer(c, (CH,), "float16", offset_factor=1)
+    with T.block("root"):
+        T.reads(A[0:CH], B[0:CH]); T.writes(C[0:CH])
+        for i in range(CH):
+            with T.block("u"):
+                vi = T.axis.remap("S", [i]); C[vi] = A[vi] + B[vi]
+
+
+@T.prim_func
+def _vadd_impl(a: T.handle, b: T.handle, c: T.handle):
+    sa = T.int32(); sb = T.int32(); sc = T.int32()
+    A = T.match_buffer(a, (CH,), "float16", strides=[sa], offset_factor=1)
+    B = T.match_buffer(b, (CH,), "float16", strides=[sb], offset_factor=1)
+    C = T.match_buffer(c, (CH,), "float16", strides=[sc], offset_factor=1)
+    with T.block("root"):
+        T.reads(A[0:CH], B[0:CH]); T.writes(C[0:CH])
+        T.evaluate(T.call_extern("int32", "npu_ew2_add",
+                                 C.access_ptr("w"), A.access_ptr("r"), B.access_ptr("r"), CH))
+
+
+def _register_v2():
+    try:
+        tir.TensorIntrin.register("npu_vadd", _vadd_desc, _vadd_impl)
+    except Exception:
+        pass
+
+
+_register_v2()
+
+
+def schedule_ew_binary(mod, func_name, block_name, intrin):
+    """Fuse the legalized elementwise loops, split by CH, tensorize the inner block to
+    a native vector intrinsic. Requires numel % CH == 0 (remainder handling = later)."""
+    sch = tir.Schedule(mod)
+    blk = sch.get_block(block_name, func_name=func_name)
+    loops = sch.get_loops(blk)
+    fused = sch.fuse(*loops) if len(loops) > 1 else loops[0]
+    _, ii = sch.split(fused, [None, CH])
+    sch.tensorize(ii, intrin)
+    return sch.mod

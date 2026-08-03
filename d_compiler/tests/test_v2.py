@@ -8,6 +8,8 @@ v1 stays the oracle; this proves the walker path reproduces it before we migrate
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
+import tvm.tir as tir
+from tvm import relax
 from npu_compiler.isa import Asm, SRC1, SRC2, DST, VECTOR
 from npu_compiler import v2_backend as v2, runtime, memplan
 
@@ -229,10 +231,39 @@ def test_native_primitives():
     return "native primitives: copy==identity + ttile==transpose (mysim)"
 
 
+def test_e2e_elementwise_real_pipeline():
+    """The REAL Path A flow (not a hand-built marker): Relax op -> LegalizeOps -> TIR ->
+    tir.Schedule tensorize(npu_vadd) -> V2Walker -> mysim == numpy."""
+    N = 2 * v2.CH
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", relax.TensorStructInfo([N], "float16"))
+    y = relax.Var("y", relax.TensorStructInfo([N], "float16"))
+    with bb.function("main", [x, y]):
+        with bb.dataflow():
+            z = bb.emit(relax.op.add(x, y)); gv = bb.emit_output(z)
+        bb.emit_func_output(gv)
+    mod = relax.transform.LegalizeOps()(bb.finalize())
+    fn = [g.name_hint for g in mod.functions if isinstance(mod[g], tir.PrimFunc)][0]
+    sch_mod = v2.schedule_ew_binary(mod, fn, "T_add", "npu_vadd")
+    pf = sch_mod[fn]
+    a2 = Asm(); wk = v2.V2Walker(a2, None, {})
+    for p, off in zip(pf.params, [0, N, 2 * N]):
+        wk.base[pf.buffer_map[p].data] = off
+    wk.walk(pf.body); wk.flush()
+    rng = np.random.default_rng(5)
+    X = _f16(rng.standard_normal(N)); Y = _f16(rng.standard_normal(N))
+    gbuf = np.zeros(3 * N, np.float32); gbuf[0:N] = X; gbuf[N:2 * N] = Y
+    out = runtime.run(a2.words, gbuf, gn=3 * N)[2 * N:3 * N]
+    exp = _f16(X.astype(np.float32) + Y.astype(np.float32))
+    assert np.array_equal(out.astype(np.float16), exp), "e2e add: mysim != numpy"
+    return "e2e elementwise: Relax add -> LegalizeOps -> tensorize -> walker -> mysim==numpy"
+
+
 if __name__ == "__main__":
     print("[PASS]", test_ew2_byte_exact_and_numeric())
     print("[PASS]", test_ew1_byte_exact_and_numeric())
     print("[PASS]", test_silu_byte_exact_and_numeric())
     print("[PASS]", test_reduce_byte_exact_and_numeric())
     print("[PASS]", test_native_primitives())
-    print("ALL v2 Phase 2-A (elementwise + reduce + native primitives) TESTS PASSED")
+    print("[PASS]", test_e2e_elementwise_real_pipeline())
+    print("ALL v2 (unified walker + REAL Relax->tensorize->walker pipeline) TESTS PASSED")
