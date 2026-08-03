@@ -651,8 +651,9 @@ def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
         tile_params = {p for p in tile_params if _is64_2d(p)}
         for p in tile_params:
             layout[p] = "tile"
-    layout[out_name] = "row"
-    nodes = [op.outn for op in ops] + list(tile_params)
+    if not _is64_2d(out_name):                               # Phase 4.1: a 64-mult 2D output can
+        layout[out_name] = "row"                             # STAY tile (host unpacks) so the whole
+    nodes = [op.outn for op in ops] + list(tile_params)      # residual stream stays tile -> proj gather=0
 
     changed = True
     while changed:
@@ -660,7 +661,7 @@ def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
         for v in nodes:
             if layout.get(v) != "tile":
                 continue
-            demote = (v == out_name)
+            demote = (v == out_name and not _is64_2d(out_name))  # 64-mult output may stay tile (host unpacks)
             op = prod.get(v)
             if not demote and is_ew(v):                      # tile ew: every input tile (or scalar/packable const)
                 for k in op.ins:
@@ -946,8 +947,10 @@ def compile_module(mod, reuse=True, tile=True, fuse=True):
       _emit            (C1)     : unified TIR->ISA lowering (row/tile per layout)
     tile=False forces all-row (no A4); reuse=False disables A1; fuse=False disables O-proj fusion.
 
-    Returns (asm, off, shp, top, out_name, const_inits, tiled_feed). tiled_feed = the set
-    of PARAM names whose fed data must be pre-packed tile-blocked (memplan.pack_tiled)."""
+    Returns (asm, off, shp, top, out_name, const_inits, tiled_feed, layout). tiled_feed =
+    PARAM names whose fed data must be pre-packed tile-blocked (memplan.pack_tiled); when
+    layout[out_name]=="tile" the OUTPUT is stored tile-blocked and the host unpacks it
+    (memplan.unpack_tiled) — this is what keeps the residual stream tile (proj gather=0)."""
     params, ops, shp, const_arrs, out_name = _parse(mod)
     if tile:
         layout, packed_params = _assign_layouts(params, ops, shp, const_arrs, out_name)
@@ -957,4 +960,4 @@ def compile_module(mod, reuse=True, tile=True, fuse=True):
     off, top, const_inits, _, tiled_feed = _plan_memory(
         params, ops, shp, const_arrs, out_name, layout, packed_params, fused_root, consumed, reuse)
     asm = _emit(ops, off, shp, top, layout, packed_params, fused_root, consumed)
-    return asm, off, shp, top, out_name, const_inits, tiled_feed
+    return asm, off, shp, top, out_name, const_inits, tiled_feed, layout
