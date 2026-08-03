@@ -129,6 +129,7 @@
 | 2026-08-03 | **v1 최적화 parity 감사 (workflow, 3 agents)** | v1 최적화 전수 ↔ v2 대조 | ✅ 40항목 코드 대조: 30 present·4 N/A·4 deferred·**1 missing=O-proj fusion**(H>1 적용, 앞선 N/A 오판 정정). → Stage 3 촉발 |
 | 2026-08-03 | **컴파일 속도 — 마커 PrimFunc 캐싱** | 3-R | ✅ 프로파일 결과 `_emit` 시간 절반이 op마다 `@T.prim_func` marker를 **TVMScript 재파싱**(366회). 마커 빌더 9개에 `lru_cache`(v1 `_scheduled_gemm`와 동일 발상, walk는 read-only라 공유 안전) → 재파싱 제거. **v2가 v1보다 1.5~2배 빨라짐**(MEDIUM 108→49ms, SEQ128 202→101ms, SEQ256H8 1163→754ms, HD128 619→331ms). 계획 리스크 #3(A2 회귀) 해소. gate GREEN | v2_backend.py 마커 빌더 |
 | 2026-08-03 | **Stage 3 — F3 O-proj fusion** | 3-R | ✅ `_detect_oproj_groups`(v1 codegen 이식) + `_plan_memory` **fusion-aware liveness**(folded 노드 미할당, leaf 입력을 group root에서 read) + `_emit` `emit_matmul_accumulate_group`. H개 per-head matmul→1 in-place group(H scatter→1). 검증: fuse rel==nofuse(H1~H8, 모두 <0.05 vs ref_layer), 명령어 −3%(H2)/−10%(H4)/−19%(H8), 실 Llama H=24는 더 큼. `test_v2_oproj_fusion` 편입, gate GREEN | v2_backend.py, test_v2.py |
+| 2026-08-03 | **Stage 3 — adversarial 리뷰 (workflow, 5 finder ~240 config)** | fusion liveness/detection miscompile | ✅ **correctness 버그 0건**(liveness byte-exact 14·non-64 30·GQA/tile 76·static 20 전부 통과). low 1건=multi-use 내부노드 add-tree missed-fusion(오답 아님, v1 `used_by_cand` 동일 로직, 실 레이어 미발생) → 조치 불필요 | workflow w90kh3erx |
 
 ---
 
