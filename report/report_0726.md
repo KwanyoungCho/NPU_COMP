@@ -105,4 +105,10 @@
 
 | 커밋 | 내용 |
 |---|---|
-| (this) | v2 setup — COMPILER_V2_PLAN.md + report_0726.md, compiler-v2 branch |
+| `8e75fe3` | v2 setup — COMPILER_V2_PLAN.md + report_0726.md, compiler-v2 branch |
+| `63f2fa2` | Phase 0 GO — 3 probe(tensorize/memory/codegen) 통과, TVM 0.19.0 |
+| `12c349c` | Phase 2-A.1 — elementwise 8종 → 통합 walker (byte-exact + mysim) |
+| `71f1098` | Phase 2-A.2 — reduce(rsum/rmax × row/tile) → 통합 walker |
+| `dc154fa` | **course-correct** — thin native-ISA 매핑 + copy/ttile primitive (v1 워크어라운드 안 옮김) |
+| `10c5942` | 레이아웃 spike — tile-blocked = Relax layout_transform 확정, fork→(ii) |
+| `cea3547` | **★ REAL 파이프라인 e2e** — Relax→LegalizeOps→tensorize→walker→mysim + `_bind_match` N-D |
