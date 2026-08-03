@@ -72,6 +72,11 @@ class _Info:
 
 def _emit_pack(bb, e, shape):
     if _is_full(shape):
+        if isinstance(e, relax.Constant):                      # host-pack the constant (free):
+            from . import memplan                              # emit it already tile-blocked, so
+            arr = np.asarray(e.data.numpy())                   # no on-device layout_transform is
+            packed = memplan.pack_tiled(arr, T).reshape(_t4(shape))  # needed to pack it (like weights)
+            return relax.const(packed, str(e.struct_info.dtype))
         return bb.emit(layout_transform(e, index_map=_PACK))
     return bb.emit(reshape(e, relax.ShapeExpr(_t4(shape))))     # vector: contiguous reshape
 
