@@ -421,8 +421,9 @@ def test_v2_memory_reuse():
 
     params, ops, shp, ca, outn = v2._parse(mod)
     layout, packed = {}, {}                                   # all-row: isolate A1 (no A4)
-    _, top0, _, _, _ = v2._plan_memory(params, ops, shp, ca, outn, layout, packed, reuse=False)
-    _, top1, _, _, _ = v2._plan_memory(params, ops, shp, ca, outn, layout, packed, reuse=True)
+    fr, cons = {}, set()                                      # no fusion: isolate A1
+    _, top0, _, _, _ = v2._plan_memory(params, ops, shp, ca, outn, layout, packed, fr, cons, reuse=False)
+    _, top1, _, _, _ = v2._plan_memory(params, ops, shp, ca, outn, layout, packed, fr, cons, reuse=True)
     assert top1 < top0, f"A1 reuse did not shrink peak ({top1} !< {top0})"
 
     def run(reuse):
@@ -438,12 +439,12 @@ def test_v2_memory_reuse():
     return f"M1 A1 reuse: peak {top0}->{top1} ({100*(top0-top1)/top0:.0f}% smaller), byte-exact"
 
 
-def _run_layer(cfg, tile):
+def _run_layer(cfg, tile, fuse=True):
     """Compile a full layer for cfg and run it on mysim; return (rel-vs-ref_layer, #words)."""
     from npu_compiler import model
     cos, sin, rot = model.rope_tables(cfg); W = model.make_weights(cfg, seed=7)
     mod = relax.transform.LegalizeOps()(model.build_layer_module(cfg))
-    asm, off, shp, top, outn, consts, tf = v2.compile_module(mod, tile=tile)
+    asm, off, shp, top, outn, consts, tf = v2.compile_module(mod, tile=tile, fuse=fuse)
     g = np.zeros(top + 200000, np.float32)
     for co, arr in consts:
         g[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
@@ -475,6 +476,27 @@ def test_v2_a4_multitile():
     assert nr < nf, f"A4 tile must emit fewer words (gather elim): {nr} !< {nf}"
     return (f"A4 multi-tile SEQ128: tile rel={rt:.4f} == row rel={rf:.4f}, "
             f"{nr}w vs {nf}w ({100*(nf-nr)//nf}% fewer, gather elim)")
+
+
+def test_v2_oproj_fusion():
+    """★ F3 O-proj fusion: build_layer_module emits attn = sum_h (ctx_h @ Wo_h) as H
+    same-shape matmuls + an add-tree. v2 fuses them into ONE in-place accumulate group
+    (emit_matmul_accumulate_group) — H scatters -> 1. Validates: a group is detected,
+    fuse=True is correct vs ref_layer AND vs fuse=False, and emits fewer instructions."""
+    from npu_compiler import model
+    cfg = model.LayerConfig("h8", SEQ=128, D=512, H=8, KV=2, HD=64, F=512,
+                            eps=1e-5, rope_base=1e4, rope_scale=False)
+    mod = relax.transform.LegalizeOps()(model.build_layer_module(cfg))
+    params, ops, shp, ca, outn = v2._parse(mod)
+    fr, cons = v2._detect_oproj_groups(ops, shp)
+    assert len(fr) == 1 and sum(len(v) for v in fr.values()) == 8, \
+        f"expected 1 O-proj group over 8 heads, got {fr}"
+    rT, nT = _run_layer(cfg, tile=True, fuse=True)
+    rF, nF = _run_layer(cfg, tile=True, fuse=False)
+    assert rT < 0.05, f"fused O-proj wrong: rel={rT}"
+    assert abs(rT - rF) < 5e-3, f"fuse must match no-fuse: {rT} vs {rF}"
+    assert nT < nF, f"fusion must emit fewer words (H scatters -> 1): {nT} !< {nF}"
+    return f"F3 O-proj fusion (H=8): rel={rT:.4f} (~no-fuse {rF:.4f}), {nF}->{nT}w ({100*(nF-nT)//nF}% fewer)"
 
 
 def test_v2_a4_hd128_real_head_dim():
@@ -525,6 +547,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_compile_full_layer())
     print("[PASS]", test_v2_memory_reuse())
     print("[PASS]", test_v2_a4_multitile())
+    print("[PASS]", test_v2_oproj_fusion())
     print("[PASS]", test_v2_a4_hd128_real_head_dim())
     print("[PASS]", test_v2_a4_unblocks_256())
     print("[PASS]", test_v2_guards_reject_unsupported())

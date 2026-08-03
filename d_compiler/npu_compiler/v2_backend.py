@@ -17,7 +17,7 @@ from tvm.script import tir as T
 from tvm import relax as _relax
 
 from .isa import SRC1, SRC2, DST, IMM, VECTOR, Asm
-from .tir_backend import _Walker, TILE, TirBackendError, emit_matmul_into
+from .tir_backend import _Walker, TILE, TirBackendError, emit_matmul_into, emit_matmul_accumulate_group
 from . import memplan as _memplan
 
 CH = 8192  # PE-buffer chunk; matches codegen.emit_ew (16-bit vlen field)
@@ -699,11 +699,74 @@ def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
     return layout, packed_params
 
 
+def _detect_oproj_groups(ops, shp):
+    """Pass F3 (fusion): find maximal add-trees whose leaves are all same-shape 64-mult
+    matmuls — the per-head O-projection attn = sum_h (ctx_h @ Wo_h). Port of v1
+    codegen._detect_oproj_groups to the v2 op list. Returns (fused_root{root_key ->
+    [leaf matmul keys in fold order]}, consumed{every key folded away: tree adds + leaves}).
+    Only fuses when each folded node is single-use, so skipping its emit is safe (the root
+    var is still produced, now by one in-place accumulate group instead of H scatters)."""
+    prod = {op.outn: op for op in ops}
+    uses = {}
+    for op in ops:
+        for k in op.ins:
+            uses[k] = uses.get(k, 0) + 1
+
+    def _op(key, opn):
+        op = prod.get(key)
+        return op if (op is not None and op.opname == opn) else None
+
+    def _leaves(key, shape):
+        ad = _op(key, "add")
+        if ad is not None:
+            l = _leaves(ad.ins[0], shape); r = _leaves(ad.ins[1], shape)
+            return None if (l is None or r is None) else (l + r)
+        mm = _op(key, "matmul")
+        return [key] if (mm is not None and tuple(shp[key]) == shape) else None
+
+    def _legal_term(key):                                   # leaf matmul with 64-mult K, N
+        mm = prod[key]
+        return shp[mm.ins[0]][1] % 64 == 0 and shp[mm.ins[1]][1] % 64 == 0
+
+    cand = {}
+    for op in ops:
+        if op.opname != "add":
+            continue
+        shape = tuple(shp[op.outn])
+        lv = _leaves(op.outn, shape)
+        if lv is not None and len(lv) >= 2 and all(_legal_term(x) for x in lv):
+            cand[op.outn] = lv
+    used_by_cand = set()
+    for v in cand:
+        ad = prod[v]
+        for ar in (ad.ins[0], ad.ins[1]):
+            if ar in cand:
+                used_by_cand.add(ar)
+    fused_root, consumed = {}, set()
+    for v, leaves in cand.items():
+        if v in used_by_cand:                               # not the maximal root
+            continue
+        nodes, stack, ok = set(), [v], True
+        while stack:                                        # collect tree adds + leaves
+            x = stack.pop(); nodes.add(x)
+            ad = _op(x, "add")
+            if ad is not None:
+                stack += [ad.ins[0], ad.ins[1]]
+        for x in nodes:                                     # every folded node except root single-use
+            if x != v and uses.get(x, 0) != 1:
+                ok = False; break
+        if ok:
+            fused_root[v] = leaves
+            consumed |= nodes
+    return fused_root, consumed
+
+
 def _footprint(key, shp, layout):
     return _memplan.tiled_numel(shp[key]) if layout.get(key) == "tile" else _numel(shp[key])
 
 
-def _plan_memory(params, ops, shp, const_arrs, out_name, layout, packed_params, reuse=True):
+def _plan_memory(params, ops, shp, const_arrs, out_name, layout, packed_params,
+                 fused_root, consumed, reuse=True):
     """Pass M1: assign a flat G-buffer offset to every tensor.
 
     Params are all live at t=0 (host loads them up-front) and constants are materialized
@@ -712,10 +775,15 @@ def _plan_memory(params, ops, shp, const_arrs, out_name, layout, packed_params, 
     free-list, so a tensor's slot is handed to a later same-size tensor once it's dead.
     Value-invariant (relocates data only) -> byte-exact vs reuse=False; only `top` shrinks.
     Tile tensors get a tile-blocked footprint (tiled_numel, == numel for 64-mult dims);
-    tile elementwise-operand constants are stored pre-packed (pack_tiled). Returns
+    tile elementwise-operand constants are stored pre-packed (pack_tiled).
+
+    Fusion-aware (F3): an O-proj group's folded nodes (leaf matmuls + tree adds, except the
+    root) are NOT materialized (no slot); the group reads every leaf's inputs (ctx_h, Wo_h)
+    at the ROOT emit position, so those inputs stay live until the group is emitted. Returns
     (off, top, const_inits, no_reuse_top, tiled_feed)."""
     off, top = {}, [0]
     fp = lambda k: _footprint(k, shp, layout)
+    prod = {op.outn: op for op in ops}
 
     def bump(nm):
         off[nm] = top[0]; top[0] += fp(nm)
@@ -726,20 +794,33 @@ def _plan_memory(params, ops, shp, const_arrs, out_name, layout, packed_params, 
     for k in const_keys:
         bump(k)
     keep = set(params) | set(const_keys) | {out_name}        # never freed (persist / output)
-    last_read = {}                                            # last op index reading each tensor
-    for i, op in enumerate(ops):
-        for k in op.ins:
+    # emission steps: (produced_key, [read_keys]) skipping folded non-root nodes; a group
+    # root produces the summed result and reads every leaf matmul's A,B at its position.
+    steps = []
+    for op in ops:
+        if op.outn in consumed and op.outn not in fused_root:
+            continue                                         # folded away -> not materialized
+        if op.outn in fused_root:
+            reads = []
+            for leaf in fused_root[op.outn]:
+                reads += [prod[leaf].ins[0], prod[leaf].ins[1]]
+            steps.append((op.outn, reads))
+        else:
+            steps.append((op.outn, list(op.ins)))
+    last_read = {}                                           # last emit step reading each tensor
+    for i, (_, reads) in enumerate(steps):
+        for k in reads:
             last_read[k] = i
-    no_reuse_top = top[0] + sum(fp(op.outn) for op in ops)   # bump-only footprint
+    no_reuse_top = top[0] + sum(fp(pk) for pk, _ in steps)   # bump-only footprint
     free = {}                                                # footprint -> [freed offsets]
-    for i, op in enumerate(ops):
-        sz = fp(op.outn)                                     # allocate output BEFORE freeing
-        lst = free.get(sz) if reuse else None                # inputs (no self-alias in one op)
-        off[op.outn] = lst.pop() if lst else top[0]
+    for i, (pk, reads) in enumerate(steps):
+        sz = fp(pk)                                          # allocate output BEFORE freeing
+        lst = free.get(sz) if reuse else None                # inputs (no self-alias in one step)
+        off[pk] = lst.pop() if lst else top[0]
         if not lst:
             top[0] += sz
         if reuse:
-            for k in dict.fromkeys(op.ins):                  # dedup: free each dead input once
+            for k in dict.fromkeys(reads):                   # dedup: free each dead input once
                 if last_read.get(k) == i and k not in keep:
                     free.setdefault(fp(k), []).append(off[k])
     const_inits = []                                         # tile ew-operand consts stored pre-packed
@@ -752,17 +833,33 @@ def _plan_memory(params, ops, shp, const_arrs, out_name, layout, packed_params, 
     return off, top[0], const_inits, no_reuse_top, tiled_feed
 
 
-def _emit(ops, off, shp, top, layout, packed_params):
+def _emit(ops, off, shp, top, layout, packed_params, fused_root, consumed):
     """Pass C1: lower each op to NPU ISA via the unified walker (markers) / v1 matmul,
-    routing to a ROW or TILE path per the layout map. `mp` supplies codegen-internal
-    scratch above the planned `top`."""
+    routing to a ROW or TILE path per the layout map. An O-proj group (F3) is emitted once
+    at its root as an in-place accumulate group; its folded nodes are skipped. `mp` supplies
+    codegen-internal scratch above the planned `top`."""
     mp = _memplan.MemPlan(); mp.top = top
     asm = Asm()
+    prod = {op.outn: op for op in ops}
     _EW1_OPS = set(_EW1) | {"silu"}
     lay = lambda k: layout.get(k, "row")
     cnt = lambda k: _memplan.tiled_numel(shp[k]) if lay(k) == "tile" else _numel(shp[k])
     for op in ops:
         opname, ins, outn = op.opname, op.ins, op.outn
+        if outn in consumed and outn not in fused_root:      # folded into an O-proj group
+            continue
+        if outn in fused_root:                               # emit the per-head O-proj as ONE group
+            terms = []                                       # (a_off, b_off, M, K, N, b_pack_nt, a_tiled)
+            for leaf in fused_root[outn]:
+                A, B = prod[leaf].ins[0], prod[leaf].ins[1]
+                M, K = shp[A]; _, N = shp[B]
+                a_tiled = (K // 64) if (lay(A) == "tile" and M % 64 == 0 and K % 64 == 0) else None
+                nt = (N // 64) if (lay(B) == "tile" or B in packed_params) else None
+                terms.append((off[A], off[B], M, K, N, nt, a_tiled))
+            M, N = terms[0][2], terms[0][4]
+            c_tiled = (N // 64) if (lay(outn) == "tile" and M % 64 == 0 and N % 64 == 0) else None
+            emit_matmul_accumulate_group(asm, mp, off[outn], terms, c_tiled=c_tiled)
+            continue
         if opname == "matmul":                               # v1 matmul, tile flags per operand layout
             M, K = shp[ins[0]]; _, N = shp[ins[1]]
             a_tiled = lay(ins[0]) == "tile"
@@ -829,14 +926,15 @@ def _emit(ops, off, shp, top, layout, packed_params):
     return asm
 
 
-def compile_module(mod, reuse=True, tile=True):
+def compile_module(mod, reuse=True, tile=True, fuse=True):
     """Compile a `LegalizeOps`'d Relax IRModule ("main" = call_tir sequence) to NPU ISA
-    through an explicit 4-pass pipeline:
-      _parse         (F5-read): legalized Relax -> ops + tensor table + constants
-      _assign_layouts (F4)    : row/tile per tensor + packed weights (A4 tile-blocked)
-      _plan_memory   (M1)     : liveness + exact-size free-list -> offsets (A1 reuse)
-      _emit          (C1)     : unified TIR->ISA lowering (row/tile per layout)
-    tile=False forces all-row (no A4); reuse=False disables A1 (flat bump).
+    through an explicit 5-pass pipeline:
+      _parse           (F5-read): legalized Relax -> ops + tensor table + constants
+      _assign_layouts   (F4)    : row/tile per tensor + packed weights (A4 tile-blocked)
+      _detect_oproj_groups (F3) : per-head O-proj add-tree -> one accumulate group
+      _plan_memory     (M1)     : liveness (fusion-aware) + exact-size free-list -> offsets (A1)
+      _emit            (C1)     : unified TIR->ISA lowering (row/tile per layout)
+    tile=False forces all-row (no A4); reuse=False disables A1; fuse=False disables O-proj fusion.
 
     Returns (asm, off, shp, top, out_name, const_inits, tiled_feed). tiled_feed = the set
     of PARAM names whose fed data must be pre-packed tile-blocked (memplan.pack_tiled)."""
@@ -845,7 +943,8 @@ def compile_module(mod, reuse=True, tile=True):
         layout, packed_params = _assign_layouts(params, ops, shp, const_arrs, out_name)
     else:
         layout, packed_params = {}, {}                       # all-row (default row via .get)
+    fused_root, consumed = _detect_oproj_groups(ops, shp) if fuse else ({}, set())
     off, top, const_inits, _, tiled_feed = _plan_memory(
-        params, ops, shp, const_arrs, out_name, layout, packed_params, reuse)
-    asm = _emit(ops, off, shp, top, layout, packed_params)
+        params, ops, shp, const_arrs, out_name, layout, packed_params, fused_root, consumed, reuse)
+    asm = _emit(ops, off, shp, top, layout, packed_params, fused_root, consumed)
     return asm, off, shp, top, out_name, const_inits, tiled_feed
