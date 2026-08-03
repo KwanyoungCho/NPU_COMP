@@ -1050,24 +1050,49 @@ def compile_module(mod, reuse=True, tile=True, fuse=True):
 # Path: build_layer_module -> packed._build_packed (Relax IRModule->IRModule) -> LegalizeOps
 # -> parse -> op-FAMILY dispatch -> ISA. Layout lives in the 4D shape + explicit
 # layout_transform ops (not a side-channel dict); every conversion is an in-graph copy.
-def _plan_memory_packed(params, ops, shp, const_arrs, out_name):
-    """Bump-allocate the packed module. A `reshape` is a contiguous re-view -> it ALIASES
-    its input's offset (no copy, no new slot). Constants are fed row-major (the graph's
-    layout_transform ops pack them on-device), so const_inits carry the raw arrays."""
+def _plan_memory_packed(params, ops, shp, const_arrs, out_name, reuse=True):
+    """M1 for the packed module. A `reshape` is a contiguous re-view -> it ALIASES its
+    input's offset (no copy, no new slot). Constants are fed row-major (the graph's
+    layout_transform ops pack them on-device). reuse=True is the A1 liveness free-list:
+    reads/frees are resolved through reshape aliases so a tensor's slot is only reused after
+    its last read (direct or via any reshape view). Value-invariant -> byte-exact vs bump."""
     off, top = {}, [0]
+    fp = lambda k: _numel(shp[k])
 
     def bump(nm):
-        off[nm] = top[0]; top[0] += _numel(shp[nm])
+        off[nm] = top[0]; top[0] += fp(nm)
 
     for p in params:
         bump(p)
     for k in const_arrs:
         bump(k)
-    for op in ops:
+    keep = set(params) | set(const_arrs) | {out_name}
+    root = {op.outn: op.ins[0] for op in ops if op.opname == "reshape"}   # reshape -> source
+
+    def rootof(k):
+        while k in root:
+            k = root[k]
+        return k
+
+    steps = [op for op in ops if op.opname != "reshape"]     # reshape not emitted/allocated
+    last_read = {}                                           # last emit step reading each root
+    for i, op in enumerate(steps):
+        for k in op.ins:
+            last_read[rootof(k)] = i
+    free = {}
+    for i, op in enumerate(steps):
+        sz = fp(op.outn)
+        lst = free.get(sz) if reuse else None
+        off[op.outn] = lst.pop() if lst else top[0]
+        if not lst:
+            top[0] += sz
+        if reuse:
+            for k in dict.fromkeys(rootof(x) for x in op.ins):
+                if last_read.get(k) == i and k not in keep and k not in root:
+                    free.setdefault(fp(k), []).append(off[k])
+    for op in ops:                                           # reshape views alias their root's slot
         if op.opname == "reshape":
-            off[op.outn] = off[op.ins[0]]                    # contiguous reshape -> alias
-        else:
-            bump(op.outn)
+            off[op.outn] = off[rootof(op.ins[0])]
     const_inits = [(off[k], const_arrs[k]) for k in const_arrs]
     return off, top[0], const_inits
 
