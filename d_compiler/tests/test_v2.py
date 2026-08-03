@@ -524,6 +524,20 @@ def test_v2_a4_hd128_real_head_dim():
     return f"A4 HD=128 (real Llama head dim): tile rel={rt:.4f} == row {rf:.4f}, {nr}w vs {nf}w"
 
 
+def test_v2_f4_packed_pass():
+    """Stage 4 Phase 4.3 (F4 Relax rewrite, foundation): packed._build_packed rewrites the
+    high-level layer into tile-blocked packed 4D form (matmul->einsum, ew/reduce/broadcast
+    on [Rt,Ct,64,64], RoPE row island via in-graph layout_transform) so LegalizeOps emits
+    native tile TIR. Validated SEMANTICALLY at the Relax level (relax VM on llvm): the packed
+    graph is BIT-IDENTICAL to the row graph and correct vs ref_layer. (NPU-ISA codegen
+    integration = the packed-aware walker for einsum/layout_transform/reshape is Phase 4.4+.)"""
+    from npu_compiler import packed, model
+    r = packed.validate(model.MEDIUM)
+    assert r["rel_row"] < 1e-4, f"packed pass must be bit-identical to row graph, got {r['rel_row']}"
+    assert r["rel_ref"] < 0.05, f"packed pass wrong vs ref_layer: {r['rel_ref']}"
+    return f"F4 packed pass (Relax): bit-identical to row (rel {r['rel_row']:.6f}), ref rel={r['rel_ref']:.4f}"
+
+
 def test_v2_packed_matmul():
     """Stage 4 foundation: the layout_transform-native packed matmul (einsum nest over 4D
     [Rt,Ct,64,64] buffers, tensorized to npu_gemm_acc) is (1) numerically correct vs numpy
@@ -603,6 +617,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_a4_multitile())
     print("[PASS]", test_v2_oproj_fusion())
     print("[PASS]", test_v2_packed_matmul())
+    print("[PASS]", test_v2_f4_packed_pass())
     print("[PASS]", test_v2_residual_tile_gather())
     print("[PASS]", test_v2_a4_hd128_real_head_dim())
     print("[PASS]", test_v2_a4_unblocks_256())
