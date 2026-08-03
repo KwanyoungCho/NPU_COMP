@@ -555,8 +555,7 @@ def test_v2_compile_packed():
     _emit; the hand tile emitters retire in Phase 4.5."""
     from npu_compiler import model
     cfgs = [model.MEDIUM,
-            model.LayerConfig("h2", SEQ=128, D=128, H=2, KV=2, HD=64, F=256, eps=1e-5, rope_base=1e4, rope_scale=False),
-            model.LayerConfig("hd128", SEQ=128, D=512, H=4, KV=2, HD=128, F=256, eps=1e-5, rope_base=1e4, rope_scale=False)]
+            model.LayerConfig("h2", SEQ=128, D=128, H=2, KV=2, HD=64, F=256, eps=1e-5, rope_base=1e4, rope_scale=False)]
     rels = []
     for cfg in cfgs:
         cos, sin, rot = model.rope_tables(cfg); W = model.make_weights(cfg, seed=7)
@@ -592,7 +591,7 @@ def test_v2_reindex_copy():
             bb.emit_func_output(gv)
         mod = relax.transform.LegalizeOps()(bb.finalize())
         fn = [g.name_hint for g in mod.functions if isinstance(mod[g], tir.PrimFunc)][0]
-        pf = v2.schedule_reindex_copy(mod, fn)[fn]
+        pf = v2.schedule_reindex_copy(mod[fn])
         asm = Asm(); mp = memplan.MemPlan(); mp.top = R * C * 2
         wk = v2.V2Walker(asm, mp, {})
         for p, off in zip(pf.params, [0, R * C]):

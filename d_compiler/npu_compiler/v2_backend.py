@@ -536,15 +536,25 @@ def _register_v2():
 _register_v2()
 
 
-def schedule_reindex_copy(mod, func_name):
+_reindex_cache = {}                                          # (param shapes) -> scheduled PrimFunc
+
+
+def schedule_reindex_copy(pf):
     """Lower a legalized layout_transform/reshape copy PrimFunc: split its last (contiguous)
     axis by 64 and tensorize to npu_copy64 -> the walker emits native npu_copy. Model-agnostic:
-    any reindex copy whose innermost run is a 64-multiple works (the pack/unpack boundary)."""
-    sch = tir.Schedule(mod)
-    blk = sch.get_block(_first_block(mod[func_name]), func_name=func_name)
+    any reindex copy whose innermost run is a 64-multiple works (the pack/unpack boundary).
+    Schedules ONE func (not the whole module), and caches by the buffer-shape signature (the
+    walk is read-only, so same-shape copies reuse one scheduled PrimFunc — like the markers)."""
+    key = tuple(tuple(int(d) for d in pf.buffer_map[p].shape) for p in pf.params)
+    hit = _reindex_cache.get(key)
+    if hit is not None:
+        return hit
+    sch = tir.Schedule(pf)
+    blk = sch.get_block(_first_block(pf))
     _, ii = sch.split(sch.get_loops(blk)[-1], [None, 64])
     sch.tensorize(ii, "npu_copy64")
-    return sch.mod
+    _reindex_cache[key] = sch.mod["main"]
+    return _reindex_cache[key]
 
 
 def schedule_ew_binary(mod, func_name, block_name, intrin):
@@ -1112,8 +1122,7 @@ def _emit_packed(mod, ops, off, shp, top):
             Mt, Kt = shp[ins[0]][0], shp[ins[0]][1]; Nt = shp[ins[1]][1]
             emit_packed_matmul(asm, mp, off[outn], off[ins[0]], off[ins[1]], Mt, Kt, Nt)
         elif opname == "te_layout_transform":               # pack/unpack reindex copy
-            pf = schedule_reindex_copy(mod, op.gvar)[op.gvar]
-            walk_marker(asm, pf, [off[ins[0]], off[outn]], mp)
+            walk_marker(asm, schedule_reindex_copy(mod[op.gvar]), [off[ins[0]], off[outn]], mp)
         elif opname in _EW2:                                 # ew (any rank): count = numel
             n = _numel(shp[outn])
             walk_marker(asm, ew2_marker(opname, n), [off[ins[0]], off[ins[1]], off[outn]], mp)
