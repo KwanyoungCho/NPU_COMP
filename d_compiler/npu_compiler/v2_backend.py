@@ -918,8 +918,12 @@ def _emit(ops, off, shp, top, layout, packed_params, fused_root, consumed):
             a_tiled = lay(ins[0]) == "tile"
             c_tiled = lay(outn) == "tile"
             b_pack_nt = (N // 64) if (lay(ins[1]) == "tile" or ins[1] in packed_params) else None
-            emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]], M, K, N,
-                             b_pack_nt=b_pack_nt, a_tiled=a_tiled, c_tiled=c_tiled)
+            if (a_tiled and c_tiled and b_pack_nt and M % 64 == 0 and K % 64 == 0 and N % 64 == 0):
+                emit_packed_matmul(asm, mp, off[outn], off[ins[0]], off[ins[1]],  # fully tile-blocked
+                                   M // 64, K // 64, N // 64)                     # -> layout-native nest
+            else:                                            # mixed row/tile operands (RoPE-adjacent)
+                emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]], M, K, N,
+                                 b_pack_nt=b_pack_nt, a_tiled=a_tiled, c_tiled=c_tiled)
         elif opname in _EW2:                                 # binary elementwise (layout-transparent)
             n = cnt(outn)
             assert cnt(ins[0]) == n and cnt(ins[1]) == n, \
