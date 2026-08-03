@@ -1044,3 +1044,105 @@ def compile_module(mod, reuse=True, tile=True, fuse=True):
         params, ops, shp, const_arrs, out_name, layout, packed_params, fused_root, consumed, reuse)
     asm = _emit(ops, off, shp, top, layout, packed_params, fused_root, consumed)
     return asm, off, shp, top, out_name, const_inits, tiled_feed, layout
+
+
+# ==== layout_transform-native (packed) codegen (Stage 4 IR->IR) =========================
+# Path: build_layer_module -> packed._build_packed (Relax IRModule->IRModule) -> LegalizeOps
+# -> parse -> op-FAMILY dispatch -> ISA. Layout lives in the 4D shape + explicit
+# layout_transform ops (not a side-channel dict); every conversion is an in-graph copy.
+def _plan_memory_packed(params, ops, shp, const_arrs, out_name):
+    """Bump-allocate the packed module. A `reshape` is a contiguous re-view -> it ALIASES
+    its input's offset (no copy, no new slot). Constants are fed row-major (the graph's
+    layout_transform ops pack them on-device), so const_inits carry the raw arrays."""
+    off, top = {}, [0]
+
+    def bump(nm):
+        off[nm] = top[0]; top[0] += _numel(shp[nm])
+
+    for p in params:
+        bump(p)
+    for k in const_arrs:
+        bump(k)
+    for op in ops:
+        if op.opname == "reshape":
+            off[op.outn] = off[op.ins[0]]                    # contiguous reshape -> alias
+        else:
+            bump(op.outn)
+    const_inits = [(off[k], const_arrs[k]) for k in const_arrs]
+    return off, top[0], const_inits
+
+
+def _emit_packed(mod, ops, off, shp, top):
+    """C1 for the packed graph: dispatch each op-family to its existing lowering. Shape RANK
+    selects tile vs row (4D [Rt,Ct,64,64] packed vs 2D row island). Reuses emit_packed_matmul
+    (einsum), the walker markers (ew/reduce/broadcast), schedule_reindex_copy (layout_transform)."""
+    mp = _memplan.MemPlan(); mp.top = top
+    asm = Asm()
+    _EW1_OPS = set(_EW1) | {"silu"}
+    for op in ops:
+        opname, ins, outn = op.opname, op.ins, op.outn
+        if opname == "reshape":
+            continue                                         # aliased in _plan_memory_packed
+        elif opname == "einsum":                             # packed matmul A[Mt,Kt]@B[Kt,Nt]
+            Mt, Kt = shp[ins[0]][0], shp[ins[0]][1]; Nt = shp[ins[1]][1]
+            emit_packed_matmul(asm, mp, off[outn], off[ins[0]], off[ins[1]], Mt, Kt, Nt)
+        elif opname == "te_layout_transform":               # pack/unpack reindex copy
+            pf = schedule_reindex_copy(mod, op.gvar)[op.gvar]
+            walk_marker(asm, pf, [off[ins[0]], off[outn]], mp)
+        elif opname in _EW2:                                 # ew (any rank): count = numel
+            n = _numel(shp[outn])
+            walk_marker(asm, ew2_marker(opname, n), [off[ins[0]], off[ins[1]], off[outn]], mp)
+        elif opname in _EW1_OPS:
+            n = _numel(shp[outn])
+            walk_marker(asm, ew1_marker(opname, n), [off[ins[0]], off[outn]], mp)
+        elif opname in ("sum", "max"):
+            s = shp[ins[0]]
+            if len(s) == 4:                                  # packed reduce (cross-tile fold)
+                R, C = s[0] * 64, s[1] * 64
+                intrin = "npu_rsum_tile" if opname == "sum" else "npu_rmax_tile"
+                walk_marker(asm, reduce_marker(intrin, R, C, _numel(s)), [off[ins[0]], off[outn]], mp)
+            else:                                            # 2D row reduce
+                R, C = s
+                intrin = "npu_rsum_row" if opname == "sum" else "npu_rmax_row"
+                walk_marker(asm, reduce_marker(intrin, R, C, R * C), [off[ins[0]], off[outn]], mp)
+        elif opname == "broadcast_to":
+            d = shp[outn]
+            if len(d) == 4:                                  # packed broadcast
+                R, C = d[0] * 64, d[1] * 64
+                col = shp[ins[0]][3] == 1                    # src [Rt,1,64,1] col (inner j=1) vs [1,Ct,1,64] row (inner i=1)
+                intrin = "npu_bcast_col_tile" if col else "npu_bcast_row_tile"
+                walk_marker(asm, bcast_marker(intrin, R, C, R if col else C), [off[ins[0]], off[outn]], mp)
+            else:                                            # 2D row broadcast
+                Rd, Cd = d; si = list(shp[ins[0]]) + [1, 1]
+                col = si[1] == 1 and si[0] == Rd
+                intrin = "npu_bcast_col" if col else "npu_bcast_row"
+                walk_marker(asm, bcast_marker(intrin, Rd, Cd, Rd if col else Cd), [off[ins[0]], off[outn]], mp)
+        elif opname == "transpose":                          # 2D row (RoPE Kt)
+            R, C = shp[ins[0]]
+            walk_marker(asm, transpose_marker(R, C), [off[ins[0]], off[outn]], mp)
+        elif opname == "strided_slice":                      # 2D row (RoPE half)
+            R, C = shp[ins[0]]; w = shp[outn][1]
+            walk_marker(asm, slice_marker(R, C, op.begin, w), [off[ins[0]], off[outn]], mp)
+        elif opname == "concatenate":                        # 2D row (RoPE)
+            Rd, Cd = shp[outn]; ccol = 0
+            for k in range(len(ins)):
+                Rk, Ck = shp[ins[k]]
+                walk_marker(asm, colplace_marker(Rk, Ck, Cd, ccol), [off[ins[k]], off[outn]], mp)
+                ccol += Ck
+        else:
+            raise TirBackendError(f"compile_packed: op '{opname}' not handled")
+    return asm
+
+
+def compile_packed(mod):
+    """Compile a HIGH-LEVEL layer Relax module (build_layer_module output) through the
+    layout_transform-native path: packed._build_packed (Relax IR->IR) -> LegalizeOps ->
+    _parse -> _plan_memory_packed -> _emit_packed -> NPU ISA. Params/output are ROW (the
+    in-graph layout_transform ops do all packing on-device), so the host feeds/reads raw.
+    Returns (asm, off, shp, top, out_name, const_inits)."""
+    from . import packed as _packed
+    leg = _relax.transform.LegalizeOps()(_packed._build_packed(mod))
+    params, ops, shp, const_arrs, out_name = _parse(leg)
+    off, top, const_inits = _plan_memory_packed(params, ops, shp, const_arrs, out_name)
+    asm = _emit_packed(leg, ops, off, shp, top)
+    return asm, off, shp, top, out_name, const_inits

@@ -524,6 +524,36 @@ def test_v2_a4_hd128_real_head_dim():
     return f"A4 HD=128 (real Llama head dim): tile rel={rt:.4f} == row {rf:.4f}, {nr}w vs {nf}w"
 
 
+def test_v2_compile_packed():
+    """★ Stage 4 IR->IR: the layout_transform-native packed path compiles a FULL layer to NPU
+    ISA correctly. packed._build_packed (Relax IRModule->IRModule) -> LegalizeOps -> op-FAMILY
+    dispatch (einsum->emit_packed_matmul, 4D ew/reduce/broadcast->markers, layout_transform->
+    npu_copy64) -> mysim. Params/output are ROW (in-graph layout_transform packs on-device),
+    so the host feeds/reads raw. This is the model-agnostic codegen that replaces the op-list
+    _emit; the hand tile emitters retire in Phase 4.5."""
+    from npu_compiler import model
+    cfgs = [model.MEDIUM,
+            model.LayerConfig("h2", SEQ=128, D=128, H=2, KV=2, HD=64, F=256, eps=1e-5, rope_base=1e4, rope_scale=False),
+            model.LayerConfig("hd128", SEQ=128, D=512, H=4, KV=2, HD=128, F=256, eps=1e-5, rope_base=1e4, rope_scale=False)]
+    rels = []
+    for cfg in cfgs:
+        cos, sin, rot = model.rope_tables(cfg); W = model.make_weights(cfg, seed=7)
+        asm, off, shp, top, outn, consts = v2.compile_packed(model.build_layer_module(cfg))
+        g = np.zeros(top + 300000, np.float32)
+        for co, arr in consts:
+            g[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
+        for nm, arr in W.items():
+            if nm in off:
+                g[off[nm]:off[nm] + np.asarray(arr).size] = np.asarray(arr, np.float32).reshape(-1)
+        R, C = shp[outn]
+        out = runtime.run(asm.words, g, gn=top)[off[outn]:off[outn] + R * C]
+        exp = np.asarray(model.ref_layer(cfg, W, cos, sin), np.float32).reshape(-1)
+        rel = float(np.max(np.abs(out.astype(np.float32) - exp))) / (float(np.max(np.abs(exp))) + 1e-9)
+        assert rel < 0.05, f"compile_packed {cfg.name}: rel={rel}"
+        rels.append(rel)
+    return f"Stage 4 IR->IR compile_packed FULL LAYER (layout_transform-native): rels={[f'{r:.4f}' for r in rels]}"
+
+
 def test_v2_reindex_copy():
     """Stage 4 codegen primitive: a legalized layout_transform / reshape (the pack/unpack
     boundary of the layout_transform-native path) lowers via schedule_reindex_copy
@@ -647,6 +677,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_a4_multitile())
     print("[PASS]", test_v2_oproj_fusion())
     print("[PASS]", test_v2_packed_matmul())
+    print("[PASS]", test_v2_compile_packed())
     print("[PASS]", test_v2_reindex_copy())
     print("[PASS]", test_v2_f4_packed_pass())
     print("[PASS]", test_v2_residual_tile_gather())
