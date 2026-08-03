@@ -14,9 +14,11 @@ where N is the element count (walker chunks it to the PE buffer, exactly like em
 """
 import tvm.tir as tir
 from tvm.script import tir as T
+from tvm import relax as _relax
 
-from .isa import SRC1, SRC2, DST, IMM, VECTOR
-from .tir_backend import _Walker, TILE, TirBackendError
+from .isa import SRC1, SRC2, DST, IMM, VECTOR, Asm
+from .tir_backend import _Walker, TILE, TirBackendError, emit_matmul_into
+from . import memplan as _memplan
 
 CH = 8192  # PE-buffer chunk; matches codegen.emit_ew (16-bit vlen field)
 
@@ -321,3 +323,67 @@ def schedule_ew_binary(mod, func_name, block_name, intrin):
     _, ii = sch.split(fused, [None, CH])
     sch.tensorize(ii, intrin)
     return sch.mod
+
+
+# ==== v2 compile orchestration: legalized Relax IRModule -> NPU ISA ====
+def _numel(sh):
+    n = 1
+    for d in sh:
+        n *= d
+    return n
+
+
+def _first_block(pf):
+    """Name of the first non-root TIR block (the op's compute block)."""
+    names = []
+    tir.stmt_functor.post_order_visit(
+        pf.body, lambda s: names.append(s.name_hint)
+        if isinstance(s, tir.Block) and s.name_hint != "root" else None)
+    return names[0]
+
+
+def compile_module(mod):
+    """Compile a `LegalizeOps`'d Relax IRModule ("main" = call_tir sequence) to NPU ISA.
+
+    Dispatch per op: matmul -> v1 emit_matmul_into (the tensorize-derived canonical GEMM);
+    binary elementwise -> the unified walker marker (contiguous, layout-transparent).
+    Bump-allocates the flat G-buffer (params + every intermediate). This is the working
+    v2 pipeline core; TVM memory reuse (StaticPlanBlockMemory) and more ops come next.
+
+    Returns (asm, offsets{name->off}, shapes{name->shape}, top, out_name)."""
+    main = mod["main"]
+    off, shp, top = {}, {}, [0]
+
+    def alloc(nm, sh):
+        off[nm] = top[0]; shp[nm] = sh; top[0] += _numel(sh)
+
+    for p in main.params:
+        alloc(p.name_hint, [int(d) for d in p.struct_info.shape])
+    binds = [bd for blk in main.body.blocks for bd in blk.bindings
+             if isinstance(bd.value, _relax.Call)
+             and getattr(bd.value.op, "name", "") == "relax.call_tir"]
+    for bd in binds:
+        alloc(bd.var.name_hint, [int(d) for d in bd.var.struct_info.shape])
+
+    mp = _memplan.MemPlan(); mp.top = top[0]
+    asm = Asm()
+    for bd in binds:
+        val = bd.value
+        gvar = val.args[0].name_hint
+        ins = [a.name_hint for a in val.args[1].fields]
+        outn = bd.var.name_hint
+        cb = _first_block(mod[gvar])
+        if cb == "matmul":                                   # matmul -> v1 proven path
+            M, K = shp[ins[0]]; _, N = shp[ins[1]]
+            emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]], M, K, N)
+        elif cb.startswith("T_") and cb[2:] in _EW2:         # binary elementwise -> marker
+            walk_marker(asm, ew2_marker(cb[2:], _numel(shp[outn])),
+                        [off[ins[0]], off[ins[1]], off[outn]], mp)
+        else:
+            raise TirBackendError(f"v2.compile_module: op block '{cb}' not handled yet")
+
+    out = main.body.body                                     # resolve returned var thru aliases
+    val_of = {bd.var: bd.value for blk in main.body.blocks for bd in blk.bindings}
+    while isinstance(val_of.get(out), _relax.Var):
+        out = val_of[out]
+    return asm, off, shp, top[0], out.name_hint

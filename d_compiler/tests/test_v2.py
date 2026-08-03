@@ -259,6 +259,35 @@ def test_e2e_elementwise_real_pipeline():
     return "e2e elementwise: Relax add -> LegalizeOps -> tensorize -> walker -> mysim==numpy"
 
 
+def test_v2_compile_pipeline():
+    """v2.compile_module: a legalized Relax multi-op module -> NPU ISA -> mysim == numpy(tol).
+    y = (x @ w1 + b) @ w2  (matmul -> add -> matmul; intermediates flow through the G-buffer)."""
+    D = 128
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", relax.TensorStructInfo([D, D], "float16"))
+    w1 = relax.Var("w1", relax.TensorStructInfo([D, D], "float16"))
+    b = relax.Var("b", relax.TensorStructInfo([D, D], "float16"))
+    w2 = relax.Var("w2", relax.TensorStructInfo([D, D], "float16"))
+    with bb.function("main", [x, w1, b, w2]):
+        with bb.dataflow():
+            h = bb.emit(relax.op.add(bb.emit(relax.op.matmul(x, w1)), b))
+            y = bb.emit(relax.op.matmul(h, w2))
+            gv = bb.emit_output(y)
+        bb.emit_func_output(gv)
+    mod = relax.transform.LegalizeOps()(bb.finalize())
+    asm, off, shp, top, outn = v2.compile_module(mod)
+    rng = np.random.default_rng(7); g = lambda: _f16(rng.standard_normal((D, D)) * 0.1)
+    X, W1, B, W2 = g(), g(), g(), g()
+    gbuf = np.zeros(top + 20000, np.float32)
+    for nm, arr in [("x", X), ("w1", W1), ("b", B), ("w2", W2)]:
+        gbuf[off[nm]:off[nm] + D * D] = arr.reshape(-1)
+    out = runtime.run(asm.words, gbuf, gn=top)[off[outn]:off[outn] + D * D].reshape(D, D)
+    exp = (X.astype(np.float32) @ W1.astype(np.float32) + B.astype(np.float32)) @ W2.astype(np.float32)
+    md = np.max(np.abs(out.astype(np.float32) - exp))
+    assert md < 0.5 * np.max(np.abs(exp)) + 0.5, f"v2.compile: maxdiff={md}"
+    return f"v2.compile_module: (x@w1+b)@w2 -> mysim==numpy (tol, maxdiff={md:.3f})"
+
+
 if __name__ == "__main__":
     print("[PASS]", test_ew2_byte_exact_and_numeric())
     print("[PASS]", test_ew1_byte_exact_and_numeric())
@@ -266,4 +295,5 @@ if __name__ == "__main__":
     print("[PASS]", test_reduce_byte_exact_and_numeric())
     print("[PASS]", test_native_primitives())
     print("[PASS]", test_e2e_elementwise_real_pipeline())
-    print("ALL v2 (unified walker + REAL Relax->tensorize->walker pipeline) TESTS PASSED")
+    print("[PASS]", test_v2_compile_pipeline())
+    print("ALL v2 (unified walker + REAL pipeline + v2.compile_module) TESTS PASSED")
