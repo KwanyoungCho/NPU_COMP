@@ -12,6 +12,7 @@ Marker convention (the "already-lowered" legalization of an op):
   silu:       call_extern("npu_silu",     C_ptr, A_ptr, N)
 where N is the element count (walker chunks it to the PE buffer, exactly like emit_ew).
 """
+import functools
 import tvm.tir as tir
 from tvm.script import tir as T
 from tvm import relax as _relax
@@ -325,6 +326,7 @@ class V2Walker(_Walker):
 
 
 # ---- marker PrimFunc builders (stand-ins for Phase-3 legalization) ----
+@functools.lru_cache(maxsize=None)
 def ew2_marker(op, N):
     intrin = "npu_ew2_" + op
 
@@ -340,6 +342,7 @@ def ew2_marker(op, N):
     return f
 
 
+@functools.lru_cache(maxsize=None)
 def ew1_marker(op, N):
     intrin = "npu_silu" if op == "silu" else "npu_ew1_" + op
 
@@ -353,6 +356,7 @@ def ew1_marker(op, N):
     return f
 
 
+@functools.lru_cache(maxsize=None)
 def copy_marker(n):
     @T.prim_func
     def f(x0: T.handle, y: T.handle):
@@ -364,6 +368,7 @@ def copy_marker(n):
     return f
 
 
+@functools.lru_cache(maxsize=None)
 def ttile_marker():
     @T.prim_func
     def f(x0: T.handle, y: T.handle):
@@ -375,6 +380,7 @@ def ttile_marker():
     return f
 
 
+@functools.lru_cache(maxsize=None)
 def reduce_marker(intrin, R, C, src_numel):
     @T.prim_func
     def f(s: T.handle, d: T.handle):
@@ -386,6 +392,7 @@ def reduce_marker(intrin, R, C, src_numel):
     return f
 
 
+@functools.lru_cache(maxsize=None)
 def bcast_marker(intrin, Rd, Cd, src_numel):
     @T.prim_func
     def f(s: T.handle, d: T.handle):
@@ -397,6 +404,7 @@ def bcast_marker(intrin, Rd, Cd, src_numel):
     return f
 
 
+@functools.lru_cache(maxsize=None)
 def transpose_marker(R, C):
     @T.prim_func
     def f(s: T.handle, d: T.handle):
@@ -408,6 +416,7 @@ def transpose_marker(R, C):
     return f
 
 
+@functools.lru_cache(maxsize=None)
 def slice_marker(R, C, b, w):
     @T.prim_func
     def f(s: T.handle, d: T.handle):
@@ -420,6 +429,7 @@ def slice_marker(R, C, b, w):
     return f
 
 
+@functools.lru_cache(maxsize=None)
 def colplace_marker(R, Cs, Cd, col):
     @T.prim_func
     def f(s: T.handle, d: T.handle):
