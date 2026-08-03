@@ -288,6 +288,38 @@ def test_v2_compile_pipeline():
     return f"v2.compile_module: (x@w1+b)@w2 -> mysim==numpy (tol, maxdiff={md:.3f})"
 
 
+def test_v2_compile_swiglu():
+    """v2.compile_module on a SwiGLU FFN: y = (silu(x@Wg) * (x@Wu)) @ Wd.
+    Exercises unary (silu) + binary (mul) elementwise + a 2-stage matmul chain."""
+    D, F = 128, 256
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", relax.TensorStructInfo([D, D], "float16"))
+    Wg = relax.Var("Wg", relax.TensorStructInfo([D, F], "float16"))
+    Wu = relax.Var("Wu", relax.TensorStructInfo([D, F], "float16"))
+    Wd = relax.Var("Wd", relax.TensorStructInfo([F, D], "float16"))
+    with bb.function("main", [x, Wg, Wu, Wd]):
+        with bb.dataflow():
+            g = bb.emit(relax.op.nn.silu(bb.emit(relax.op.matmul(x, Wg))))
+            u = bb.emit(relax.op.matmul(x, Wu))
+            y = bb.emit(relax.op.matmul(bb.emit(relax.op.multiply(g, u)), Wd))
+            gv = bb.emit_output(y)
+        bb.emit_func_output(gv)
+    mod = relax.transform.LegalizeOps()(bb.finalize())
+    asm, off, shp, top, outn = v2.compile_module(mod)
+    rng = np.random.default_rng(9)
+    X = _f16(rng.standard_normal((D, D)) * 0.1); WG = _f16(rng.standard_normal((D, F)) * 0.1)
+    WU = _f16(rng.standard_normal((D, F)) * 0.1); WD = _f16(rng.standard_normal((F, D)) * 0.1)
+    gbuf = np.zeros(top + 20000, np.float32)
+    for nm, arr in [("x", X), ("Wg", WG), ("Wu", WU), ("Wd", WD)]:
+        gbuf[off[nm]:off[nm] + arr.size] = arr.reshape(-1)
+    out = runtime.run(asm.words, gbuf, gn=top)[off[outn]:off[outn] + D * D].reshape(D, D)
+    gate = X.astype(np.float32) @ WG.astype(np.float32)
+    exp = ((gate / (1.0 + np.exp(-gate))) * (X.astype(np.float32) @ WU.astype(np.float32))) @ WD.astype(np.float32)
+    md = np.max(np.abs(out.astype(np.float32) - exp))
+    assert md < 0.05 * np.max(np.abs(exp)) + 0.5, f"swiglu maxdiff={md}"
+    return f"v2.compile_module SwiGLU FFN -> mysim==numpy (tol, maxdiff={md:.3f})"
+
+
 if __name__ == "__main__":
     print("[PASS]", test_ew2_byte_exact_and_numeric())
     print("[PASS]", test_ew1_byte_exact_and_numeric())
@@ -296,4 +328,5 @@ if __name__ == "__main__":
     print("[PASS]", test_native_primitives())
     print("[PASS]", test_e2e_elementwise_real_pipeline())
     print("[PASS]", test_v2_compile_pipeline())
+    print("[PASS]", test_v2_compile_swiglu())
     print("ALL v2 (unified walker + REAL pipeline + v2.compile_module) TESTS PASSED")

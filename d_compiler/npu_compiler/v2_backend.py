@@ -367,20 +367,24 @@ def compile_module(mod):
 
     mp = _memplan.MemPlan(); mp.top = top[0]
     asm = Asm()
+    _EW1_OPS = set(_EW1) | {"silu"}
     for bd in binds:
         val = bd.value
         gvar = val.args[0].name_hint
+        opname = gvar.rstrip("0123456789")                   # "matmul1" -> "matmul"
         ins = [a.name_hint for a in val.args[1].fields]
         outn = bd.var.name_hint
-        cb = _first_block(mod[gvar])
-        if cb == "matmul":                                   # matmul -> v1 proven path
+        if opname == "matmul":                               # matmul -> v1 proven path
             M, K = shp[ins[0]]; _, N = shp[ins[1]]
             emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]], M, K, N)
-        elif cb.startswith("T_") and cb[2:] in _EW2:         # binary elementwise -> marker
-            walk_marker(asm, ew2_marker(cb[2:], _numel(shp[outn])),
+        elif opname in _EW2:                                 # binary elementwise -> marker
+            walk_marker(asm, ew2_marker(opname, _numel(shp[outn])),
                         [off[ins[0]], off[ins[1]], off[outn]], mp)
+        elif opname in _EW1_OPS:                             # unary elementwise -> marker
+            walk_marker(asm, ew1_marker(opname, _numel(shp[outn])),
+                        [off[ins[0]], off[outn]], mp)
         else:
-            raise TirBackendError(f"v2.compile_module: op block '{cb}' not handled yet")
+            raise TirBackendError(f"v2.compile_module: op '{opname}' not handled yet")
 
     out = main.body.body                                     # resolve returned var thru aliases
     val_of = {bd.var: bd.value for blk in main.body.blocks for bd in blk.bindings}
