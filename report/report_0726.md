@@ -101,7 +101,10 @@
 
 | 날짜 | 대상 | 기준 | 결과 |
 |---|---|---|---|
-| — | (Phase별 DoD) | gate/tolerance | — |
+| 2026-07-27 | v2 op별(elementwise/reduce/primitive) | v1 ISA byte-exact + mysim | ✅ 통과 |
+| 2026-07-27 | v2.compile_module 서브그래프(matmul chain, SwiGLU, RMSNorm) | mysim==numpy tolerance | ✅ maxdiff≤0.008 |
+| 2026-07-27 | **v2.compile_module 완전한 레이어 (multi-config)** | v1 `ref_layer` 대비 rel<0.05 | ✅ **5/5 PASS**: REDUCED 0.0011 · MEDIUM 0.0012 · GQA(H4/KV2) 0.0009 · wide(D192/F384) 0.0043 · HD32 0.0024 |
+| 2026-07-27 | v2 adversarial 코드리뷰 (workflow) | 확인된 correctness 버그 | (진행) |
 
 ---
 
