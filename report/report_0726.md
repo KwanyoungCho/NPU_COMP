@@ -61,6 +61,10 @@
 
 레이어 Relax 그래프(`build_layer_module`)가 **두 백엔드의 공통 입력**이다. 두 경로 모두 `_parse`(F5)로 시작하고, **차이는 "레이아웃이 어디에 사는가"**다.
 
+**packed(기본 경로) 구조 개요** — 발표/보고서용 그림: [`figs/0803/packed_overview.svg`](figs/0803/packed_overview.svg)
+
+![packed 기본 경로 구조](figs/0803/packed_overview.svg)
+
 ```
                     build_layer_module → 고수준 Relax 그래프
                                  │
