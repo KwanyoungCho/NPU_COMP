@@ -618,6 +618,45 @@ def test_v2_tile_rope():
             f"packed {len(asm.words):,} < op-list {len(aol.words):,} cmds")
 
 
+def test_v2_packed_oproj_fusion_option():
+    """F3 O-proj fusion is available as an OPT-IN in the packed path (compile_packed(fuse=True))
+    but OFF by default: tile-C already keeps the per-head O-proj output tile-blocked (scatter=0),
+    so fusion is superseded and saves <0.1%. This test keeps the opt-in path correct + detected."""
+    from npu_compiler import model, packed as _packed
+    from tvm import relax
+    cfg = model.LayerConfig("g8", SEQ=128, D=1024, H=8, KV=4, HD=128, F=512,
+                            eps=1e-5, rope_base=1e4, rope_scale=False)
+    cos, sin, rot = model.rope_tables(cfg); W = model.make_weights(cfg, seed=7)
+
+    # fusion actually fires: the 8-head O-proj add-tree collapses to one accumulate group
+    pkmod, _ = _packed._build_packed(model.build_layer_module(cfg))
+    _, ops, shp, _, _ = v2._parse(relax.transform.LegalizeOps()(pkmod))
+    fused_root, consumed = v2._detect_oproj_groups(ops, shp, leaf_op="einsum")
+    assert fused_root, "packed O-proj add-tree not detected"
+    assert any(len(v) >= cfg.H for v in fused_root.values()), f"expected an H={cfg.H}-leaf group"
+
+    exp = np.asarray(model.ref_layer(cfg, W, cos, sin), np.float32).reshape(-1)
+    den = float(np.max(np.abs(exp))) + 1e-9
+    outs = []
+    for fuse in (False, True):
+        asm, off, shp, top, outn, consts, pack = v2.compile_packed(model.build_layer_module(cfg), fuse=fuse)
+        g = np.zeros(top + 500000, np.float32)
+        for co, arr in consts:
+            g[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
+        for nm, arr in W.items():
+            if nm in off:
+                a = memplan.pack_tiled(np.asarray(arr), 64) if nm in pack else np.asarray(arr).reshape(-1)
+                g[off[nm]:off[nm] + a.size] = np.asarray(a, np.float32).reshape(-1)
+        R, C = shp[outn]
+        out = runtime.run(asm.words, g, gn=top)[off[outn]:off[outn] + R * C].astype(np.float32)
+        rel = float(np.max(np.abs(out - exp))) / den
+        assert rel < 0.05, f"packed fuse={fuse}: rel={rel}"
+        outs.append((fuse, len(asm.words), rel))
+    (_, n_no, _), (_, n_fu, _) = outs
+    assert n_fu <= n_no, f"fuse should not add commands: {n_fu} > {n_no}"
+    return f"F3 packed opt-in: fuse fires (H={cfg.H} group), fuse {n_fu:,} <= nofuse {n_no:,} cmds, correct"
+
+
 def test_v2_reindex_copy():
     """Stage 4 codegen primitive: a legalized layout_transform / reshape (the pack/unpack
     boundary of the layout_transform-native path) lowers via schedule_reindex_copy
@@ -744,6 +783,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_packed_model_agnostic())
     print("[PASS]", test_v2_compile_packed())
     print("[PASS]", test_v2_tile_rope())
+    print("[PASS]", test_v2_packed_oproj_fusion_option())
     print("[PASS]", test_v2_reindex_copy())
     print("[PASS]", test_v2_f4_packed_pass())
     print("[PASS]", test_v2_residual_tile_gather())

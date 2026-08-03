@@ -804,13 +804,14 @@ def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
     return layout, packed_params
 
 
-def _detect_oproj_groups(ops, shp):
+def _detect_oproj_groups(ops, shp, leaf_op="matmul"):
     """Pass F3 (fusion): find maximal add-trees whose leaves are all same-shape 64-mult
     matmuls — the per-head O-projection attn = sum_h (ctx_h @ Wo_h). Port of v1
     codegen._detect_oproj_groups to the v2 op list. Returns (fused_root{root_key ->
     [leaf matmul keys in fold order]}, consumed{every key folded away: tree adds + leaves}).
     Only fuses when each folded node is single-use, so skipping its emit is safe (the root
-    var is still produced, now by one in-place accumulate group instead of H scatters)."""
+    var is still produced, now by one in-place accumulate group instead of H scatters).
+    leaf_op="einsum" is the packed-path variant (leaves are tile-blocked 4D packed matmuls)."""
     prod = {op.outn: op for op in ops}
     uses = {}
     for op in ops:
@@ -826,12 +827,15 @@ def _detect_oproj_groups(ops, shp):
         if ad is not None:
             l = _leaves(ad.ins[0], shape); r = _leaves(ad.ins[1], shape)
             return None if (l is None or r is None) else (l + r)
-        mm = _op(key, "matmul")
+        mm = _op(key, leaf_op)
         return [key] if (mm is not None and tuple(shp[key]) == shape) else None
 
     def _legal_term(key):                                   # leaf matmul with 64-mult K, N
         mm = prod[key]
-        return shp[mm.ins[0]][1] % 64 == 0 and shp[mm.ins[1]][1] % 64 == 0
+        s0, s1 = shp[mm.ins[0]], shp[mm.ins[1]]
+        if len(s0) == 4:                                    # packed tile einsum: dims are tile counts
+            return True                                     # (each 64x64 tile is inherently 64-mult)
+        return s0[1] % 64 == 0 and s1[1] % 64 == 0
 
     cand = {}
     for op in ops:
@@ -1065,12 +1069,17 @@ def compile_module(mod, reuse=True, tile=True, fuse=True):
 # Path: build_layer_module -> packed._build_packed (Relax IRModule->IRModule) -> LegalizeOps
 # -> parse -> op-FAMILY dispatch -> ISA. Layout lives in the 4D shape + explicit
 # layout_transform ops (not a side-channel dict); every conversion is an in-graph copy.
-def _plan_memory_packed(params, ops, shp, const_arrs, out_name, reuse=True):
+def _plan_memory_packed(params, ops, shp, const_arrs, out_name, fused_root=None, consumed=None, reuse=True):
     """M1 for the packed module. A `reshape` is a contiguous re-view -> it ALIASES its
     input's offset (no copy, no new slot). Constants are fed row-major (the graph's
     layout_transform ops pack them on-device). reuse=True is the A1 liveness free-list:
     reads/frees are resolved through reshape aliases so a tensor's slot is only reused after
-    its last read (direct or via any reshape view). Value-invariant -> byte-exact vs bump."""
+    its last read (direct or via any reshape view). Value-invariant -> byte-exact vs bump.
+    fused_root/consumed (F3): an O-proj group root reads every leaf einsum's A,B and produces
+    the summed result in one slot; the folded leaves + tree adds are never materialized."""
+    fused_root = fused_root or {}
+    consumed = consumed or set()
+    prod = {op.outn: op for op in ops}
     off, top = {}, [0]
     fp = lambda k: _numel(shp[k])
 
@@ -1089,20 +1098,32 @@ def _plan_memory_packed(params, ops, shp, const_arrs, out_name, reuse=True):
             k = root[k]
         return k
 
-    steps = [op for op in ops if op.opname != "reshape"]     # reshape not emitted/allocated
+    steps = []                                               # (produced_key, [read_keys])
+    for op in ops:
+        if op.opname == "reshape":
+            continue                                         # reshape not emitted/allocated
+        if op.outn in consumed and op.outn not in fused_root:
+            continue                                         # folded into an O-proj group
+        if op.outn in fused_root:                            # group root reads each leaf's A,B
+            reads = []
+            for leaf in fused_root[op.outn]:
+                reads += [prod[leaf].ins[0], prod[leaf].ins[1]]
+            steps.append((op.outn, reads))
+        else:
+            steps.append((op.outn, list(op.ins)))
     last_read = {}                                           # last emit step reading each root
-    for i, op in enumerate(steps):
-        for k in op.ins:
+    for i, (outn, reads) in enumerate(steps):
+        for k in reads:
             last_read[rootof(k)] = i
     free = {}
-    for i, op in enumerate(steps):
-        sz = fp(op.outn)
+    for i, (outn, reads) in enumerate(steps):
+        sz = fp(outn)
         lst = free.get(sz) if reuse else None
-        off[op.outn] = lst.pop() if lst else top[0]
+        off[outn] = lst.pop() if lst else top[0]
         if not lst:
             top[0] += sz
         if reuse:
-            for k in dict.fromkeys(rootof(x) for x in op.ins):
+            for k in dict.fromkeys(rootof(x) for x in reads):
                 if last_read.get(k) == i and k not in keep and k not in root:
                     free.setdefault(fp(k), []).append(off[k])
     for op in ops:                                           # reshape views alias their root's slot
@@ -1179,15 +1200,29 @@ def _emit_tile_transpose(asm, dst, src, ish):
             asm.addr(DST, d); asm.save(0)
 
 
-def _emit_packed(mod, ops, off, shp, top):
+def _emit_packed(mod, ops, off, shp, top, fused_root=None, consumed=None):
     """C1 for the packed graph: dispatch each op-family to its existing lowering. Shape RANK
     selects tile vs row (4D [Rt,Ct,64,64] packed vs 2D row island). Reuses emit_packed_matmul
-    (einsum), the walker markers (ew/reduce/broadcast), schedule_reindex_copy (layout_transform)."""
+    (einsum), the walker markers (ew/reduce/broadcast), schedule_reindex_copy (layout_transform).
+    fused_root/consumed (F3): a per-head O-proj add-tree emits as ONE accumulate group."""
+    fused_root = fused_root or {}
+    consumed = consumed or set()
+    prod = {op.outn: op for op in ops}
     mp = _memplan.MemPlan(); mp.top = top
     asm = Asm()
     _EW1_OPS = set(_EW1) | {"silu"}
     for op in ops:
         opname, ins, outn = op.opname, op.ins, op.outn
+        if outn in consumed and outn not in fused_root:
+            continue                                         # folded into an O-proj group
+        if outn in fused_root:                               # per-head O-proj -> one accumulate group
+            terms = []
+            for leaf in fused_root[outn]:
+                A, B = prod[leaf].ins[0], prod[leaf].ins[1]
+                Mt, Kt = shp[A][0], shp[A][1]; Nt = shp[B][1]
+                terms.append((off[A], off[B], Mt * 64, Kt * 64, Nt * 64, Nt, Kt))
+            emit_matmul_accumulate_group(asm, mp, off[outn], terms, c_tiled=shp[outn][1])
+            continue
         if opname == "reshape":
             continue                                         # aliased in _plan_memory_packed
         elif opname == "einsum":                             # packed matmul A[Mt,Kt]@B[Kt,Nt]
@@ -1259,16 +1294,24 @@ def _emit_packed(mod, ops, off, shp, top):
     return asm
 
 
-def compile_packed(mod):
+def compile_packed(mod, fuse=False):
     """Compile a HIGH-LEVEL layer Relax module (build_layer_module output) through the
     layout_transform-native path: packed._build_packed (Relax IR->IR) -> LegalizeOps ->
-    _parse -> _plan_memory_packed -> _emit_packed -> NPU ISA. Params/output are ROW (the
-    in-graph layout_transform ops do all packing on-device), so the host feeds/reads raw.
-    Returns (asm, off, shp, top, out_name, const_inits)."""
+    _parse -> _plan_memory_packed -> _emit_packed -> NPU ISA. Weights/full-2D consts are fed
+    pre-packed (pack_names); the output is unpacked back to row.
+    Returns (asm, off, shp, top, out_name, const_inits, pack_names).
+
+    fuse (F3 O-proj accumulate-group fusion) DEFAULTS OFF here: in the packed path the residual
+    stream stays tile end-to-end (Phase 4.1/4.4), so the per-head O-proj output is already
+    tile-blocked (scatter=0) — F3's whole point (H scatters -> 1) is already achieved by tile-C.
+    Enabling it only elides the H-1 cheap tile adds (measured 24-112 cmds, <0.1%) at the cost of
+    the walk-based accumulate group, so it is SUPERSEDED by tile-C and left as an opt-in option.
+    compile_module (op-list) keeps fuse=True since its O-proj is not always tile."""
     from . import packed as _packed
     pk_mod, pack_names = _packed._build_packed(mod)
     leg = _relax.transform.LegalizeOps()(pk_mod)
     params, ops, shp, const_arrs, out_name = _parse(leg)
-    off, top, const_inits = _plan_memory_packed(params, ops, shp, const_arrs, out_name)
-    asm = _emit_packed(leg, ops, off, shp, top)
+    fused_root, consumed = _detect_oproj_groups(ops, shp, leaf_op="einsum") if fuse else ({}, set())
+    off, top, const_inits = _plan_memory_packed(params, ops, shp, const_arrs, out_name, fused_root, consumed)
+    asm = _emit_packed(leg, ops, off, shp, top, fused_root, consumed)
     return asm, off, shp, top, out_name, const_inits, pack_names
