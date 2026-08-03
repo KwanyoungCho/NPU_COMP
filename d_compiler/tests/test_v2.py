@@ -373,6 +373,38 @@ def test_v2_compile_full_layer():
     return f"v2.compile_module FULL LAYER (RMSNorm+attn+FFN) vs ref_layer: rel={rel:.4f}"
 
 
+def test_v2_guards_reject_unsupported():
+    """Correctness hardening (found by adversarial review): v2.compile_module must FAIL
+    LOUDLY, never silently miscompile, on cases it can't yet handle — >=256 dims that would
+    wrap the 8-bit ISA tile fields, and scalar [1,1] broadcast. Mirrors v1's guards."""
+    def _raises(build):
+        try:
+            v2.compile_module(relax.transform.LegalizeOps()(build()))
+            return False
+        except AssertionError:
+            return True
+
+    def b_max256():                                          # softmax max at SEQ>=256 -> 8-bit wrap
+        bb = relax.BlockBuilder(); x = relax.Var("x", relax.TensorStructInfo([64, 256], "float16"))
+        with bb.function("main", [x]):
+            with bb.dataflow():
+                gv = bb.emit_output(bb.emit(relax.op.max(x, axis=[-1], keepdims=True)))
+            bb.emit_func_output(gv)
+        return bb.finalize()
+
+    def b_scalar():                                          # [1,1] scalar broadcast (mis-routed pre-fix)
+        bb = relax.BlockBuilder(); s = relax.Var("s", relax.TensorStructInfo([1, 1], "float16"))
+        with bb.function("main", [s]):
+            with bb.dataflow():
+                gv = bb.emit_output(bb.emit(relax.op.broadcast_to(s, relax.ShapeExpr([8, 16]))))
+            bb.emit_func_output(gv)
+        return bb.finalize()
+
+    assert _raises(b_max256), "reduce-max C>=256 must assert, not silently wrap"
+    assert _raises(b_scalar), "scalar [1,1] broadcast must assert, not read past source"
+    return "guards: >=256 reduce + scalar broadcast rejected loudly (no silent miscompile)"
+
+
 if __name__ == "__main__":
     print("[PASS]", test_ew2_byte_exact_and_numeric())
     print("[PASS]", test_ew1_byte_exact_and_numeric())
@@ -384,4 +416,5 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_compile_swiglu())
     print("[PASS]", test_v2_compile_rmsnorm())
     print("[PASS]", test_v2_compile_full_layer())
+    print("[PASS]", test_v2_guards_reject_unsupported())
     print("ALL v2 (unified walker + REAL pipeline + v2.compile_module) TESTS PASSED")

@@ -185,6 +185,8 @@ class V2Walker(_Walker):
     def _emit_transpose_row(self, call):                # src[R,C] -> dst[C,R] (strided load 0x90)
         d0 = self.ptr(call.args[1]); s0 = self.ptr(call.args[2])
         R = self.ev(call.args[3]); C = self.ev(call.args[4]); a = self.a
+        assert C < 256, (f"v2 transpose row-path: 8-bit stride field needs C<256 (got {C}); "
+                         f"wider transposes need the tile-blocked path (not yet in v2.compile_module)")
         T = TILE
         scr = self.mp.scratch_alloc(T * T)
         for ci in range(0, C, T):
@@ -246,6 +248,9 @@ class V2Walker(_Walker):
     def _emit_rmax_row(self, call):                     # src[R,C] row-major -> dst[R,1] (R,C<256)
         d0 = self.ptr(call.args[1]); s0 = self.ptr(call.args[2])
         R = self.ev(call.args[3]); C = self.ev(call.args[4]); a = self.a
+        assert R < 256 and C < 256, (f"v2 reduce-max row-path: 8-bit tile field needs R,C<256 (got "
+                                     f"{R}x{C}); >=256 (e.g. softmax at SEQ>=256) needs the tile-blocked "
+                                     f"path (not yet in v2.compile_module)")
         acc = self.mp.scratch_alloc(R)
         a.tile(0, R, C); a.addr(SRC1, s0)
         a.load(1, 0, strided=1, ncols=1, start=0)
@@ -536,34 +541,42 @@ def compile_module(mod):
             M, K = shp[ins[0]]; _, N = shp[ins[1]]
             emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]], M, K, N)
         elif opname in _EW2:                                 # binary elementwise -> marker
-            walk_marker(asm, ew2_marker(opname, _numel(shp[outn])),
-                        [off[ins[0]], off[ins[1]], off[outn]], mp)
+            N = _numel(shp[outn])                            # operands must be full output size
+            assert _numel(shp[ins[0]]) == N and _numel(shp[ins[1]]) == N, \
+                f"v2 {opname}: broadcast operand (size != output) unsupported; legalize must materialize full-size"
+            walk_marker(asm, ew2_marker(opname, N), [off[ins[0]], off[ins[1]], off[outn]], mp)
         elif opname in _EW1_OPS:                             # unary elementwise -> marker
-            walk_marker(asm, ew1_marker(opname, _numel(shp[outn])),
-                        [off[ins[0]], off[outn]], mp)
-        elif opname == "sum":                                # reduce-sum over last axis -> [R,1]
+            N = _numel(shp[outn])
+            assert _numel(shp[ins[0]]) == N, f"v2 {opname}: operand size != output"
+            walk_marker(asm, ew1_marker(opname, N), [off[ins[0]], off[outn]], mp)
+        elif opname in ("sum", "max"):                       # reduce over LAST axis -> [R,1]
+            assert len(shp[ins[0]]) == 2 and shp[outn][-1] == 1, \
+                f"v2 {opname}: only last-axis 2D reduce (keepdims), got {shp[ins[0]]}->{shp[outn]}"
             R, C = shp[ins[0]]
-            walk_marker(asm, reduce_marker("npu_rsum_row", R, C, R * C),
-                        [off[ins[0]], off[outn]], mp)
-        elif opname == "max":
-            R, C = shp[ins[0]]
-            walk_marker(asm, reduce_marker("npu_rmax_row", R, C, R * C),
-                        [off[ins[0]], off[outn]], mp)
-        elif opname == "broadcast_to":                       # [R,1]->col or [1,C]->row
-            Rd, Cd = shp[outn]; si = shp[ins[0]]
-            col = len(si) == 2 and si[1] == 1
-            intrin = "npu_bcast_col" if col else "npu_bcast_row"
-            walk_marker(asm, bcast_marker(intrin, Rd, Cd, Rd if col else Cd),
-                        [off[ins[0]], off[outn]], mp)
+            walk_marker(asm, reduce_marker("npu_rsum_row" if opname == "sum" else "npu_rmax_row",
+                                           R, C, R * C), [off[ins[0]], off[outn]], mp)
+        elif opname == "broadcast_to":                       # [R,1]->col or [1,C]->row (reject scalar/other)
+            Rd, Cd = shp[outn]; si = list(shp[ins[0]]) + [1, 1]
+            sr, sc = si[0], si[1]
+            col = sc == 1 and sr == Rd
+            row = sr == 1 and sc == Cd
+            assert col or row, f"v2 broadcast_to: only [R,1]->[R,C] or [1,C]->[R,C], got {shp[ins[0]]}->{shp[outn]}"
+            walk_marker(asm, bcast_marker("npu_bcast_col" if col else "npu_bcast_row",
+                                          Rd, Cd, Rd if col else Cd), [off[ins[0]], off[outn]], mp)
         elif opname == "transpose":                          # permute_dims [1,0]: [R,C]->[C,R]
             R, C = shp[ins[0]]
             walk_marker(asm, transpose_marker(R, C), [off[ins[0]], off[outn]], mp)
-        elif opname == "strided_slice":                      # last-axis x[:, b:b+w]
-            R, C = shp[ins[0]]; w = shp[outn][1]
+        elif opname == "strided_slice":                      # last-axis x[:, b:b+w] only
+            R, C = shp[ins[0]]
+            assert len(shp[outn]) == 2 and shp[outn][0] == R, \
+                f"v2 strided_slice: only last-axis (rows unchanged), got {shp[ins[0]]}->{shp[outn]}"
+            w = shp[outn][1]
             b = _slice_last_begin(mod[gvar])
             walk_marker(asm, slice_marker(R, C, b, w), [off[ins[0]], off[outn]], mp)
         elif opname == "concatenate":                        # last-axis concat -> place columns
-            Cd = shp[outn][1]; ccol = 0
+            Rd, Cd = shp[outn]; ccol = 0
+            assert all(shp[ins[k]][0] == Rd for k in range(len(ins))), \
+                "v2 concatenate: only last-axis (all inputs share row count)"
             for k in range(len(ins)):
                 Rk, Ck = shp[ins[k]]
                 walk_marker(asm, colplace_marker(Rk, Ck, Cd, ccol), [off[ins[k]], off[outn]], mp)

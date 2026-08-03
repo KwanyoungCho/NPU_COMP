@@ -52,6 +52,16 @@
 | V2-007 | open | 소 | **offset post-pass** — StaticPlanBlockMemory는 N개 storage 객체 반환(플랫 offset 아님) → survivor에 base offset bump(~30줄). 또는 USMP로 진짜 offset. | Phase 3 |
 | V2-008 | open | 소 | decode 동적 shape는 `tir_var_upper_bound` func_attr 필요(플래너 sizing). Probe B 카베아트(F) | Phase 3 |
 | V2-009 | open | **중** | **tile-native 검증** — packed `[Rt,Ct,64,64]` 위 op(특히 reduce=tile+inner축 리덕션)이 스케줄+walker로 **효율적 native ISA fold**로 lower되는지. (ii) 확정용 | Phase 3 |
+| V2-010 | **resolved** | **높** | **reduce-max ≥256이 8-bit 필드 wrap → softmax 오답/SIGSEGV**(SEQ≥256). guard 복원(loud fail). 진짜 지원은 tile-blocked 필요 | `_emit_rmax_row` assert |
+| V2-011 | resolved | 중 | transpose C≥256 wrap(HD≥256) → guard 복원 | `_emit_transpose_row` assert |
+| V2-012 | resolved | **높** | EW broadcast operand(작은 크기) → 할당 초과 read. operand==output 크기 assert | ew2/ew1 dispatch |
+| V2-013 | resolved | **높** | non-last-axis strided_slice → 잘못된 행 + OOB write. last-axis assert | strided_slice dispatch |
+| V2-014 | resolved | 중 | concatenate가 axis 무시 → non-last-axis 오답. last-axis(row 동일) assert | concatenate dispatch |
+| V2-015 | resolved | 중 | broadcast_to `[1,1]` scalar 오분류 → source 초과 read. col=`sc==1 and sr==Rd` + valid assert | broadcast_to dispatch |
+| V2-016 | resolved | 소 | sum/max axis/rank 미검사 → non-last-axis 오답. last-axis 2D assert | sum/max dispatch |
+| V2-017 | open | 소 | strided_slice stride≠1 → contiguous 복사(v1 공유 한계). 현 경로 미사용 | later |
+
+> 이슈 V2-010~017은 **adversarial-review workflow(15 agents, 8 distinct 확정 버그)** 가 발견. 공통 원인: v2가 v1의 **guard(assert/CodegenError)와 tile-path fallback을 떨어뜨림** → 범위 밖 값이 silent 오답. **모두 guard 복원으로 loud-fail 처리**(≥256 진짜 지원은 tile-blocked 레이아웃 대기). 현 5-config(SEQ≤128 등)는 전부 안전, 검증 rel≤0.0043 유지.
 
 > 규칙: 새 이슈는 `V2-NNN`. 상태 ∈ {open, in-progress, resolved, wontfix}. resolve 시 커밋 해시 기록.
 
@@ -104,7 +114,7 @@
 | 2026-07-27 | v2 op별(elementwise/reduce/primitive) | v1 ISA byte-exact + mysim | ✅ 통과 |
 | 2026-07-27 | v2.compile_module 서브그래프(matmul chain, SwiGLU, RMSNorm) | mysim==numpy tolerance | ✅ maxdiff≤0.008 |
 | 2026-07-27 | **v2.compile_module 완전한 레이어 (multi-config)** | v1 `ref_layer` 대비 rel<0.05 | ✅ **5/5 PASS**: REDUCED 0.0011 · MEDIUM 0.0012 · GQA(H4/KV2) 0.0009 · wide(D192/F384) 0.0043 · HD32 0.0024 |
-| 2026-07-27 | v2 adversarial 코드리뷰 (workflow) | 확인된 correctness 버그 | (진행) |
+| 2026-07-27 | v2 adversarial 코드리뷰 (workflow, 15 agents) | 확인된 correctness 버그 | **8 distinct 버그 발견·전부 검증** → guard 복원으로 loud-fail 처리(V2-010~017). SEQ=256이 이제 silent 오답 대신 AssertionError |
 
 ---
 
