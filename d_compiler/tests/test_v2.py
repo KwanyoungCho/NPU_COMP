@@ -524,6 +524,36 @@ def test_v2_a4_hd128_real_head_dim():
     return f"A4 HD=128 (real Llama head dim): tile rel={rt:.4f} == row {rf:.4f}, {nr}w vs {nf}w"
 
 
+def test_v2_reindex_copy():
+    """Stage 4 codegen primitive: a legalized layout_transform / reshape (the pack/unpack
+    boundary of the layout_transform-native path) lowers via schedule_reindex_copy
+    (split-by-64 + tensorize npu_copy64) + V2Walker to NPU ISA == memplan.pack_tiled. This
+    is the last lowering piece the packed-IR codegen needed (einsum/ew/reduce/broadcast
+    already existed)."""
+    import tvm.tir as tir
+    imap = lambda r, c: (r // 64, c // 64, r % 64, c % 64)
+    for (R, C) in [(128, 128), (128, 256), (192, 64)]:
+        bb = relax.BlockBuilder(); X = relax.Var("X", relax.TensorStructInfo([R, C], "float16"))
+        with bb.function("main", [X]):
+            with bb.dataflow():
+                gv = bb.emit_output(bb.emit(relax.op.layout_transform(X, index_map=imap)))
+            bb.emit_func_output(gv)
+        mod = relax.transform.LegalizeOps()(bb.finalize())
+        fn = [g.name_hint for g in mod.functions if isinstance(mod[g], tir.PrimFunc)][0]
+        pf = v2.schedule_reindex_copy(mod, fn)[fn]
+        asm = Asm(); mp = memplan.MemPlan(); mp.top = R * C * 2
+        wk = v2.V2Walker(asm, mp, {})
+        for p, off in zip(pf.params, [0, R * C]):
+            wk.base[pf.buffer_map[p].data] = off
+        wk.walk(pf.body); wk.flush()
+        X0 = _f16(np.arange(R * C).reshape(R, C) * 0.001)
+        g = np.zeros(R * C * 2 + 50000, np.float32); g[0:R * C] = X0.reshape(-1)
+        out = runtime.run(asm.words, g, gn=R * C * 2)[R * C:R * C + R * C]
+        assert np.array_equal(out.astype(np.float32), memplan.pack_tiled(X0, 64).astype(np.float32)), \
+            f"reindex copy [{R},{C}] != pack_tiled"
+    return "Stage 4 reindex copy (layout_transform -> npu_copy64): mysim == pack_tiled"
+
+
 def test_v2_f4_packed_pass():
     """Stage 4 Phase 4.3 (F4 Relax rewrite, foundation): packed._build_packed rewrites the
     high-level layer into tile-blocked packed 4D form (matmul->einsum, ew/reduce/broadcast
@@ -617,6 +647,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_a4_multitile())
     print("[PASS]", test_v2_oproj_fusion())
     print("[PASS]", test_v2_packed_matmul())
+    print("[PASS]", test_v2_reindex_copy())
     print("[PASS]", test_v2_f4_packed_pass())
     print("[PASS]", test_v2_residual_tile_gather())
     print("[PASS]", test_v2_a4_hd128_real_head_dim())

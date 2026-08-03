@@ -500,14 +500,51 @@ def _vadd_impl(a: T.handle, b: T.handle, c: T.handle):
                                  C.access_ptr("w"), A.access_ptr("r"), B.access_ptr("r"), CH))
 
 
+# reindex-copy intrinsic (npu_copy64): lowers a legalized layout_transform / reshape copy
+# (pack/unpack boundary of the layout_transform-native path). Split the copy's last axis
+# by 64 -> the inner run is contiguous on both sides -> tensorize to the walker's npu_copy.
+@T.prim_func
+def _copy64_desc(a: T.handle, c: T.handle):
+    A = T.match_buffer(a, (64,), "float16", offset_factor=1)
+    Cc = T.match_buffer(c, (64,), "float16", offset_factor=1)
+    with T.block("root"):
+        T.reads(A[0:64]); T.writes(Cc[0:64])
+        for i in range(64):
+            with T.block("u"):
+                vi = T.axis.remap("S", [i]); Cc[vi] = A[vi]
+
+
+@T.prim_func
+def _copy64_impl(a: T.handle, c: T.handle):
+    sa = T.int32(); sc = T.int32()
+    A = T.match_buffer(a, (64,), "float16", strides=[sa], offset_factor=1)
+    Cc = T.match_buffer(c, (64,), "float16", strides=[sc], offset_factor=1)
+    with T.block("root"):
+        T.reads(A[0:64]); T.writes(Cc[0:64])
+        T.evaluate(T.call_extern("int32", "npu_copy", Cc.access_ptr("w"), A.access_ptr("r"), 64))
+
+
 def _register_v2():
-    try:
-        tir.TensorIntrin.register("npu_vadd", _vadd_desc, _vadd_impl)
-    except Exception:
-        pass
+    for nm, desc, impl in (("npu_vadd", _vadd_desc, _vadd_impl),
+                           ("npu_copy64", _copy64_desc, _copy64_impl)):
+        try:
+            tir.TensorIntrin.register(nm, desc, impl)
+        except Exception:
+            pass
 
 
 _register_v2()
+
+
+def schedule_reindex_copy(mod, func_name):
+    """Lower a legalized layout_transform/reshape copy PrimFunc: split its last (contiguous)
+    axis by 64 and tensorize to npu_copy64 -> the walker emits native npu_copy. Model-agnostic:
+    any reindex copy whose innermost run is a 64-multiple works (the pack/unpack boundary)."""
+    sch = tir.Schedule(mod)
+    blk = sch.get_block(_first_block(mod[func_name]), func_name=func_name)
+    _, ii = sch.split(sch.get_loops(blk)[-1], [None, 64])
+    sch.tensorize(ii, "npu_copy64")
+    return sch.mod
 
 
 def schedule_ew_binary(mod, func_name, block_name, intrin):
