@@ -30,7 +30,8 @@
 |---|---|---|---|
 | **0** | 타당성 spike (tensorize/memory/codegen 검증) | 🟢 **GO** | 3/3 probe 통과 (A GO · B GO-caveats · C MEDIUM/GO) |
 | **1** | path-무관 안전 정리 | ⚪ 선택적/후순위 | layout·liveness는 이미 별도 함수 → ROI 낮음, 필요시만 |
-| **2** | NPU ISA→TIR intrinsic + `_Walker` 일반화 | 🟡 진행 | matmul=이미 완료(v1). 2-A.1 elementwise ✅ |
+| **2** | NPU ISA→TIR intrinsic + `_Walker` 일반화 | 🟢 대부분 | matmul + elementwise + reduce + broadcast + transpose/slice/concat 전부 walker로 |
+| **3** | v2.compile() 파이프라인 조립 | 🟢 **완전한 레이어 컴파일** | `build_layer_module` → v2.compile_module → mysim, **ref_layer 대비 rel=0.0011** |
 | **3** | Relax 파이프라인 완성 + 메모리 TVM화 | ⚪ 대기 | — |
 | **4** | cost 기반 타깃 선택 (cycle 도착 후) | ⚪ 유보 | cost model 필요 |
 
@@ -86,6 +87,7 @@
 | 2026-07-26 | Probe B (memory planning) | 0 | **GO-caveats** — `StaticPlanBlockMemory`가 실제 liveness+재사용(5중간→2 storage, residual 최적). best-fit(match_range 16)로 v1 exact-size보다 유연(fragmentation↓ 여지). 파이프라인 prefix(→CallTIRRewrite→plan) 필수. N객체→offset post-pass(V2-007), tile footprint 정합(V2-006), decode 동적(V2-008) | exp2_plan.py, exp3_residual.py |
 | 2026-07-26 | **Phase 2-A.1 — elementwise → 통합 walker** | 2 | ✅ `v2_backend.V2Walker`가 elementwise 8종(add/sub/mul/div/sqrt/exp/neg/cos/sin/silu)을 `npu_ew*` marker로 lower. **v1 emit_ew와 ISA byte-exact + mysim 수치 일치**. v1 무변경(오라클). **gate GREEN(15/15+vendor)**. test_v2 게이트 편입 | v2_backend.py, tests/test_v2.py |
 | 2026-07-27 | **Phase 2-A.2 — reduce → 통합 walker** | 2 | ✅ `npu_rsum/rmax_row/tile` 4경로(row·tile × sum·max, scratch 사용)를 marker로 lower. **v1 emit_row_sum/max와 ISA byte-exact + mysim==numpy**. gate GREEN | v2_backend.py, tests/test_v2.py |
+| 2026-07-27 | **★★★ v2가 완전한 레이어 컴파일** | 3 | ✅ full-layer 스코핑 결과 남은 op은 딱 3개(strided_slice·concatenate·transpose) → walker에 추가 → `model.build_layer_module`(RMSNorm+RoPE/softmax attention+FFN) 전체를 v2.compile_module로 컴파일 → mysim, **v1 `ref_layer` 대비 rel=0.0011**. 모든 op 계열(matmul·ew·reduce·broadcast·transpose·slice·concat·상수) 커버. gate GREEN | v2_backend, test_v2.test_v2_compile_full_layer |
 | 2026-07-27 | **compile_module 확장 → SwiGLU FFN + RMSNorm** | 3 | ✅ op-name dispatch(+`tir_` 접두사)로 unary ew(silu/exp/sqrt/...) 추가 → **SwiGLU FFN**. 그다음 **상수(full-size, id 아닌 (bind,arg) 위치로 키잉)** + reduce(sum/max) + broadcast(col=ones-matmul/row=copy) 추가 → **RMSNorm**(v1 legalize.rms_norm) mysim==numpy(maxdiff 0.008). gate GREEN | v2_backend.compile_module, test_v2 |
 | 2026-07-27 | **★★ v2.compile_module 동작 (working 컴파일러)** | 3 | ✅ legalized Relax 멀티-op 모듈 → NPU ISA → mysim==numpy. `(x@w1+b)@w2`(matmul→add→matmul, 중간값 G-buffer 흐름) maxdiff=0.000. dispatch: matmul=v1 emit_matmul_into(tensorize 유도), binary ew=통합 walker marker. bump 할당. gate GREEN. **v2가 실제 서브그래프를 컴파일** | v2_backend.compile_module, test_v2.py |
 | 2026-07-27 | **★ REAL 파이프라인 e2e 증명** | 3 | ✅ `Relax add → LegalizeOps → tir.Schedule(split CH + tensorize `npu_vadd`) → V2Walker → mysim == numpy`. **hand-marker가 아닌 진짜 TVM 흐름**이 non-matmul op에서 동작. enabler = `_bind_match` **N-D 일반화**(Probe C R4 해소: 2D matmul 전용 → 임의 rank). gate GREEN | v2_backend.py(_vadd intrin, schedule_ew, _bind_match override), test_v2.py |

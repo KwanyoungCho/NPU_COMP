@@ -349,6 +349,30 @@ def test_v2_compile_rmsnorm():
     return f"v2.compile_module RMSNorm (reduce+broadcast+consts) -> mysim==numpy (tol, maxdiff={md:.3f})"
 
 
+def test_v2_compile_full_layer():
+    """★ v2.compile_module on a FULL v1 layer (RMSNorm + attention[RoPE/softmax] + FFN),
+    validated against v1's numpy reference model.ref_layer. Exercises every op family:
+    matmul, elementwise, reduce, broadcast, transpose, strided_slice, concat, constants."""
+    from npu_compiler import model
+    cfg = model.REDUCED
+    cos, sin, rot = model.rope_tables(cfg)
+    W = model.make_weights(cfg, seed=7)
+    mod = relax.transform.LegalizeOps()(model.build_layer_module(cfg))
+    asm, off, shp, top, outn, consts = v2.compile_module(mod)
+    gbuf = np.zeros(top + 50000, np.float32)
+    for co, arr in consts:
+        gbuf[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
+    for nm, arr in W.items():
+        if nm in off:
+            gbuf[off[nm]:off[nm] + np.asarray(arr).size] = np.asarray(arr, np.float32).reshape(-1)
+    on = int(np.prod(shp[outn]))
+    out = runtime.run(asm.words, gbuf, gn=top)[off[outn]:off[outn] + on]
+    exp = np.asarray(model.ref_layer(cfg, W, cos, sin), np.float32).reshape(-1)
+    rel = float(np.max(np.abs(out.astype(np.float32) - exp))) / (float(np.max(np.abs(exp))) + 1e-9)
+    assert rel < 0.05, f"full layer rel={rel}"
+    return f"v2.compile_module FULL LAYER (RMSNorm+attn+FFN) vs ref_layer: rel={rel:.4f}"
+
+
 if __name__ == "__main__":
     print("[PASS]", test_ew2_byte_exact_and_numeric())
     print("[PASS]", test_ew1_byte_exact_and_numeric())
@@ -359,4 +383,5 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_compile_pipeline())
     print("[PASS]", test_v2_compile_swiglu())
     print("[PASS]", test_v2_compile_rmsnorm())
+    print("[PASS]", test_v2_compile_full_layer())
     print("ALL v2 (unified walker + REAL pipeline + v2.compile_module) TESTS PASSED")

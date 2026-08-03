@@ -94,6 +94,12 @@ class V2Walker(_Walker):
                 return self._emit_bcast_row(call)
             if name == "npu_bcast_col":
                 return self._emit_bcast_col(call)
+            if name == "npu_transpose":
+                return self._emit_transpose_row(call)
+            if name == "npu_slice":
+                return self._emit_slice(call)
+            if name == "npu_colplace":
+                return self._emit_colplace(call)
         return super()._intrinsic(call)
 
     def _emit_ew2(self, method, call):
@@ -174,6 +180,41 @@ class V2Walker(_Walker):
                 else:
                     a.addr(DST, sP); a.save(1)
                     self._copy2d(d + mi * Cd + nj, Cd, sP, nt, mt, nt)
+
+    # ---- data-movement (row-major): transpose / slice / concat-place ----
+    def _emit_transpose_row(self, call):                # src[R,C] -> dst[C,R] (strided load 0x90)
+        d0 = self.ptr(call.args[1]); s0 = self.ptr(call.args[2])
+        R = self.ev(call.args[3]); C = self.ev(call.args[4]); a = self.a
+        T = TILE
+        scr = self.mp.scratch_alloc(T * T)
+        for ci in range(0, C, T):
+            ct = min(T, C - ci)
+            for ri in range(0, R, T):
+                rt = min(T, R - ri)
+                a.tile(0, rt, C); a.addr(SRC1, s0 + ri * C + ci)
+                a.load(1, 0, strided=1, ncols=ct, start=0)
+                a.vlen(ct * rt); a.v_copy()
+                if rt == R:
+                    a.addr(DST, d0 + ci * R); a.save(0)
+                else:
+                    a.addr(DST, scr); a.save(0)
+                    self._copy2d(d0 + ci * R + ri, R, scr, rt, ct, rt)
+
+    def _emit_slice(self, call):                        # src[R,C][:, b:b+w] -> dst[R,w]
+        d = self.ptr(call.args[1]); s = self.ptr(call.args[2])
+        R = self.ev(call.args[3]); C = self.ev(call.args[4])
+        b = self.ev(call.args[5]); w = self.ev(call.args[6]); a = self.a
+        for r in range(R):
+            a.vlen(w); a.addr(SRC1, s + r * C + b); a.load(0, 0); a.v_add(mode=IMM, imm=0)
+            a.addr(DST, d + r * w); a.save(0)
+
+    def _emit_colplace(self, call):                     # src[R,Cs] -> dst[R,Cd] at column `col`
+        d = self.ptr(call.args[1]); s = self.ptr(call.args[2])
+        R = self.ev(call.args[3]); Cs = self.ev(call.args[4])
+        Cd = self.ev(call.args[5]); col = self.ev(call.args[6]); a = self.a
+        for r in range(R):
+            a.vlen(Cs); a.addr(SRC1, s + r * Cs); a.load(0, 0); a.v_add(mode=IMM, imm=0)
+            a.addr(DST, d + r * Cd + col); a.save(0)
 
     # ---- reduce (row/tile x sum/max) — verbatim relocation of codegen.emit_row_sum/max ----
     def _emit_rsum_row(self, call):                     # src[R,C] row-major -> dst[R,1]
@@ -315,6 +356,57 @@ def bcast_marker(intrin, Rd, Cd, src_numel):
             T.reads(S[0:src_numel]); T.writes(D[0:Rd * Cd])
             T.evaluate(T.call_extern("int32", intrin, D.access_ptr("w"), S.access_ptr("r"), Rd, Cd))
     return f
+
+
+def transpose_marker(R, C):
+    @T.prim_func
+    def f(s: T.handle, d: T.handle):
+        S = T.match_buffer(s, (R * C,), "float16")
+        D = T.match_buffer(d, (R * C,), "float16")
+        with T.block("root"):
+            T.reads(S[0:R * C]); T.writes(D[0:R * C])
+            T.evaluate(T.call_extern("int32", "npu_transpose", D.access_ptr("w"), S.access_ptr("r"), R, C))
+    return f
+
+
+def slice_marker(R, C, b, w):
+    @T.prim_func
+    def f(s: T.handle, d: T.handle):
+        S = T.match_buffer(s, (R * C,), "float16")
+        D = T.match_buffer(d, (R * w,), "float16")
+        with T.block("root"):
+            T.reads(S[0:R * C]); T.writes(D[0:R * w])
+            T.evaluate(T.call_extern("int32", "npu_slice",
+                                     D.access_ptr("w"), S.access_ptr("r"), R, C, b, w))
+    return f
+
+
+def colplace_marker(R, Cs, Cd, col):
+    @T.prim_func
+    def f(s: T.handle, d: T.handle):
+        S = T.match_buffer(s, (R * Cs,), "float16")
+        D = T.match_buffer(d, (R * Cd,), "float16")
+        with T.block("root"):
+            T.reads(S[0:R * Cs]); T.writes(D[0:R * Cd])
+            T.evaluate(T.call_extern("int32", "npu_colplace",
+                                     D.access_ptr("w"), S.access_ptr("r"), R, Cs, Cd, col))
+    return f
+
+
+def _slice_last_begin(pf):
+    """Recover the last-axis begin from a legalized strided_slice PrimFunc: the input
+    load's last index is (spatial_var + begin), or just spatial_var when begin == 0."""
+    res = [0]
+
+    def visit(s):
+        if isinstance(s, tir.BufferLoad) and len(s.indices):
+            idx = s.indices[-1]
+            if isinstance(idx, tir.Add):
+                for part in (idx.a, idx.b):
+                    if isinstance(part, tir.IntImm):
+                        res[0] = max(res[0], int(part))
+    tir.stmt_functor.post_order_visit(pf.body, visit)
+    return res[0]
 
 
 def walk_marker(asm, pf, offsets, mp=None):
@@ -463,6 +555,19 @@ def compile_module(mod):
             intrin = "npu_bcast_col" if col else "npu_bcast_row"
             walk_marker(asm, bcast_marker(intrin, Rd, Cd, Rd if col else Cd),
                         [off[ins[0]], off[outn]], mp)
+        elif opname == "transpose":                          # permute_dims [1,0]: [R,C]->[C,R]
+            R, C = shp[ins[0]]
+            walk_marker(asm, transpose_marker(R, C), [off[ins[0]], off[outn]], mp)
+        elif opname == "strided_slice":                      # last-axis x[:, b:b+w]
+            R, C = shp[ins[0]]; w = shp[outn][1]
+            b = _slice_last_begin(mod[gvar])
+            walk_marker(asm, slice_marker(R, C, b, w), [off[ins[0]], off[outn]], mp)
+        elif opname == "concatenate":                        # last-axis concat -> place columns
+            Cd = shp[outn][1]; ccol = 0
+            for k in range(len(ins)):
+                Rk, Ck = shp[ins[k]]
+                walk_marker(asm, colplace_marker(Rk, Ck, Cd, ccol), [off[ins[k]], off[outn]], mp)
+                ccol += Ck
         else:
             raise TirBackendError(f"v2.compile_module: op '{opname}' not handled yet")
 
