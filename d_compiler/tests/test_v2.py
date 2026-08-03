@@ -577,6 +577,47 @@ def test_v2_compile_packed():
     return f"Stage 4 IR->IR compile_packed FULL LAYER (layout_transform-native): rels={[f'{r:.4f}' for r in rels]}"
 
 
+def test_v2_tile_rope():
+    """★ Stage 4 Phase 4.4: tile-native RoPE. When head_dim/2 is a 64-multiple (real Llama
+    hd=128 -> h=64) the rotate-half slice/concat and the K^T transpose lower in TILE layout
+    (whole-tile-column slice, permute_dims[1,0,3,2] transpose) instead of a row island — so
+    the packed path has NO interior unpack/repack and beats the hand-tuned op-list on command
+    count while staying model-agnostic. Sub-tile hd (h=32) still falls back to the row island."""
+    from npu_compiler import model, packed as _packed
+    from tvm import relax
+    cfg = model.LayerConfig("h4", SEQ=128, D=512, H=4, KV=2, HD=128, F=256,
+                            eps=1e-5, rope_base=1e4, rope_scale=False)
+    cos, sin, rot = model.rope_tables(cfg); W = model.make_weights(cfg, seed=7)
+
+    # (a) RoPE structural ops are all TILE (row island fully eliminated at hd=128)
+    pkmod, _ = _packed._build_packed(model.build_layer_module(cfg))
+    _, ops, shp, _, _ = v2._parse(relax.transform.LegalizeOps()(pkmod))
+    row_struct = [op.opname for op in ops
+                  if op.opname in ("strided_slice", "concatenate", "transpose") and len(shp[op.outn]) == 2]
+    assert not row_struct, f"tile-RoPE left a row island: {row_struct}"
+
+    # (b) correct vs fp64 reference
+    asm, off, shp, top, outn, consts, pack = v2.compile_packed(model.build_layer_module(cfg))
+    g = np.zeros(top + 300000, np.float32)
+    for co, arr in consts:
+        g[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
+    for nm, arr in W.items():
+        if nm in off:
+            a = memplan.pack_tiled(np.asarray(arr), 64) if nm in pack else np.asarray(arr).reshape(-1)
+            g[off[nm]:off[nm] + a.size] = np.asarray(a, np.float32).reshape(-1)
+    R, C = shp[outn]
+    out = runtime.run(asm.words, g, gn=top)[off[outn]:off[outn] + R * C]
+    exp = np.asarray(model.ref_layer(cfg, W, cos, sin), np.float32).reshape(-1)
+    rel = float(np.max(np.abs(out.astype(np.float32) - exp))) / (float(np.max(np.abs(exp))) + 1e-9)
+    assert rel < 0.05, f"tile-RoPE HD128: rel={rel}"
+
+    # (c) packed now emits FEWER commands than the op-list tile path (the whole point)
+    aol = v2.compile_module(relax.transform.LegalizeOps()(model.build_layer_module(cfg)), tile=True)[0]
+    assert len(asm.words) < len(aol.words), f"packed {len(asm.words)} !< op-list {len(aol.words)}"
+    return (f"Phase 4.4 tile-RoPE HD128: rel={rel:.4f}, row-island=0, "
+            f"packed {len(asm.words):,} < op-list {len(aol.words):,} cmds")
+
+
 def test_v2_reindex_copy():
     """Stage 4 codegen primitive: a legalized layout_transform / reshape (the pack/unpack
     boundary of the layout_transform-native path) lowers via schedule_reindex_copy
@@ -702,6 +743,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_packed_matmul())
     print("[PASS]", test_v2_packed_model_agnostic())
     print("[PASS]", test_v2_compile_packed())
+    print("[PASS]", test_v2_tile_rope())
     print("[PASS]", test_v2_reindex_copy())
     print("[PASS]", test_v2_f4_packed_pass())
     print("[PASS]", test_v2_residual_tile_gather())

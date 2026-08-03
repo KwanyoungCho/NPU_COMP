@@ -447,20 +447,21 @@ def colplace_marker(R, Cs, Cd, col):
     return f
 
 
-def _slice_last_begin(pf):
-    """Recover the last-axis begin from a legalized strided_slice PrimFunc: the input
-    load's last index is (spatial_var + begin), or just spatial_var when begin == 0."""
-    res = [0]
+def _slice_begins(pf):
+    """Recover per-axis begin offsets from a legalized strided_slice PrimFunc: any input-load
+    index of the form (spatial_var + const) contributes {axis: const}. Generalizes over the
+    sliced axis (a tile-column slice slices axis 1 of a 4D packed tensor, not the last axis)."""
+    res = {}
 
     def visit(s):
-        if isinstance(s, tir.BufferLoad) and len(s.indices):
-            idx = s.indices[-1]
-            if isinstance(idx, tir.Add):
-                for part in (idx.a, idx.b):
-                    if isinstance(part, tir.IntImm):
-                        res[0] = max(res[0], int(part))
+        if isinstance(s, tir.BufferLoad):
+            for ax, idx in enumerate(s.indices):
+                if isinstance(idx, tir.Add):
+                    for part in (idx.a, idx.b):
+                        if isinstance(part, tir.IntImm):
+                            res[ax] = max(res.get(ax, 0), int(part))
     tir.stmt_functor.post_order_visit(pf.body, visit)
-    return res[0]
+    return res
 
 
 def walk_marker(asm, pf, offsets, mp=None):
@@ -661,7 +662,11 @@ def _parse(mod):
                 ins.append(a.name_hint)
         outn = bd.var.name_hint
         shp[outn] = [int(d) for d in bd.var.struct_info.shape]
-        begin = _slice_last_begin(mod[gvar]) if opname == "strided_slice" else 0
+        begin = 0
+        if opname == "strided_slice":                        # begin on the SLICED axis (row or tile)
+            ish, osh = shp[ins[0]], shp[outn]
+            sax = next((k for k in range(len(ish)) if ish[k] != osh[k]), len(ish) - 1)
+            begin = _slice_begins(mod[gvar]).get(sax, 0)
         ops.append(_Op(opname, gvar, ins, outn, begin))
     out = main.body.body                                     # resolve returned var thru aliases
     val_of = {bd.var: bd.value for blk in main.body.blocks for bd in blk.bindings}
@@ -1122,6 +1127,58 @@ def _emit_reindex(asm, dst, src, R, C, pack):
                 asm.addr(DST, dst + d); asm.save(0)
 
 
+def _emit_copy_run(asm, dst, src, n):
+    """Copy n contiguous words dst<-src via native npu_copy, CH-chunked."""
+    for base in range(0, n, CH):
+        m = min(CH, n - base)
+        asm.vlen(m); asm.addr(SRC1, src + base); asm.load(0, 0); asm.v_copy()
+        asm.addr(DST, dst + base); asm.save(0)
+
+
+def _emit_tile_slice(asm, dst, src, ish, osh, sax, b):
+    """Tile-blocked strided_slice: whole-tile slice on axis `sax` (0=row-tile, 1=col-tile)
+    starting at tile `b`. Each tile is 64*64 contiguous words; a col-tile slice copies the
+    per-row-tile runs, a row-tile slice copies one contiguous block."""
+    St, Ct = ish[0], ish[1]; Sto, Cto = osh[0], osh[1]
+    if sax == 1:
+        for st in range(Sto):
+            _emit_copy_run(asm, dst + st * Cto * 4096, src + (st * Ct + b) * 4096, Cto * 4096)
+    else:
+        _emit_copy_run(asm, dst, src + b * Ct * 4096, Sto * Ct * 4096)
+
+
+def _emit_tile_concat(asm, dst, src_offs, src_shps, osh, axis):
+    """Tile-blocked concat along the col-tile (axis=1) or row-tile (axis=0) axis."""
+    St, Ct = osh[0], osh[1]
+    if axis == 1:
+        cco = 0
+        for so, ssh in zip(src_offs, src_shps):
+            Ck = ssh[1]
+            for st in range(St):
+                _emit_copy_run(asm, dst + (st * Ct + cco) * 4096, so + st * Ck * 4096, Ck * 4096)
+            cco += Ck
+    else:
+        rco = 0
+        for so, ssh in zip(src_offs, src_shps):
+            Sk = ssh[0]
+            _emit_copy_run(asm, dst + rco * Ct * 4096, so, Sk * Ct * 4096)
+            rco += Sk
+
+
+def _emit_tile_transpose(asm, dst, src, ish):
+    """permute_dims([1,0,3,2]) on a packed tensor: [St,Ct,64,64] -> [Ct,St,64,64] transposing
+    the tile grid AND each 64x64 tile (strided-load 0x90, one npu transpose per tile)."""
+    St, Ct = ish[0], ish[1]
+    for a in range(Ct):
+        for b in range(St):
+            s = src + (b * Ct + a) * 4096
+            d = dst + (a * St + b) * 4096
+            asm.tile(0, 64, 64); asm.addr(SRC1, s)
+            asm.load(1, 0, strided=1, ncols=64, start=0)     # column-major read = 64x64 transpose
+            asm.vlen(4096); asm.v_copy()
+            asm.addr(DST, d); asm.save(0)
+
+
 def _emit_packed(mod, ops, off, shp, top):
     """C1 for the packed graph: dispatch each op-family to its existing lowering. Shape RANK
     selects tile vs row (4D [Rt,Ct,64,64] packed vs 2D row island). Reuses emit_packed_matmul
@@ -1171,18 +1228,32 @@ def _emit_packed(mod, ops, off, shp, top):
                 col = si[1] == 1 and si[0] == Rd
                 intrin = "npu_bcast_col" if col else "npu_bcast_row"
                 walk_marker(asm, bcast_marker(intrin, Rd, Cd, Rd if col else Cd), [off[ins[0]], off[outn]], mp)
-        elif opname == "transpose":                          # 2D row (RoPE Kt)
-            R, C = shp[ins[0]]
-            walk_marker(asm, transpose_marker(R, C), [off[ins[0]], off[outn]], mp)
-        elif opname == "strided_slice":                      # 2D row (RoPE half)
-            R, C = shp[ins[0]]; w = shp[outn][1]
-            walk_marker(asm, slice_marker(R, C, op.begin, w), [off[ins[0]], off[outn]], mp)
-        elif opname == "concatenate":                        # 2D row (RoPE)
-            Rd, Cd = shp[outn]; ccol = 0
-            for k in range(len(ins)):
-                Rk, Ck = shp[ins[k]]
-                walk_marker(asm, colplace_marker(Rk, Ck, Cd, ccol), [off[ins[k]], off[outn]], mp)
-                ccol += Ck
+        elif opname == "transpose":
+            if len(shp[ins[0]]) == 4:                         # tile transpose (grid + inner 64x64)
+                _emit_tile_transpose(asm, off[outn], off[ins[0]], shp[ins[0]])
+            else:                                             # 2D row (RoPE Kt fallback)
+                R, C = shp[ins[0]]
+                walk_marker(asm, transpose_marker(R, C), [off[ins[0]], off[outn]], mp)
+        elif opname == "strided_slice":
+            ish, osh = shp[ins[0]], shp[outn]
+            if len(osh) == 4:                                 # tile-column/row slice
+                sax = 0 if ish[0] != osh[0] else 1
+                _emit_tile_slice(asm, off[outn], off[ins[0]], ish, osh, sax, op.begin)
+            else:                                             # 2D row (RoPE half fallback)
+                R, C = ish; w = osh[1]
+                walk_marker(asm, slice_marker(R, C, op.begin, w), [off[ins[0]], off[outn]], mp)
+        elif opname == "concatenate":
+            osh = shp[outn]
+            if len(osh) == 4:                                 # tile concat (row-tile or col-tile axis)
+                axis = 1 if sum(shp[i][1] for i in ins) == osh[1] else 0
+                _emit_tile_concat(asm, off[outn], [off[i] for i in ins],
+                                  [shp[i] for i in ins], osh, axis)
+            else:                                             # 2D row (RoPE fallback)
+                Rd, Cd = osh; ccol = 0
+                for k in range(len(ins)):
+                    Rk, Ck = shp[ins[k]]
+                    walk_marker(asm, colplace_marker(Rk, Ck, Cd, ccol), [off[ins[k]], off[outn]], mp)
+                    ccol += Ck
         else:
             raise TirBackendError(f"compile_packed: op '{opname}' not handled")
     return asm

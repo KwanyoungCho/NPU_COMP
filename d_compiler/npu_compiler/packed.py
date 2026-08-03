@@ -172,6 +172,21 @@ def _build_packed(mod, target_name=None):
                         target_info = ninf
                     continue
 
+                # ---- RoPE/attention structural ops: TILE-native when tile-aligned (hd/2 a
+                # 64-multiple), else fall through to the row island below. ----
+                _tiled = None
+                if name == "relax.strided_slice":
+                    _tiled = _tile_slice(bb, var, arg_info)
+                elif name == "relax.concat":
+                    _tiled = _tile_concat(bb, var, arg_info, out_shape)
+                elif name == "relax.permute_dims":
+                    _tiled = _tile_transpose(bb, var, arg_info, out_shape)
+                if _tiled is not None:
+                    env[dst] = _mk_tile(out_shape, _tiled)
+                    if target_name is not None and dst.name_hint == target_name:
+                        target_info = env[dst]
+                    continue
+
                 if name in _LAYOUT_FOLLOWING:               # ew/unary/reduce/broadcast -> follow inputs
                     tensor_args = [a for a in _iter_tensor_args(var)]
                     infos = [arg_info(a) for a in tensor_args]
@@ -222,6 +237,57 @@ def _iter_tensor_args(call):
         if isinstance(a, (relax.Var, relax.Constant)):
             out.append(a)
     return out
+
+
+def _mk_tile(shape, expr):
+    inf = _Info(shape); inf.mat["tile"] = expr; inf.mat["__interm__"] = "tile"
+    return inf
+
+
+def _tile_slice(bb, call, arg_info):
+    """RoPE half-slice in TILE layout: q[:, b:e] on a single axis whose begin/end are 64-
+    multiples becomes a whole-tile-column (or row) slice of the packed [St,Ct,64,64] tensor
+    (index_map-free, no unpack). Returns the tile expr, or None to fall back to the row island
+    (sub-tile begin/end, e.g. hd/2 not a multiple of 64)."""
+    axes = [int(x.value) for x in call.args[1]]              # args are Tuples of PrimValue
+    begin = [int(x.value) for x in call.args[2]]
+    end = [int(x.value) for x in call.args[3]]
+    if len(axes) != 1 or axes[0] not in (0, 1) or begin[0] % T or end[0] % T:
+        return None
+    ai = arg_info(call.args[0])
+    if not _is_full(ai.shape):
+        return None
+    A = _coerce(bb, ai, "tile")
+    return bb.emit(relax.op.strided_slice(A, axes=[axes[0]], begin=[begin[0] // T], end=[end[0] // T]))
+
+
+def _tile_concat(bb, call, arg_info, out_shape):
+    """Concat in TILE layout along the row-tile or col-tile axis (every input aligned to 64
+    on that axis). Returns the tile expr, or None to fall back to the row island."""
+    axis = int(call.attrs.axis)
+    if axis not in (0, 1) or not _is_full(out_shape):
+        return None
+    infos = [arg_info(f) for f in call.args[0].fields]
+    for i in infos:
+        if not _is_full(i.shape) or i.shape[axis] % T:
+            return None
+    coerced = [_coerce(bb, i, "tile") for i in infos]
+    return bb.emit(relax.op.concat(coerced, axis=axis))
+
+
+def _tile_transpose(bb, call, arg_info, out_shape):
+    """permute_dims([1,0]) in TILE layout = permute_dims([1,0,3,2]) on the packed tensor:
+    [St,Ct,64,64] -> [Ct,St,64,64] transposing BOTH the tile grid ([1,0]) and each 64x64 tile
+    ([3,2]). out_tile[a,b,i,j] = in_tile[b,a,j,i] == the logical transpose. Returns the tile
+    expr, or None (non-[1,0] permute) to fall back to the row island."""
+    axes = [int(x) for x in call.attrs.axes]
+    if axes != [1, 0] or not _is_full(out_shape):
+        return None
+    ai = arg_info(call.args[0])
+    if not _is_full(ai.shape):
+        return None
+    A = _coerce(bb, ai, "tile")
+    return bb.emit(relax.op.permute_dims(A, axes=[1, 0, 3, 2]))
 
 
 def _emit_following(bb, name, call, coerced, out_shape, want):
