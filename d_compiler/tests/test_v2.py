@@ -524,6 +524,28 @@ def test_v2_a4_hd128_real_head_dim():
     return f"A4 HD=128 (real Llama head dim): tile rel={rt:.4f} == row {rf:.4f}, {nr}w vs {nf}w"
 
 
+def test_v2_packed_model_agnostic():
+    """Stage 4 IR->IR (Step 4): the F4 layout pass packed._build_packed is model-AGNOSTIC —
+    an op it doesn't know how to tile (here relax.tanh, standing in for any other model's op)
+    does NOT crash the pass; it flows through as a ROW island (verbatim on row-coerced inputs)
+    while matmul still tiles. So the graph transform generalizes beyond build_layer_module
+    (codegen still needs a per-op-family lowering — the expected op-coverage cost)."""
+    from npu_compiler import packed
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", relax.TensorStructInfo([128, 128], "float16"))
+    w = relax.Var("w", relax.TensorStructInfo([128, 128], "float16"))
+    with bb.function("main", [x, w]):
+        with bb.dataflow():
+            h = bb.emit(relax.op.matmul(x, w))               # -> einsum (tile)
+            gv = bb.emit_output(bb.emit(relax.op.tanh(h)))   # unknown op -> row island
+        bb.emit_func_output(gv)
+    leg = relax.transform.LegalizeOps()(packed._build_packed(bb.finalize()))   # must not crash
+    p, ops, shp, ca, outn = v2._parse(leg)
+    fams = set(o.opname for o in ops)
+    assert "einsum" in fams and "tanh" in fams, f"expected matmul tiled + tanh row, got {fams}"
+    return "F4 packed pass model-agnostic: unknown op (tanh) -> row island, matmul -> tile"
+
+
 def test_v2_compile_packed():
     """★ Stage 4 IR->IR: the layout_transform-native packed path compiles a FULL layer to NPU
     ISA correctly. packed._build_packed (Relax IRModule->IRModule) -> LegalizeOps -> op-FAMILY
@@ -677,6 +699,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_a4_multitile())
     print("[PASS]", test_v2_oproj_fusion())
     print("[PASS]", test_v2_packed_matmul())
+    print("[PASS]", test_v2_packed_model_agnostic())
     print("[PASS]", test_v2_compile_packed())
     print("[PASS]", test_v2_reindex_copy())
     print("[PASS]", test_v2_f4_packed_pass())

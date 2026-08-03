@@ -49,6 +49,11 @@ def _is_full(shape):
 
 _ROW_ONLY = {"relax.strided_slice", "relax.concat", "relax.permute_dims"}
 _MATMUL = "relax.matmul"
+# ops the packed pass knows how to run TILE (layout-transparent / packed-reduce); anything
+# else (incl _ROW_ONLY and any op from a different model) falls back to a ROW island.
+_LAYOUT_FOLLOWING = {"relax.add", "relax.subtract", "relax.multiply", "relax.divide",
+                     "relax.sqrt", "relax.exp", "relax.negative", "relax.cos", "relax.sin",
+                     "relax.nn.silu", "relax.sum", "relax.max", "relax.broadcast_to"}
 
 
 def _shape2(sinfo_holder):
@@ -138,34 +143,36 @@ def _build_packed(mod, target_name=None):
                         target_info = ninf
                     continue
 
-                if name in _ROW_ONLY:
-                    # rebuild the SAME call with row-coerced inputs (verbatim semantics)
-                    if name == "relax.concat":
-                        tup = var.args[0]
-                        new_fields = [_coerce(bb, arg_info(f), "row") for f in tup.fields]
-                        new_args = [relax.Tuple(new_fields)] + list(var.args[1:])
-                    else:
-                        new_args = [_coerce(bb, arg_info(var.args[0]), "row")] + list(var.args[1:])
-                    out = bb.emit(relax.Call(var.op, new_args, var.attrs, var.sinfo_args))
-                    ninf = _Info(out_shape); ninf.mat["row"] = out; ninf.mat["__interm__"] = "row"
+                if name in _LAYOUT_FOLLOWING:               # ew/unary/reduce/broadcast -> follow inputs
+                    tensor_args = [a for a in _iter_tensor_args(var)]
+                    infos = [arg_info(a) for a in tensor_args]
+                    want = "row" if any(i.mat.get("__interm__") == "row" for i in infos) else "tile"
+                    coerced = [_coerce(bb, i, want) for i in infos]
+                    out = _emit_following(bb, name, var, coerced, out_shape, want)
+                    ninf = _Info(out_shape); ninf.mat[want] = out; ninf.mat["__interm__"] = want
                     env[dst] = ninf
                     if target_name is not None and dst.name_hint == target_name:
-                        target_info = ninf
+                        target_info = env[dst]
                     continue
 
-                # ---- layout-following ops ----
-                tensor_args = [a for a in _iter_tensor_args(var)]
-                infos = [arg_info(a) for a in tensor_args]
-                want = "row"
-                if not any(i.mat.get("__interm__") == "row" for i in infos):
-                    want = "tile"
-                coerced = [_coerce(bb, i, want) for i in infos]
-
-                out = _emit_following(bb, name, var, coerced, out_shape, want)
-                ninf = _Info(out_shape); ninf.mat[want] = out; ninf.mat["__interm__"] = want
+                # ---- ROW-ONLY / UNKNOWN op (model-agnostic fallback): rebuild the SAME call
+                # verbatim on row-coerced tensor inputs. Any op the pass can't tile stays a row
+                # island -> a different model's ops flow through (correct, just not tile-opt). ----
+                new_args = []
+                for a in var.args:
+                    if isinstance(a, (relax.Var, relax.Constant)):
+                        new_args.append(_coerce(bb, arg_info(a), "row"))
+                    elif isinstance(a, relax.Tuple):
+                        new_args.append(relax.Tuple(
+                            [_coerce(bb, arg_info(f), "row") if isinstance(f, (relax.Var, relax.Constant)) else f
+                             for f in a.fields]))
+                    else:
+                        new_args.append(a)
+                out = bb.emit(relax.Call(var.op, new_args, var.attrs, var.sinfo_args))
+                ninf = _Info(out_shape); ninf.mat["row"] = out; ninf.mat["__interm__"] = "row"
                 env[dst] = ninf
                 if target_name is not None and dst.name_hint == target_name:
-                    target_info = env[dst]
+                    target_info = ninf
 
             ret = old.body.body                 # returned Var
             chosen = target_info if target_name is not None else env[ret]
