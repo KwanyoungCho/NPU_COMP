@@ -62,7 +62,12 @@ class V2Walker(_Walker):
                 strides[k] = strides[k + 1] * shape[k + 1]
             off = sum(self.ev(region[k].min) * strides[k] for k in range(nd))
             self.base[bdata] = self.base[sdata]
-            strd = strides[0] if nd >= 2 else 1
+            # leading stride = stride of the FIRST region axis with extent>1: for a 4D
+            # tile-blocked source [Rt,Ct,64,64] a 64x64 tile view has extents [1,1,64,64]
+            # -> 64 (contiguous tile, no gather); for 1D/2D compact views it is strides[0]
+            # (== today's behavior), so this is a no-op for every non-4D source.
+            lead = next((k for k in range(nd) if int(region[k].extent) > 1), nd - 1)
+            strd = strides[lead]
         eoff = buf.elem_offset
         if isinstance(eoff, tir.Var):
             self._bind(eoff, off)
@@ -515,6 +520,43 @@ def schedule_ew_binary(mod, func_name, block_name, intrin):
     _, ii = sch.split(fused, [None, CH])
     sch.tensorize(ii, intrin)
     return sch.mod
+
+
+# ==== Stage 4: tile-blocked (packed) matmul as scheduled TIR tensorized with npu_gemm_acc ====
+# The layout_transform-native replacement for the per-op a_tiled/c_tiled/b_pack_nt flags:
+# tile-ness lives in the 4D buffer shape [Rt,Ct,64,64], the matmul is a plain packed nest,
+# and it tensorizes to the SAME npu_gemm_acc/npu_fill_zero (same mt,nt-outer/kt-inner tile
+# order => byte-exact vs v1's emit_gemm). Proven end-to-end by the Stage-4 spikes.
+@functools.lru_cache(maxsize=None)
+def packed_matmul(Mt, Kt, Nt):
+    """Scheduled+tensorized PrimFunc for C[Mt,Nt,64,64] = A[Mt,Kt,64,64] @ B[Kt,Nt,64,64]."""
+    T64 = TILE
+
+    @T.prim_func
+    def f(a: T.handle, b: T.handle, c: T.handle):
+        A = T.match_buffer(a, (Mt, Kt, T64, T64), "float16")
+        B = T.match_buffer(b, (Kt, Nt, T64, T64), "float16")
+        C = T.match_buffer(c, (Mt, Nt, T64, T64), "float16")
+        for mt, nt, kt, i, j, k in T.grid(Mt, Nt, Kt, T64, T64, T64):
+            with T.block("matmul"):
+                vmt, vnt, vkt, vi, vj, vk = T.axis.remap("SSRSSR", [mt, nt, kt, i, j, k])
+                with T.init():
+                    C[vmt, vnt, vi, vj] = T.float16(0)
+                C[vmt, vnt, vi, vj] = C[vmt, vnt, vi, vj] + A[vmt, vkt, vi, vk] * B[vkt, vnt, vk, vj]
+
+    sch = tir.Schedule(f)
+    blk = sch.get_block("matmul")
+    _, _, kt, _, _, _ = sch.get_loops(blk)
+    init_blk = sch.decompose_reduction(blk, kt)
+    sch.tensorize(sch.get_loops(blk)[3], "npu_gemm_acc")     # inner 64x64 update -> MAC intrinsic
+    sch.tensorize(sch.get_loops(init_blk)[2], "npu_fill_zero")   # init C tiles -> fill intrinsic
+    return sch.mod["main"]
+
+
+def emit_packed_matmul(asm, mp, c_off, a_off, b_off, Mt, Kt, Nt):
+    """Lower a packed matmul into `asm` at G-buffer offsets (A/B/C tile-blocked). Walks the
+    tensorized nest through the unified walker — no gather (every tile view has stride 64)."""
+    walk_marker(asm, packed_matmul(Mt, Kt, Nt), [a_off, b_off, c_off], mp)
 
 
 # ==== v2 compile orchestration: legalized Relax IRModule -> NPU ISA ====

@@ -524,6 +524,33 @@ def test_v2_a4_hd128_real_head_dim():
     return f"A4 HD=128 (real Llama head dim): tile rel={rt:.4f} == row {rf:.4f}, {nr}w vs {nf}w"
 
 
+def test_v2_packed_matmul():
+    """Stage 4 foundation: the layout_transform-native packed matmul (einsum nest over 4D
+    [Rt,Ct,64,64] buffers, tensorized to npu_gemm_acc) is (1) numerically correct vs numpy
+    and (2) BYTE-EXACT vs v1's emit_matmul_into(a_tiled,c_tiled,b_pack_nt) — same 64x64 MAC,
+    same tile order — so it can replace the per-op tile flags with zero ISA change."""
+    from npu_compiler.tir_backend import emit_matmul_into
+    pt = lambda a: memplan.pack_tiled(np.asarray(a), 64)
+    rng = np.random.default_rng(3)
+    for (M, K, N) in [(128, 128, 128), (128, 192, 256), (256, 128, 64)]:
+        Mt, Kt, Nt = M // 64, K // 64, N // 64
+        A = _f16(rng.standard_normal((M, K)) * 0.1); B = _f16(rng.standard_normal((K, N)) * 0.1)
+        exp = A.astype(np.float32) @ B.astype(np.float32)
+        asm = Asm(); mp = memplan.MemPlan()
+        ao, bo, co = 0, M * K, M * K + K * N; mp.top = M * K + K * N + M * N
+        v2.emit_packed_matmul(asm, mp, co, ao, bo, Mt, Kt, Nt)
+        g = np.zeros(mp.top + 50000, np.float32)
+        g[ao:ao + M * K] = pt(A).astype(np.float32).reshape(-1)
+        g[bo:bo + K * N] = pt(B).astype(np.float32).reshape(-1)
+        out = memplan.unpack_tiled(runtime.run(asm.words, g, gn=mp.top)[co:co + M * N], M, N, 64)
+        rel = np.max(np.abs(out.astype(np.float32) - exp)) / (np.max(np.abs(exp)) + 1e-9)
+        assert rel < 0.02, f"packed matmul {M}x{K}x{N}: rel={rel}"
+        asm2 = Asm(); mp2 = memplan.MemPlan(); mp2.top = mp.top
+        emit_matmul_into(asm2, mp2, co, ao, bo, M, K, N, b_pack_nt=Nt, a_tiled=True, c_tiled=True)
+        assert list(asm.words) == list(asm2.words), f"packed matmul {M}x{K}x{N} not byte-exact vs v1"
+    return "Stage 4 packed matmul (einsum->npu_gemm_acc): correct + byte-exact vs emit_matmul_into"
+
+
 def test_v2_residual_tile_gather():
     """★ Phase 4.1: keep the residual/RMSNorm/FFN stream tile end-to-end (64-mult 2D output
     stays tile, host unpacks) so every projection reads a tile A-operand -> input gather
@@ -575,6 +602,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_memory_reuse())
     print("[PASS]", test_v2_a4_multitile())
     print("[PASS]", test_v2_oproj_fusion())
+    print("[PASS]", test_v2_packed_matmul())
     print("[PASS]", test_v2_residual_tile_gather())
     print("[PASS]", test_v2_a4_hd128_real_head_dim())
     print("[PASS]", test_v2_a4_unblocks_256())
