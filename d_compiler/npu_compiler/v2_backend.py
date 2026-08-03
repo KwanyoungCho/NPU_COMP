@@ -1120,7 +1120,9 @@ def _emit_packed(mod, ops, off, shp, top):
             continue                                         # aliased in _plan_memory_packed
         elif opname == "einsum":                             # packed matmul A[Mt,Kt]@B[Kt,Nt]
             Mt, Kt = shp[ins[0]][0], shp[ins[0]][1]; Nt = shp[ins[1]][1]
-            emit_packed_matmul(asm, mp, off[outn], off[ins[0]], off[ins[1]], Mt, Kt, Nt)
+            emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]],   # fast Python replay
+                             Mt * 64, Kt * 64, Nt * 64,                       # (byte-exact vs the
+                             b_pack_nt=Nt, a_tiled=True, c_tiled=True)        # walked packed_matmul)
         elif opname == "te_layout_transform":               # pack/unpack reindex copy
             walk_marker(asm, schedule_reindex_copy(mod[op.gvar]), [off[ins[0]], off[outn]], mp)
         elif opname in _EW2:                                 # ew (any rank): count = numel
