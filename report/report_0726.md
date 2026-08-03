@@ -62,6 +62,7 @@
 | V2-016 | resolved | 소 | sum/max axis/rank 미검사 → non-last-axis 오답. last-axis 2D assert | sum/max dispatch |
 | V2-017 | open | 소 | strided_slice stride≠1 → contiguous 복사(v1 공유 한계). 현 경로 미사용 | later |
 | V2-018 | **resolved** | **높** | **tile ew의 2D-64-mult 상수가 packing 안 됨** → tile ew가 row-major 상수를 tile 순서로 read → 멀티-타일(≥128) 오답(rel≈1.0). 64×64(tile==row)에선 잠복. fixpoint 후 tile-ew 상수를 tile 마킹→`_plan_memory`가 pack_tiled. v1 `alloc_const_tiled` 대응 | `_assign_layouts` 상수 마킹 |
+| V2-019 | **resolved** | **높** | **HD≥128에서 tile=True 크래시** — RoPE rotate-half 슬라이스가 [SEQ,64](64-wide·64-aligned)라 `is_tslice/is_concat64/is_transpose`가 tile로 seed하는데 `_emit`은 row-only → AssertionError. **HD=128=실제 Llama 3.2 3B head dim** → tile이 타깃 못 컴파일(단 loud fail, silent 오답 아님). adversarial 리뷰(12 agents, 6 finder 모두 단일 근본원인 수렴, 5 CONFIRMED) 발견. 수정: transpose/slice/concat을 tile seeding/consumer에서 제외 → RoPE 항상 row(HD64와 동일 parity), 섬은 여전히 tile | `_assign_layouts` |
 
 > 이슈 V2-010~017은 **adversarial-review workflow(15 agents, 8 distinct 확정 버그)** 가 발견. 공통 원인: v2가 v1의 **guard(assert/CodegenError)와 tile-path fallback을 떨어뜨림** → 범위 밖 값이 silent 오답. **모두 guard 복원으로 loud-fail 처리**(≥256 진짜 지원은 tile-blocked 레이아웃 대기). 현 5-config(SEQ≤128 등)는 전부 안전, 검증 rel≤0.0043 유지.
 
@@ -123,7 +124,7 @@
 | 2026-07-27 | v2 adversarial 코드리뷰 (workflow, 15 agents) | 확인된 correctness 버그 | **8 distinct 버그 발견·전부 검증** → guard 복원으로 loud-fail 처리(V2-010~017). SEQ=256이 이제 silent 오답 대신 AssertionError |
 | 2026-08-03 | **Stage 1 리팩토링 — A1 메모리 재사용** | reuse⟺bump 비트 동일 + peak 감소 | ✅ **5/5 비트 동일**(REDUCED/MEDIUM/GQA/wide/HD32 maxdiff=0.0), activation −47~63%. 전체 gate GREEN(15/15+vendor byte-exact) |
 | 2026-08-03 | **Stage 2a A4 — 멀티-타일 + ≥256** | tile=True rel<0.05 vs ref_layer, tile<row 명령어 | ✅ SEQ128 D128 rel=0.0045(row 0.0045, 60080w vs 102894w) · SEQ128 D64 0.0012(19010w vs 35297w) · SEQ256 0.011(row=AssertionError). 개별 tile emitter 격리검증 8+4=all rel<0.001. 전체 gate GREEN | 
-| 2026-08-03 | **Stage 2a A4 — adversarial 리뷰** | 조합/레이아웃 miscompile | ⏳ 진행 예정 (const 버그 V2-018이 멀티-타일 테스트로만 잡힘 → workflow로 추가 사냥) |
+| 2026-08-03 | **Stage 2a A4 — adversarial 리뷰 (workflow, 12 agents)** | 조합/레이아웃 miscompile | ✅ 6 finder(GQA·비대칭 멀티타일·비-64 dims·정적 감사·bcast/ew 엣지·packing/feed)가 **300+ config 실행 대조**. **silent 오답 0건**. 단일 근본원인 **V2-019(HD≥128 tile 크래시)** 5건 독립 CONFIRMED → 수정. HD=128(실 Llama) tile rel=0.0052~0.028==row, **−49~52% 명령어**. gate GREEN |
 
 ---
 

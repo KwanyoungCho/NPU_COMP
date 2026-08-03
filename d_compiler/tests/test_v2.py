@@ -477,6 +477,23 @@ def test_v2_a4_multitile():
             f"{nr}w vs {nf}w ({100*(nf-nr)//nf}% fewer, gather elim)")
 
 
+def test_v2_a4_hd128_real_head_dim():
+    """★ A4 tile on HD=128 — the REAL Llama 3.2 3B head dim. At HD=128 the RoPE rotate-half
+    slice is 64-wide/64-aligned; an earlier layout rule wrongly seeded it 'tile' and the
+    row-only slice/concat/transpose emit crashed (adversarial review V2-019). The fixpoint
+    now keeps transpose/slice/concat row at any head dim, so the RoPE chain stays row while
+    the softmax + FFN islands stay tile. Validates tile==row correctness + gather elim."""
+    from npu_compiler import model
+    cfg = model.LayerConfig("hd128", SEQ=128, D=256, H=2, KV=2, HD=128, F=384,
+                            eps=1e-5, rope_base=1e4, rope_scale=False)
+    rt, nr = _run_layer(cfg, tile=True)
+    rf, nf = _run_layer(cfg, tile=False)
+    assert rt < 0.05, f"HD=128 tile wrong: rel={rt}"
+    assert abs(rt - rf) < 1e-3, f"HD=128 tile must match row oracle: {rt} vs {rf}"
+    assert nr < nf, f"HD=128 tile must emit fewer words: {nr} !< {nf}"
+    return f"A4 HD=128 (real Llama head dim): tile rel={rt:.4f} == row {rf:.4f}, {nr}w vs {nf}w"
+
+
 def test_v2_a4_unblocks_256():
     """A4 unblocks SEQ>=256: the tile softmax reduce/matmul use only 16-bit vlen + 64-wide
     tile fields (no 8-bit R/C wrap), so tile=True compiles+runs correctly where the row
@@ -508,6 +525,7 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_compile_full_layer())
     print("[PASS]", test_v2_memory_reuse())
     print("[PASS]", test_v2_a4_multitile())
+    print("[PASS]", test_v2_a4_hd128_real_head_dim())
     print("[PASS]", test_v2_a4_unblocks_256())
     print("[PASS]", test_v2_guards_reject_unsupported())
     print("ALL v2 (unified walker + REAL pipeline + v2.compile_module) TESTS PASSED")

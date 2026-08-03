@@ -604,19 +604,11 @@ def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
     def is_bcast(key):
         op = prod.get(key); return op is not None and op.opname == "broadcast_to" and _is64_2d(key)
 
-    def is_transpose(key):
-        op = prod.get(key); return op is not None and op.opname == "transpose" and _is64_2d(key)
-
-    def is_tslice(key):
-        op = prod.get(key)
-        return (op is not None and op.opname == "strided_slice"
-                and _is64_2d(key) and op.begin % 64 == 0)    # tile-column-aligned last axis
-
-    def is_concat64(key):
-        op = prod.get(key); return op is not None and op.opname == "concatenate" and _is64_2d(key)
-
-    def is_concat(key):
-        op = prod.get(key); return op is not None and op.opname == "concatenate"
+    # NOTE: transpose/strided_slice/concatenate are ROW-ONLY in v2's _emit, so they are
+    # never seeded 'tile' and never count as tile-compatible consumers below (a tile tensor
+    # feeding one is demoted to row). This keeps the RoPE chain row at ANY head dim — at
+    # HD>=128 the rotate-half slice is 64-wide/64-aligned, which a tile-seeding rule would
+    # wrongly mark tile and then crash the row-only emit (adversarial review V2-019).
 
     def _reduce_src64(key, name):
         op = prod.get(key)
@@ -636,8 +628,7 @@ def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
     layout = {}
     for op in ops:
         v = op.outn
-        layout[v] = "tile" if (is_mm64(v) or is_ew(v) or is_bcast(v) or is_transpose(v)
-                               or is_tslice(v) or is_concat64(v)) else "row"
+        layout[v] = "tile" if (is_mm64(v) or is_ew(v) or is_bcast(v)) else "row"
     for k in param_set | const_set:
         layout.setdefault(k, "row")
     tile_params = set()
@@ -672,12 +663,6 @@ def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
                         demote = True; break
                     if layout.get(k, "row") != "tile":
                         demote = True; break
-            if not demote and (is_transpose(v) or is_tslice(v)):
-                if layout.get(op.ins[0], "row") != "tile":
-                    demote = True
-            if not demote and is_concat64(v):
-                if any(layout.get(k, "row") != "tile" for k in op.ins):
-                    demote = True
             if not demote:
                 for cv in consumers.get(v, []):              # every consumer tile-compatible
                     if cv.opname == "matmul" and cv.ins[0] == v and is_mm64(cv.outn):
@@ -688,11 +673,7 @@ def _assign_layouts(params, ops, shp, const_arrs, out_name, tile_inputs=True):
                         continue                             # feeds a tile elementwise
                     if is_reduce(cv.outn) or is_max(cv.outn):
                         continue                             # feeds a tile-native reduce (reads tile src)
-                    if (is_transpose(cv.outn) or is_tslice(cv.outn)) and layout.get(cv.outn) == "tile":
-                        continue
-                    if is_concat(cv.outn):
-                        continue                             # concat relayouts its tile inputs
-                    demote = True; break
+                    demote = True; break                     # transpose/slice/concat row-only in v2 -> demote
             if demote:
                 layout[v] = "row"; changed = True
 
@@ -822,12 +803,12 @@ def _emit(ops, off, shp, top, layout, packed_params):
             walk_marker(asm, bcast_marker(intrin, Rd, Cd, Rd if col else Cd), [off[ins[0]], off[outn]], mp)
         elif opname == "transpose":                          # permute_dims [1,0]: [R,C]->[C,R]
             assert lay(ins[0]) != "tile" and lay(outn) != "tile", \
-                "v2 tile transpose not implemented (fixpoint keeps RoPE transpose row)"
+                "v2 transpose is row-only; F4 fixpoint must keep it row (see _assign_layouts)"
             R, C = shp[ins[0]]
             walk_marker(asm, transpose_marker(R, C), [off[ins[0]], off[outn]], mp)
         elif opname == "strided_slice":                      # last-axis x[:, b:b+w] only
             assert lay(outn) != "tile", \
-                "v2 tile strided_slice not implemented (RoPE half-slice is 32-wide, stays row)"
+                "v2 strided_slice is row-only; F4 fixpoint must keep it row (see _assign_layouts)"
             R, C = shp[ins[0]]
             assert len(shp[outn]) == 2 and shp[outn][0] == R, \
                 f"v2 strided_slice: only last-axis (rows unchanged), got {shp[ins[0]]}->{shp[outn]}"
@@ -835,7 +816,7 @@ def _emit(ops, off, shp, top, layout, packed_params):
             walk_marker(asm, slice_marker(R, C, op.begin, w), [off[ins[0]], off[outn]], mp)
         elif opname == "concatenate":                        # last-axis concat -> place columns
             assert lay(outn) != "tile" and all(lay(k) != "tile" for k in ins), \
-                "v2 tile concat not implemented (RoPE concat stays row)"
+                "v2 concatenate is row-only; F4 fixpoint must keep it (and its inputs) row"
             Rd, Cd = shp[outn]; ccol = 0
             assert all(shp[ins[k]][0] == Rd for k in range(len(ins))), \
                 "v2 concatenate: only last-axis (all inputs share row count)"
