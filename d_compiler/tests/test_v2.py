@@ -405,6 +405,34 @@ def test_v2_guards_reject_unsupported():
     return "guards: >=256 reduce + scalar broadcast rejected loudly (no silent miscompile)"
 
 
+def test_v2_memory_reuse():
+    """M1 pass (A1 liveness reuse): reuse=True hands a dead intermediate's slot to a later
+    same-size one. Two invariants: (1) peak G-buffer `top` shrinks (activation region), and
+    (2) it is byte-exact vs the flat-bump plan (reuse relocates data, never changes values)."""
+    from npu_compiler import model
+    cfg = model.MEDIUM
+    cos, sin, rot = model.rope_tables(cfg); W = model.make_weights(cfg, seed=7)
+    mod = relax.transform.LegalizeOps()(model.build_layer_module(cfg))
+
+    params, ops, shp, ca, outn = v2._parse(mod)
+    _, top0, _, _ = v2._plan_memory(params, ops, shp, ca, outn, reuse=False)
+    _, top1, _, _ = v2._plan_memory(params, ops, shp, ca, outn, reuse=True)
+    assert top1 < top0, f"A1 reuse did not shrink peak ({top1} !< {top0})"
+
+    def run(reuse):
+        asm, off, shp_, top, on, consts = v2.compile_module(mod, reuse=reuse)
+        g = np.zeros(top + 80000, np.float32)
+        for co, arr in consts: g[co:co + arr.size] = np.asarray(arr, np.float32).reshape(-1)
+        for nm, arr in W.items():
+            if nm in off: g[off[nm]:off[nm] + np.asarray(arr).size] = np.asarray(arr, np.float32).reshape(-1)
+        n = int(np.prod(shp_[on]))
+        return runtime.run(asm.words, g, gn=top)[off[on]:off[on] + n].copy()
+
+    a, b = run(False), run(True)
+    assert np.array_equal(a, b), "A1 reuse must be byte-exact vs flat bump"
+    return f"M1 A1 reuse: peak {top0}->{top1} ({100*(top0-top1)/top0:.0f}% smaller), byte-exact"
+
+
 if __name__ == "__main__":
     print("[PASS]", test_ew2_byte_exact_and_numeric())
     print("[PASS]", test_ew1_byte_exact_and_numeric())
@@ -416,5 +444,6 @@ if __name__ == "__main__":
     print("[PASS]", test_v2_compile_swiglu())
     print("[PASS]", test_v2_compile_rmsnorm())
     print("[PASS]", test_v2_compile_full_layer())
+    print("[PASS]", test_v2_memory_reuse())
     print("[PASS]", test_v2_guards_reject_unsupported())
     print("ALL v2 (unified walker + REAL pipeline + v2.compile_module) TESTS PASSED")

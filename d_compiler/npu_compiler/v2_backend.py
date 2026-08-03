@@ -490,53 +490,101 @@ def _first_block(pf):
     return names[0]
 
 
-def compile_module(mod):
-    """Compile a `LegalizeOps`'d Relax IRModule ("main" = call_tir sequence) to NPU ISA.
+class _Op:
+    """One legalized op in emission order (a decoded `call_tir` binding)."""
+    __slots__ = ("opname", "gvar", "ins", "outn", "begin")
 
-    Dispatch per op: matmul -> v1 emit_matmul_into (the tensorize-derived canonical GEMM);
-    binary elementwise -> the unified walker marker (contiguous, layout-transparent).
-    Bump-allocates the flat G-buffer (params + every intermediate). This is the working
-    v2 pipeline core; TVM memory reuse (StaticPlanBlockMemory) and more ops come next.
+    def __init__(self, opname, gvar, ins, outn, begin=0):
+        self.opname = opname; self.gvar = gvar
+        self.ins = ins; self.outn = outn; self.begin = begin
 
-    Returns (asm, offsets{name->off}, shapes{name->shape}, top, out_name)."""
+
+def _parse(mod):
+    """Pass F5-read: legalized Relax "main" (a call_tir sequence) -> structure only.
+    Returns (params, ops, shp{key->shape}, const_arrs{key->ndarray}, out_name). Constants
+    are keyed by (binding, arg) POSITION — TVM re-wraps FFI nodes so id() is unstable."""
     main = mod["main"]
-    off, shp, top = {}, {}, [0]
-
-    def alloc(nm, sh):
-        off[nm] = top[0]; shp[nm] = sh; top[0] += _numel(sh)
-
+    shp, params = {}, []
     for p in main.params:
-        alloc(p.name_hint, [int(d) for d in p.struct_info.shape])
+        shp[p.name_hint] = [int(d) for d in p.struct_info.shape]
+        params.append(p.name_hint)
     binds = [bd for blk in main.body.blocks for bd in blk.bindings
              if isinstance(bd.value, _relax.Call)
              and getattr(bd.value.op, "name", "") == "relax.call_tir"]
-    for bd in binds:
-        alloc(bd.var.name_hint, [int(d) for d in bd.var.struct_info.shape])
-    # constants (materialized full-size by legalize). Key by (binding, arg) POSITION:
-    # TVM re-wraps FFI nodes on each access so id()/identity is unstable across passes.
-    const_inits = []
-    for i, bd in enumerate(binds):
-        for j, a in enumerate(bd.value.args[1].fields):
-            if isinstance(a, _relax.Constant):
-                arr = a.data.numpy()
-                nm = "__const_%d_%d" % (i, j)
-                alloc(nm, list(arr.shape))
-                const_inits.append((off[nm], arr))
-
-    def ref(i, j, a):                                        # call_tir arg -> offset-key
-        return "__const_%d_%d" % (i, j) if isinstance(a, _relax.Constant) else a.name_hint
-
-    mp = _memplan.MemPlan(); mp.top = top[0]
-    asm = Asm()
-    _EW1_OPS = set(_EW1) | {"silu"}
+    const_arrs, ops = {}, []
     for i, bd in enumerate(binds):
         val = bd.value
         gvar = val.args[0].name_hint
         opname = gvar.rstrip("0123456789")                   # "matmul1" -> "matmul"
         if opname.startswith("tir_"):                        # "tir_sqrt" -> "sqrt"
             opname = opname[4:]
-        ins = [ref(i, j, a) for j, a in enumerate(val.args[1].fields)]
+        ins = []
+        for j, a in enumerate(val.args[1].fields):
+            if isinstance(a, _relax.Constant):
+                key = "__const_%d_%d" % (i, j)
+                arr = a.data.numpy()
+                const_arrs[key] = arr; shp[key] = list(arr.shape); ins.append(key)
+            else:
+                ins.append(a.name_hint)
         outn = bd.var.name_hint
+        shp[outn] = [int(d) for d in bd.var.struct_info.shape]
+        begin = _slice_last_begin(mod[gvar]) if opname == "strided_slice" else 0
+        ops.append(_Op(opname, gvar, ins, outn, begin))
+    out = main.body.body                                     # resolve returned var thru aliases
+    val_of = {bd.var: bd.value for blk in main.body.blocks for bd in blk.bindings}
+    while isinstance(val_of.get(out), _relax.Var):
+        out = val_of[out]
+    return params, ops, shp, const_arrs, out.name_hint
+
+
+def _plan_memory(params, ops, shp, const_arrs, out_name, reuse=True):
+    """Pass M1: assign a flat G-buffer offset to every tensor.
+
+    Params are all live at t=0 (host loads them up-front) and constants are materialized
+    by legalize -> both persist for the whole program (never reused). reuse=True adds v1's
+    A1 optimization for INTERMEDIATES: liveness (last read per tensor) + an exact-size
+    free-list, so a tensor's slot is handed to a later same-size tensor once it's dead.
+    Value-invariant (relocates data only) -> byte-exact vs reuse=False; only `top` shrinks.
+    Returns (off, top, const_inits, no_reuse_top)."""
+    off, top = {}, [0]
+
+    def bump(nm):
+        off[nm] = top[0]; top[0] += _numel(shp[nm])
+
+    for p in params:
+        bump(p)
+    const_keys = list(const_arrs)
+    for k in const_keys:
+        bump(k)
+    keep = set(params) | set(const_keys) | {out_name}        # never freed (persist / output)
+    last_read = {}                                            # last op index reading each tensor
+    for i, op in enumerate(ops):
+        for k in op.ins:
+            last_read[k] = i
+    no_reuse_top = top[0] + sum(_numel(shp[op.outn]) for op in ops)   # bump-only footprint
+    free = {}                                                # footprint -> [freed offsets]
+    for i, op in enumerate(ops):
+        sz = _numel(shp[op.outn])                            # allocate output BEFORE freeing
+        lst = free.get(sz) if reuse else None                # inputs (no self-alias in one op)
+        off[op.outn] = lst.pop() if lst else top[0]
+        if not lst:
+            top[0] += sz
+        if reuse:
+            for k in dict.fromkeys(op.ins):                  # dedup: free each dead input once
+                if last_read.get(k) == i and k not in keep:
+                    free.setdefault(_numel(shp[k]), []).append(off[k])
+    const_inits = [(off[k], const_arrs[k]) for k in const_keys]
+    return off, top[0], const_inits, no_reuse_top
+
+
+def _emit(ops, off, shp, top):
+    """Pass C1: lower each op to NPU ISA via the unified walker (markers) / v1 matmul.
+    `mp` supplies codegen-internal scratch above the planned `top`."""
+    mp = _memplan.MemPlan(); mp.top = top
+    asm = Asm()
+    _EW1_OPS = set(_EW1) | {"silu"}
+    for op in ops:
+        opname, ins, outn = op.opname, op.ins, op.outn
         if opname == "matmul":                               # matmul -> v1 proven path
             M, K = shp[ins[0]]; _, N = shp[ins[1]]
             emit_matmul_into(asm, mp, off[outn], off[ins[0]], off[ins[1]], M, K, N)
@@ -571,8 +619,7 @@ def compile_module(mod):
             assert len(shp[outn]) == 2 and shp[outn][0] == R, \
                 f"v2 strided_slice: only last-axis (rows unchanged), got {shp[ins[0]]}->{shp[outn]}"
             w = shp[outn][1]
-            b = _slice_last_begin(mod[gvar])
-            walk_marker(asm, slice_marker(R, C, b, w), [off[ins[0]], off[outn]], mp)
+            walk_marker(asm, slice_marker(R, C, op.begin, w), [off[ins[0]], off[outn]], mp)
         elif opname == "concatenate":                        # last-axis concat -> place columns
             Rd, Cd = shp[outn]; ccol = 0
             assert all(shp[ins[k]][0] == Rd for k in range(len(ins))), \
@@ -583,9 +630,19 @@ def compile_module(mod):
                 ccol += Ck
         else:
             raise TirBackendError(f"v2.compile_module: op '{opname}' not handled yet")
+    return asm
 
-    out = main.body.body                                     # resolve returned var thru aliases
-    val_of = {bd.var: bd.value for blk in main.body.blocks for bd in blk.bindings}
-    while isinstance(val_of.get(out), _relax.Var):
-        out = val_of[out]
-    return asm, off, shp, top[0], out.name_hint, const_inits
+
+def compile_module(mod, reuse=True):
+    """Compile a `LegalizeOps`'d Relax IRModule ("main" = call_tir sequence) to NPU ISA
+    through an explicit 3-pass pipeline:
+      _parse   (F5-read) : legalized Relax -> ops + tensor table + constants
+      _plan_memory (M1)  : liveness + exact-size free-list -> offsets (A1 reuse)
+      _emit    (C1)      : unified TIR->ISA lowering (walker markers / v1 matmul)
+    reuse=False disables A1 (flat bump) — used to measure the reuse win.
+
+    Returns (asm, offsets{name->off}, shapes{name->shape}, top, out_name, const_inits)."""
+    params, ops, shp, const_arrs, out_name = _parse(mod)
+    off, top, const_inits, _ = _plan_memory(params, ops, shp, const_arrs, out_name, reuse)
+    asm = _emit(ops, off, shp, top)
+    return asm, off, shp, top, out_name, const_inits

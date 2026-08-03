@@ -32,6 +32,7 @@
 | **1** | path-무관 안전 정리 | ⚪ 선택적/후순위 | layout·liveness는 이미 별도 함수 → ROI 낮음, 필요시만 |
 | **2** | NPU ISA→TIR intrinsic + `_Walker` 일반화 | 🟢 대부분 | matmul + elementwise + reduce + broadcast + transpose/slice/concat 전부 walker로 |
 | **3** | v2.compile() 파이프라인 조립 | 🟢 **완전한 레이어 컴파일** | `build_layer_module` → v2.compile_module → mysim, **ref_layer 대비 rel=0.0011** |
+| **3-R** | **compile_module 리팩토링 → 명시적 pass 파이프라인 + v1 최적화 이식** | 🟡 진행 | Stage 1 완료(파이프라인 분해 `_parse`/`_plan_memory`/`_emit` + **A1 liveness 재사용**, act −47~63%, byte-exact). Stage 2=A4 tile, Stage 3=fusion |
 | **3** | Relax 파이프라인 완성 + 메모리 TVM화 | ⚪ 대기 | — |
 | **4** | cost 기반 타깃 선택 (cycle 도착 후) | ⚪ 유보 | cost model 필요 |
 
@@ -103,6 +104,8 @@
 | 2026-07-27 | **★ REAL 파이프라인 e2e 증명** | 3 | ✅ `Relax add → LegalizeOps → tir.Schedule(split CH + tensorize `npu_vadd`) → V2Walker → mysim == numpy`. **hand-marker가 아닌 진짜 TVM 흐름**이 non-matmul op에서 동작. enabler = `_bind_match` **N-D 일반화**(Probe C R4 해소: 2D matmul 전용 → 임의 rank). gate GREEN | v2_backend.py(_vadd intrin, schedule_ew, _bind_match override), test_v2.py |
 | 2026-07-27 | **레이아웃 spike — Relax layout_transform** | 2 | ✅ `layout_transform(index_map (r,c)->(r//64,c//64,r%64,c%64))`가 tile-blocked `[Rt,Ct,64,64]` 표현 → **표준 TIR copy-reindex로 legalize**(순수 copy, //·%는 인덱스만). v1 수제 pack/relayout을 **TVM 표준 op로 대체 가능** 확정. → V2-009 | spike_layout.py |
 | 2026-07-26 | v1 코드 확인 (tir_backend.py:44-126) | 0/2 | **★ v1은 이미 tensorize matmul 컴파일러** — `npu_gemm_acc`/`npu_fill_zero` TensorIntrin 등록 + `schedule_matmul`(canonical recipe) + walker lowering, byte-exact. → Phase 2 "matmul tensorize" step 사실상 완료. 남은 건 non-matmul op 일반화 | tir_backend.py |
+| 2026-08-03 | **자기검토 — compile_module이 계획대로인가?** | 3-R | ❗ 진단: `compile_module`이 계획한 pass 파이프라인이 아니라 **모놀리식 op-dispatcher**(자체 bump 메모리·op별 손 marker·layout/fusion 패스 없음)로 흐름 = **v1 "복잡한 단일 pass" 재현**. v1 `plan()`의 A1/A4/packing을 **전혀 안 씀**. 사용자 지적 타당 → 리팩토링 착수 | — |
+| 2026-08-03 | **Stage 1 — 파이프라인 분해 + A1 메모리 재사용** | 3-R | ✅ `compile_module`을 3-pass로 분해: `_parse`(F5-read: legalized Relax→ops+tensor table+consts) → `_plan_memory`(M1: **liveness last-read + exact-size free-list**, params/consts/output persist) → `_emit`(C1: walker/matmul). **A1이 legalized 그래프에서 이식됨**(high-level op 이름 불필요). 측정: activation 영역 **−47~63%**(REDUCED 47.9·MEDIUM 63.2·GQA 50.0·wide 52.8·HD32 47.1%), reuse⟺bump **비트 동일 5/5**. gate GREEN, `test_v2_memory_reuse` 편입 | v2_backend.py(_Op/_parse/_plan_memory/_emit), test_v2.py |
 | 2026-07-26 | Probe C (codegen 일반화 평가) | 0 | **MEDIUM/GO** — walker가 이미 tensorized matmul TIR을 프로덕션 lower(O-proj group, byte-exact 검증). ~90% 재사용. 새 작업=cache stage(V2-003). 전략=fast-path 유지+walker fallback(V2-004). byte-exact는 schedule 변경 시 상실→tolerance(V2-005) | — |
 
 ---
@@ -115,6 +118,7 @@
 | 2026-07-27 | v2.compile_module 서브그래프(matmul chain, SwiGLU, RMSNorm) | mysim==numpy tolerance | ✅ maxdiff≤0.008 |
 | 2026-07-27 | **v2.compile_module 완전한 레이어 (multi-config)** | v1 `ref_layer` 대비 rel<0.05 | ✅ **5/5 PASS**: REDUCED 0.0011 · MEDIUM 0.0012 · GQA(H4/KV2) 0.0009 · wide(D192/F384) 0.0043 · HD32 0.0024 |
 | 2026-07-27 | v2 adversarial 코드리뷰 (workflow, 15 agents) | 확인된 correctness 버그 | **8 distinct 버그 발견·전부 검증** → guard 복원으로 loud-fail 처리(V2-010~017). SEQ=256이 이제 silent 오답 대신 AssertionError |
+| 2026-08-03 | **Stage 1 리팩토링 — A1 메모리 재사용** | reuse⟺bump 비트 동일 + peak 감소 | ✅ **5/5 비트 동일**(REDUCED/MEDIUM/GQA/wide/HD32 maxdiff=0.0), activation −47~63%. 전체 gate GREEN(15/15+vendor byte-exact) |
 
 ---
 
@@ -129,3 +133,5 @@
 | `dc154fa` | **course-correct** — thin native-ISA 매핑 + copy/ttile primitive (v1 워크어라운드 안 옮김) |
 | `10c5942` | 레이아웃 spike — tile-blocked = Relax layout_transform 확정, fork→(ii) |
 | `cea3547` | **★ REAL 파이프라인 e2e** — Relax→LegalizeOps→tensorize→walker→mysim + `_bind_match` N-D |
+| `82340b9`~`5ef22ca` | Phase 3 — compile_module e2e → unary ew → consts/reduce/broadcast → **FULL LAYER** → 5-config 검증 → correctness hardening(guard 복원) |
+| *(this)* | **Stage 1 리팩토링** — compile_module을 `_parse`/`_plan_memory`/`_emit` 3-pass로 분해 + **A1 liveness 메모리 재사용 이식**(act −47~63%, byte-exact) |
