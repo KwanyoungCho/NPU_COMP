@@ -82,6 +82,8 @@
 | V3-022 | RESOLVED | MEDIUM | RMS binding 추가 후 legacy A1 reuse에서 동일 physical offset이 free-list에 중복 삽입되어 live tensor 충돌 | free-list를 offset set으로 변경하고 bump 조건 수정. prefill/decode byte-exact, v2 comprehensive 회귀 통과 |
 | V3-023 | MITIGATED | BLOCKER | G-buffer generator만 8192보다 크게 만들면 vendor `a.out`의 16384-byte 정적 배열을 넘겨 BSS를 덮어씀 | vendor runtime은 계속 8192 초과를 거부하고, full-model은 parity-tested 동적 source C-model target으로 분리 |
 | V3-024 | RESOLVED | HIGH | source C-model의 G-buffer를 확장하면서 vendor arithmetic/quirk parity가 달라질 위험 | 기본 8192 parity는 64개 program+targeted quirk로 유지하고, compiler-owned source runtime만 동적 flat buffer와 quiet mode 사용 |
+| V3-025 | RESOLVED | BLOCKER | 8K 안에서는 드러나지 않던 scalar broadcast 주소 상위 16-bit 누락으로 확장 source RMSNorm이 거의 0 출력 | opcode `0x15` low/high를 매번 모두 emit해 stale high state도 제거. address 70000 broadcast 및 official layer 0 검증 |
+| V3-026 | RESOLVED | HIGH | official V3 prefill output에 K/V가 없어 decode cache를 seed할 수 없음 | fused prefill이 `[hidden,K0,V0,...]`을 반환하는 선택 경로와 exact-context fused decode/KV graph 구현 |
 
 ---
 
@@ -306,6 +308,36 @@ weight/activation/누산 tile을 반복 반입해야 했기 때문이다.
 
 이 단계는 V3-023의 vendor binary 자체를 변경하지 않는다. vendor oracle은 계속 8192
 경계까지의 parity 기준으로 보존하고, 확장 실행은 동일 source semantics 위에서 수행한다.
+
+### 2026-08-18 — Stage V3.8: expanded row-major backend와 decode graph
+
+- `backend="source-0818"`은 vendor와 같은 ver.08 row-major codegen을 사용하되 8192-entry
+  compile guard 없이 동적 source runtime으로 실행한다. 입력 G-buffer와 snapshot은 FP16로
+  유지하여 대형 graph의 host memory 복제를 줄였다.
+- 8K vendor 경계 안에서는 scalar broadcast 주소가 항상 16-bit여서 backend가 opcode
+  `0x15` low half만 emit해도 우연히 동작했다. expanded plan에서는 RMSNorm scalar가
+  address 65535 밖에 배치되어 잘못된 값을 읽었다(V3-025).
+  - `v_broadcast_addr()`가 32-bit address low/high를 모두 emit
+  - high가 0이어도 항상 emit하여 이전 broadcast의 high state를 제거
+  - address 70000의 `6.5`를 address 66000에 3-lane broadcast하는 회귀 통과
+- official fused graph 확장:
+  - prefill 선택 output: `[hidden, K0, V0, ..., K7, V7]`
+  - decode K/V projection: fused official `k_proj`/`v_proj`, 현재 position RoPE
+  - decode layer: exact populated context 길이의 Kt/V cache, fused Q/O, GQA,
+    stable softmax, SwiGLU
+  - host는 산술 없이 현재 token K/V를 cache 끝에 append
+- 작은 GQA graph에서 단일-program source와 fixed-window streaming oracle 비교를 통과했다.
+  K-tile 사이 snapshot 반올림이 사라져 decode residual은 최대 FP16 1 ULP 차이가 허용된다.
+- official 7-token/3B 정적 크기:
+  - prefill layer: 497,206 words, 101,084,262 FP16 entries
+  - decode K/V: 30,449 words, 6,316,741 FP16 entries
+  - LM head: 1,845,685 words, 394,133,760 FP16 entries
+  - 모두 uint32 flat G-buffer address 범위 이내
+- official layer 0 source 실행:
+  - wall 8.20초
+  - HF hidden 대비 max abs 0.1953, mean abs 0.000591, RMSE 0.003991,
+    cosine 0.9999837
+  - 기존 vendor streaming 결과와 동등한 정확도이며 finite
 
 ## 5. 1차 목표 판정
 

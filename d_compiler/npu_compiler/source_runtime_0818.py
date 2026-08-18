@@ -48,7 +48,7 @@ def _environment():
     return env
 
 
-def run(program, gbuf, *, capture_trace=False, source_bin=None):
+def run(program, gbuf, *, capture_trace=False, source_bin=None, output_dtype=np.float32):
     """Execute a program with a dynamically sized source-model G-buffer."""
     executable = Path(source_bin).resolve() if source_bin else build_source_model()
     if not executable.exists():
@@ -75,7 +75,11 @@ def run(program, gbuf, *, capture_trace=False, source_bin=None):
         raw = saved.read_bytes()
         if not raw or raw[-1:] != b"\n" or (len(raw) - 1) % 2:
             raise RuntimeError(f"malformed source-model snapshot size {len(raw)}")
-        output = np.frombuffer(raw[:-1], dtype="<f2").astype(np.float32)
+        output = np.frombuffer(raw[:-1], dtype="<f2")
+        if np.dtype(output_dtype) == np.dtype(np.float16):
+            output = output.copy()
+        else:
+            output = output.astype(output_dtype)
     if capture_trace:
         return output, proc.stdout.decode(errors="replace")
     return output

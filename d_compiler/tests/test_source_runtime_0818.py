@@ -24,6 +24,16 @@ def test_dynamic_gbuffer_above_vendor_limit():
     assert output[10000] == np.float16(5.25)
 
 
+def test_broadcast_uses_full_32bit_scalar_address():
+    values = np.zeros(70001, dtype=np.float16)
+    values[70000] = np.float16(6.5)
+    program = Asm().vlen(3).v_broadcast_addr(70000)
+    program.addr(DST, 66000).save(0).finish()
+    output = run(program, values)
+    assert np.array_equal(output[66000:66003], np.full(3, 6.5, dtype=np.float16))
+
+
 if __name__ == "__main__":
     test_dynamic_gbuffer_above_vendor_limit()
+    test_broadcast_uses_full_32bit_scalar_address()
     print("ALL EXTENDED 0818 SOURCE-RUNTIME TESTS PASSED")

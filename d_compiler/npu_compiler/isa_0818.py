@@ -210,6 +210,15 @@ class Asm:
     def v_reduce_max(self): return self._emit(enc_reduce_max())
     def v_broadcast(self, mode=SCALAR, imm=0, high=False):
         return self._emit(enc_broadcast(mode, imm, high))
+    def v_broadcast_addr(self, address):
+        """Broadcast from a complete 32-bit scalar G-buffer address.
+
+        Opcode 0x15 updates one address half and also executes, so the low-half
+        result is intentionally overwritten by the following high-half result.
+        Always emitting both halves also clears stale high state in long programs.
+        """
+        self._emit(enc_broadcast(SCALAR, address, False))
+        return self._emit(enc_broadcast(SCALAR, address >> 16, True))
     def v_sign_inv(self): return self._emit(enc_sign_inv())
     def v_copy(self): return self._emit(enc_copy())
     def v_cos(self): return self._emit(enc_cossin(False))

@@ -154,7 +154,7 @@ def compile_func(func, mp, *, tile=64, validate=True, emit_log=None):
         if src_total == 1:
             for base in range(0, total, GBUF_CAPACITY):
                 length = min(GBUF_CAPACITY, total - base)
-                a.vlen(length).v_broadcast(SCALAR, off[src])
+                a.vlen(length).v_broadcast_addr(off[src])
                 a.addr(DST, off[dst] + base).save(0)
             return
         if len(dst_shape) != 2:
@@ -171,7 +171,7 @@ def compile_func(func, mp, *, tile=64, validate=True, emit_log=None):
             for row in range(rows):
                 for col in range(0, cols, GBUF_CAPACITY):
                     length = min(GBUF_CAPACITY, cols - col)
-                    a.vlen(length).v_broadcast(SCALAR, off[src] + row)
+                    a.vlen(length).v_broadcast_addr(off[src] + row)
                     a.addr(DST, off[dst] + row * cols + col).save(0)
             return
         raise CodegenError(f"broadcast {src_shape} -> {dst_shape} unsupported")

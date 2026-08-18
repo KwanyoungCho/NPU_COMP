@@ -38,6 +38,9 @@ class VendorSession:
         self._temp = tempfile.TemporaryDirectory(prefix="npu-v3-")
         self.workdir = Path(self._temp.name)
         self.env = os.environ.copy()
+        # The vendor binary ignores this.  The parity source model uses it to
+        # skip trace formatting without changing arithmetic or snapshots.
+        self.env["NPU0818_QUIET"] = "1"
         library = _libstdcxx_dir()
         if library:
             self.env["LD_LIBRARY_PATH"] = library + (

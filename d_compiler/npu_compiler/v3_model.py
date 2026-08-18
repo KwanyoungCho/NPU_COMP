@@ -131,6 +131,22 @@ class Llama32Assets:
             f"layer{layer}.{module}",
         )
 
+    def linear(self, layer, module, shape):
+        """Materialize one official linear weight as row-major B[K,N]."""
+        shape = tuple(int(value) for value in shape)
+        key = f"model.layers.{int(layer)}.{module}.weight"
+        matrix_nk = self._slice(key, (slice(None), slice(None)))
+        if matrix_nk.shape != (shape[1], shape[0]):
+            raise ModelAssetError(
+                f"{key} has checkpoint shape {matrix_nk.shape}, expected {(shape[1], shape[0])}")
+        return np.ascontiguousarray(matrix_nk.T)
+
+    def lm_head(self):
+        """Materialize the tied embedding as row-major LM-head B[D,V]."""
+        matrix_vk = self._slice(
+            "model.embed_tokens.weight", (slice(None), slice(None)))
+        return np.ascontiguousarray(matrix_vk.T)
+
     def norm(self, layer, post_attention=False):
         name = "post_attention_layernorm" if post_attention else "input_layernorm"
         return self._slice(f"model.layers.{layer}.{name}.weight", slice(None))

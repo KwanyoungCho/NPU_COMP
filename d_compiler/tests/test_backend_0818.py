@@ -117,6 +117,17 @@ def test_vendor_capacity_is_checked_at_compile_time():
         raise AssertionError("expected the real vendor G-buffer limit to be rejected")
 
 
+def test_source_backend_extends_same_row_major_plan():
+    mod = _binary_module([3000], relax.op.add)  # 9000 entries exceeds vendor storage
+    lhs = np.arange(3000, dtype=np.float16)
+    rhs = np.full(3000, 2, dtype=np.float16)
+    asm, mp = driver.compile_module(mod, backend="source-0818")
+    assert mp.top == 9000
+    assert asm.execution_target == "source-0818"
+    got = driver.run_compiled(asm, mp, {"lhs": lhs, "rhs": rhs})
+    assert np.array_equal(got, np.asarray(lhs + rhs, dtype=np.float16).astype(np.float32))
+
+
 if __name__ == "__main__":
     test_row_major_direct_subtile_matmul()
     test_negative_row_max_avoids_native_vendor_bug()
@@ -124,4 +135,5 @@ if __name__ == "__main__":
     test_full_capacity_transpose_has_no_tile_blocked_scratch()
     test_native_scalar_broadcast()
     test_vendor_capacity_is_checked_at_compile_time()
+    test_source_backend_extends_same_row_major_plan()
     print("ALL 0818 BACKEND TESTS PASSED")
