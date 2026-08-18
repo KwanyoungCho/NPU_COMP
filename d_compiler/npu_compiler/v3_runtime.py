@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .isa_0818 import ACT_SILU, DST, IMM, SRC1, SRC2, VECTOR, Asm
+from .isa_0818 import ACT_SILU, DST, IMM, SCALAR, SRC1, SRC2, VECTOR, Asm
 from .runtime_0818 import (
     GBUF_CAPACITY,
     PROGRAM_CAPACITY,
@@ -204,6 +204,105 @@ class VendorSession:
             snapshot = self.run_program(self._binary_program(name, length), working)
             output[start:start + length] = snapshot[2 * length:3 * length]
         return output.reshape(lhs.shape)
+
+    def broadcast_to(self, values, shape):
+        """Broadcast scalar/row/column tensors with the native 0x15 opcode."""
+        values = np.asarray(values, dtype=np.float16)
+        shape = tuple(int(dim) for dim in shape)
+        if values.shape == shape:
+            return values.copy()
+        if len(shape) != 2:
+            raise ValueError(f"vendor broadcast requires rank-2 output, got {shape}")
+        rows, cols = shape
+        output = np.empty(shape, dtype=np.float16)
+
+        if values.size == 1:
+            flat = output.reshape(-1)
+            max_output = GBUF_CAPACITY - 1
+            for start in range(0, flat.size, max_output):
+                length = min(max_output, flat.size - start)
+                key = ("broadcast_scalar", length)
+                if key not in self.program_cache:
+                    self.program_cache[key] = (
+                        Asm().vlen(length).v_broadcast(SCALAR, 0)
+                        .addr(DST, 1).save(0).finish()
+                    )
+                working = np.concatenate((values.reshape(1),
+                                          np.zeros(length, dtype=np.float16)))
+                flat[start:start + length] = self.run_program(
+                    self.program_cache[key], working)[1:1 + length]
+            return output
+
+        row_source = values.shape in ((cols,), (1, cols))
+        if row_source:
+            row = values.reshape(cols)
+            rows_per_call = (GBUF_CAPACITY - cols) // cols
+            if rows_per_call < 1:
+                raise ValueError(f"row broadcast width {cols} exceeds streaming capacity")
+            for row0 in range(0, rows, rows_per_call):
+                count = min(rows_per_call, rows - row0)
+                key = ("broadcast_row", cols, count)
+                if key not in self.program_cache:
+                    asm = Asm()
+                    for index in range(count):
+                        asm.vlen(cols).addr(SRC1, 0).load(0, SRC1).v_copy()
+                        asm.addr(DST, cols + index * cols).save(0)
+                    self.program_cache[key] = asm.finish()
+                working = np.concatenate((row, np.zeros(count * cols, dtype=np.float16)))
+                snapshot = self.run_program(self.program_cache[key], working)
+                output[row0:row0 + count] = snapshot[cols:cols + count * cols].reshape(
+                    count, cols)
+            return output
+
+        if values.shape == (rows, 1):
+            rows_per_call = GBUF_CAPACITY // (cols + 1)
+            if rows_per_call < 1:
+                raise ValueError(f"column broadcast width {cols} exceeds streaming capacity")
+            for row0 in range(0, rows, rows_per_call):
+                count = min(rows_per_call, rows - row0)
+                key = ("broadcast_col", cols, count)
+                if key not in self.program_cache:
+                    asm = Asm()
+                    for index in range(count):
+                        asm.vlen(cols).v_broadcast(SCALAR, index)
+                        asm.addr(DST, count + index * cols).save(0)
+                    self.program_cache[key] = asm.finish()
+                source = values[row0:row0 + count, 0]
+                working = np.concatenate((source, np.zeros(count * cols, dtype=np.float16)))
+                snapshot = self.run_program(self.program_cache[key], working)
+                output[row0:row0 + count] = snapshot[count:count + count * cols].reshape(
+                    count, cols)
+            return output
+
+        raise ValueError(f"unsupported vendor broadcast {values.shape} -> {shape}")
+
+    def transpose2d(self, values):
+        """Transpose a row-major tensor through strided arbitrary sub-tile loads."""
+        values = np.asarray(values, dtype=np.float16)
+        if values.ndim != 2:
+            raise ValueError(f"transpose2d expects rank 2, got {values.shape}")
+        rows, cols = values.shape
+        output = np.empty((cols, rows), dtype=np.float16)
+        for row0 in range(0, rows, 64):
+            part_rows = min(64, rows - row0)
+            for col0 in range(0, cols, 64):
+                part_cols = min(64, cols - col0)
+                tile = np.ascontiguousarray(
+                    values[row0:row0 + part_rows, col0:col0 + part_cols])
+                key = ("transpose", part_rows, part_cols)
+                if key not in self.program_cache:
+                    size = part_rows * part_cols
+                    asm = Asm().matrix_region(SRC1, 0, part_rows, part_cols)
+                    asm.load(1, SRC1, strided=1, ncols=part_cols, start=0)
+                    asm.shape(SRC1, part_cols, part_rows).m_add(IMM, 0)
+                    asm.matrix_region(DST, size, part_cols, part_rows).save(1).finish()
+                    self.program_cache[key] = asm
+                working = np.concatenate((tile.reshape(-1),
+                                          np.zeros(tile.size, dtype=np.float16)))
+                snapshot = self.run_program(self.program_cache[key], working)
+                output[col0:col0 + part_cols, row0:row0 + part_rows] = snapshot[
+                    tile.size:2 * tile.size].reshape(part_cols, part_rows)
+        return output
 
     def _unary_program(self, name, length):
         key = ("unary", name, length)

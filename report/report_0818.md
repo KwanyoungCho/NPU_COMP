@@ -72,6 +72,8 @@
 | V3-012 | MITIGATED | HIGH | vendor invocation 사이에는 PE MAC 상태가 사라짐 | running C를 snapshot에서 host로 carry하고 다음 invocation 시작 시 PE output으로 load한 후 MAC bit 27 실행 |
 | V3-013 | MITIGATED | HIGH | vendor stdout trace가 큰 실행에서 pipe 메모리·I/O를 폭증시킴 | parity 때만 capture하고 production streaming은 `/dev/null`. vendor 내부 formatting 비용은 잔존 |
 | V3-014 | RESOLVED | HIGH | SiLU는 독립 unary opcode가 아니라 matrix ALU activation field라 기본 VECTOR mode 사용 시 미초기화 SRC2를 참조 | `matrix add immediate 0 + ACT_SILU`로 identity 연산 후 activation 수행 |
+| V3-015 | RESOLVED | BLOCKER | 기존 Relax backend는 graph 전체 tensor를 한 G-buffer에 배치하므로 real layer가 8192 capacity를 근본적으로 초과 | Relax binding을 host-resident value와 bounded vendor kernel 호출로 compile하는 `RelaxVendorPlan` 구현 |
+| V3-016 | MITIGATED | MEDIUM | indirect addressing이 없어 slice/concat을 vendor 안에서 동적 주소로 연결할 수 없음 | slice/concat은 산술 없는 host layout operation, transpose/broadcast와 모든 model arithmetic은 vendor opcode로 실행 |
 
 ---
 
@@ -134,3 +136,23 @@ G-buffer는 8192 FP16뿐이다. 다음 단계는 `[A tile, B tile, running C til
 8192-entry window로 읽기 위해 필요한 수십만 회의 vendor process 실행과 vendor 내부
 trace formatting이다. 다음 단계에서 Relax graph를 host-resident tensor execution plan으로
 compile하여 layer 연산 전체를 이 primitive들로 연결하고 실제 invocation/time을 측정한다.
+
+### 2026-08-18 — Stage V3.3: Relax small-graph end-to-end
+
+- `RelaxVendorPlan`은 정규화된 Relax `SeqExpr`를 사전에 검증하고 17종 binding을
+  static execution plan으로 변환한다. 기존 `memplan.top` 전역 배치는 사용하지 않는다.
+- 지원 경로: matmul, add/sub/mul/div, sqrt/exp/negative/cos/sin/SiLU,
+  last-axis sum/max, broadcast, transpose, strided-slice, concat.
+- native broadcast(0x15)는 scalar/row/column source를 8192-entry 단위로 분할한다.
+- transpose는 최대 64x64 arbitrary sub-tile의 strided matrix load/save로 실행한다.
+- slice/concat만 host가 row-major layout을 재조합한다. 값 계산은 없으며, 나머지 Relax
+  binding은 모두 제공 vendor binary를 호출한다.
+- reduced Llama prefill(`S=2,D=64,H=4,KV=2,HD=16,F=128`) 결과:
+  - Relax binding 135개, matmul 23개, stable softmax max 4개
+  - host layout binding 19개(slice 12 + concat 7)
+  - vendor invocation 131회, vendor 실행 누적 0.703초, cache된 program 31개
+  - 동일 streaming-FP16-boundary NumPy reference와 max error **0.0**
+
+이제 컴파일 경로가 small graph 수준에서 연결되었다. 다음 단계는 official tensor naming과
+fused Q/K/V/O projection을 이 execution model에 연결하여 layer 하나를 실제 3B shape와
+weight로 실행하는 것이다.

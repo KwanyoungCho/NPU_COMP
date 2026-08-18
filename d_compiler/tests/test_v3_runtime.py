@@ -53,6 +53,14 @@ def test_streaming_gemm_and_primitives():
         negative = -np.arange(1, 100, dtype=np.float16).reshape(9, 11)
         assert np.array_equal(vendor.reduce_max_last(negative),
                               negative.max(-1, keepdims=True))
+        col = np.arange(9, dtype=np.float16).reshape(9, 1)
+        assert np.array_equal(vendor.broadcast_to(col, (9, 137)),
+                              np.broadcast_to(col, (9, 137)))
+        row = np.arange(137, dtype=np.float16).reshape(1, 137)
+        assert np.array_equal(vendor.broadcast_to(row, (9, 137)),
+                              np.broadcast_to(row, (9, 137)))
+        matrix = np.asarray(rng.normal(size=(67, 70)), dtype=np.float16)
+        assert np.array_equal(vendor.transpose2d(matrix), matrix.T)
         assert vendor.stats()["invocations"] > 0
 
 
