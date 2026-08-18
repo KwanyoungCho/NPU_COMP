@@ -65,6 +65,9 @@
 | V3-005 | MITIGATED | MEDIUM | `0xF0`은 HALT가 아니며 snapshot 후 계속 실행 | generated program의 마지막 유효 word로 `0xF0` 하나만 배치 |
 | V3-006 | MITIGATED | MEDIUM | vector save lane 수가 연산 결과 크기가 아니라 현재 `vlen`으로 결정 | scalar reduction 직후 `vlen=1` 명시 |
 | V3-007 | OPEN | MEDIUM | 제공 64개 예제 대부분이 0710 encoding을 유지하여 새 기능 coverage가 부족 | compiler-owned targeted vendor parity 프로그램 유지·확장 |
+| V3-008 | RESOLVED | BLOCKER | full checkpoint와 tokenizer가 로컬에 없어 실제 token 검증 불가 | official revision `13afe512...`의 2개 shard와 tokenizer를 ignored build 영역에 확보. 총 weight 6,425,529,048 bytes |
+| V3-009 | OPEN | HIGH | official weight는 BF16이지만 vendor G-buffer 입력은 FP16 | safetensors tile을 읽을 때 FP16 변환. reference도 같은 변환 지점으로 맞춰 token/정확도 영향 측정 |
+| V3-010 | MITIGATED | HIGH | tied embedding/lm_head가 128256x3072이며 전체 복사 시 약 788MB | embedding row와 LM-head `[K,V]` tile만 safetensors에서 slice하여 로드 |
 
 ---
 
@@ -85,3 +88,22 @@
 2. `compiler-v3` 생성/push
 3. 기존 Llama 3.2 3B import·weight·prefill 경로 inventory
 4. V3-001/002를 실제 최소 graph로 재현하고 분할 실행 계약 결정
+
+### 2026-08-18 — Stage V3.1: branch 및 official model asset
+
+- `compiler-v2` 기준선 `507322d`를 push하고 같은 지점에서 `compiler-v3`를 생성·push했다.
+- Hugging Face gated access를 확인하고 `meta-llama/Llama-3.2-3B` revision
+  `13afe5124825b4f3751f836b40dafda64c1ed062`를 받았다.
+- checkpoint는 2개 safetensors, 6,425,529,048 bytes이며 config는 D=3072,
+  F=8192, H=24, KV=8, HD=128, 28 layers, vocab=128256과 일치한다.
+- tokenizer smoke test:
+  - text: `Hello, NPU compiler!`
+  - ids: `[128000, 9906, 11, 452, 6459, 19979, 0]`
+  - decode: `<|begin_of_text|>Hello, NPU compiler!`
+- `v3_model.py`는 전체 tensor를 복제하지 않고 safetensors의 필요한 row/column tile만
+  BF16→FP16으로 변환한다. tied LM head도 embedding row slice를 전치해 공급한다.
+
+남은 핵심: 모델 weight를 host에 보관하는 것은 가능하지만 vendor 한 invocation의
+G-buffer는 8192 FP16뿐이다. 다음 단계는 `[A tile, B tile, running C tile]`이 동시에
+8192 안에 들어오도록 GEMM을 분할하고, invocation 사이에는 snapshot의 C만 host가
+다음 invocation으로 전달하는 streaming runtime이다.
