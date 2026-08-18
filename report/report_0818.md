@@ -78,12 +78,15 @@
 | V3-018 | MITIGATED | HIGH | vendor executable을 weight window마다 새 process로 실행해 layer 0 serial wall 177초 | 독립 output-column group만 4개 workdir에서 병렬 실행. serial과 bit-exact, layer 0 wall 67.8초 |
 | V3-019 | RESOLVED | HIGH | streaming FP16 경계가 HF eager FP16보다 많아 layer별 수치 drift 누적 가능 | 독립 HF reference로 전 layer 추적. fresh final normalized cosine 0.999803, logits cosine 0.999988, argmax 일치 |
 | V3-020 | RESOLVED | BLOCKER | RMSNorm이 `x*x` 후 `/D`하여 residual outlier 330.75의 square가 FP16 `inf`; BOS가 layer 2부터 330.75에 고정되고 attention 오염 | `x/sqrt(D)`를 먼저 FP16 적용한 뒤 square/reduce. 330.75 입력 full-D RMSNorm finite, float reference mean abs 7.75e-6 |
-| V3-021 | MITIGATED | LOW | TVM conda 환경에 `pytest` 모듈이 없어 collection 명령 사용 불가 | repository의 23개 `test_*.py` 자체 entrypoint를 직접 실행. 환경 package 설치 없이 전체 범위 검증 |
+| V3-021 | MITIGATED | LOW | TVM conda 환경에 `pytest` 모듈이 없어 collection 명령 사용 불가 | repository의 현재 26개 `test_*.py` 자체 entrypoint를 직접 실행. 환경 package 설치 없이 전체 범위 검증 |
 | V3-022 | RESOLVED | MEDIUM | RMS binding 추가 후 legacy A1 reuse에서 동일 physical offset이 free-list에 중복 삽입되어 live tensor 충돌 | free-list를 offset set으로 변경하고 bump 조건 수정. prefill/decode byte-exact, v2 comprehensive 회귀 통과 |
 | V3-023 | MITIGATED | BLOCKER | G-buffer generator만 8192보다 크게 만들면 vendor `a.out`의 16384-byte 정적 배열을 넘겨 BSS를 덮어씀 | vendor runtime은 계속 8192 초과를 거부하고, full-model은 parity-tested 동적 source C-model target으로 분리 |
 | V3-024 | RESOLVED | HIGH | source C-model의 G-buffer를 확장하면서 vendor arithmetic/quirk parity가 달라질 위험 | 기본 8192 parity는 64개 program+targeted quirk로 유지하고, compiler-owned source runtime만 동적 flat buffer와 quiet mode 사용 |
 | V3-025 | RESOLVED | BLOCKER | 8K 안에서는 드러나지 않던 scalar broadcast 주소 상위 16-bit 누락으로 확장 source RMSNorm이 거의 0 출력 | opcode `0x15` low/high를 매번 모두 emit해 stale high state도 제거. address 70000 broadcast 및 official layer 0 검증 |
 | V3-026 | RESOLVED | HIGH | official V3 prefill output에 K/V가 없어 decode cache를 seed할 수 없음 | fused prefill이 `[hidden,K0,V0,...]`을 반환하는 선택 경로와 exact-context fused decode/KV graph 구현 |
+| V3-027 | RESOLVED | BLOCKER | LM head 논리 stride 128256이 matrix descriptor의 16-bit `main_cols`를 넘어 source logits 오염 | ISA/C-model field는 바꾸지 않고 RHS를 연속 `[K,64]` column panel로 pack하는 단일-program GEMM lowering 구현 |
+| V3-028 | RESOLVED | HIGH | 첫 expanded full prefill에서 transformer hidden은 정상이지만 잘못 lowering된 LM head가 token 7272 출력 | panel LM 재실행 token 358, HF logits cosine 0.999993. 잘못된 state token/logits만 교체 후 cache는 그대로 decode에 사용 |
+| V3-029 | RESOLVED | BLOCKER | official 3B KV-cache autoregressive decode가 V3에 연결되지 않음 | prompt cache seed 후 position 7/8 exact-context decode, cache append, final norm/LM head 수행. HF와 `[358,2846,4560]` 일치 |
 
 ---
 
@@ -329,8 +332,8 @@ weight/activation/누산 tile을 반복 반입해야 했기 때문이다.
 - 작은 GQA graph에서 단일-program source와 fixed-window streaming oracle 비교를 통과했다.
   K-tile 사이 snapshot 반올림이 사라져 decode residual은 최대 FP16 1 ULP 차이가 허용된다.
 - official 7-token/3B 정적 크기:
-  - prefill layer: 497,206 words, 101,084,262 FP16 entries
-  - decode K/V: 30,449 words, 6,316,741 FP16 entries
+  - prefill layer: 497,563 words, 101,084,262 FP16 entries
+  - decode K/V: 30,451 words, 6,316,741 FP16 entries
   - LM head: 1,845,685 words, 394,133,760 FP16 entries
   - 모두 uint32 flat G-buffer address 범위 이내
 - official layer 0 source 실행:
@@ -338,6 +341,79 @@ weight/activation/누산 tile을 반복 반입해야 했기 때문이다.
   - HF hidden 대비 max abs 0.1953, mean abs 0.000591, RMSE 0.003991,
     cosine 0.9999837
   - 기존 vendor streaming 결과와 동등한 정확도이며 finite
+
+### 2026-08-18 — Stage V3.9: 16-bit stride 보존형 wide LM head
+
+- expanded G-buffer/program이 있어도 instruction의 matrix row/column field는 16-bit다.
+  transformer의 최대 stride 8192는 합법이지만 LM head의 논리 RHS `[3072,128256]`은
+  `main_cols=128256`을 직접 encode할 수 없다.
+- 최초 full source transformer hidden은 기존 fresh vendor hidden과 max abs 0.046875,
+  mean abs 0.003179, cosine 0.999994로 정상이었다. 반면 row-major wide LM head는 stride
+  truncation 때문에 token 7272를 출력했다. 따라서 transformer 재실행이 아니라 LM lowering
+  문제로 분리했다.
+- vendor/source ISA field를 넓히는 비호환 변경은 하지 않았다. tied embedding `[V,K]`를
+  64개 vocabulary column 단위의 연속 `[K,64]` panel로 변환하고, 각 panel은 합법적인
+  local stride 64로 기술한다. 모든 2004 panel과 K tile은 하나의 program에서 실행한다.
+- `PackedRhsGemm` 검증:
+  - logical RHS stride 65536 경계 초과 GEMM byte-exact
+  - K=70 multi-K-tile panel GEMM byte-exact
+  - official LM: 1,845,685 words, 394,133,760 FP16 entries
+- corrected official prefill LM 결과:
+  - token 358 (`" I"`)로 HF 일치
+  - 기존 fresh vendor logits 대비 max abs 0.046875, mean abs 0.005183,
+    cosine 0.9999969
+  - 독립 HF generation logits 대비 max abs 0.06287, mean abs 0.007639,
+    RMSE 0.009760, cosine 0.9999929
+  - panel LM wall 31.21초
+
+### 2026-08-18 — Stage V3.10: official 3B autoregressive decode 완료
+
+- 독립 Hugging Face CPU greedy reference를 같은 local revision에서 생성했다.
+  - prompt ids: `[128000, 9906, 11, 452, 6459, 19979, 0]`
+  - generated ids: `[358, 2846, 4560]`
+  - decoded tokens: `[" I", "'m", " trying"]`
+  - decoded text: `" I'm trying"`
+- source prefill은 각 layer output과 함께 roped K/V를 반환하여 28 layer cache를 seed한다.
+  decode token마다 다음을 수행한다.
+  1. token embedding host gather
+  2. fused `k_proj`/`v_proj` source program과 position RoPE
+  3. host가 K column/V row를 해당 layer cache 끝에 append
+  4. populated exact context의 fused Q/GQA attention/O/SwiGLU source program
+  5. 28 layers 후 final RMSNorm + panel LM head + host argmax
+- 실제 결과:
+  - prefill: token 358, cache length 7
+  - decode position 7: token 2846, cache length 8
+  - decode position 8: token 4560, cache length 9
+  - 최종 sequence와 text가 HF와 전부 일치
+  - final decode logits vs HF: max abs 0.07422, mean abs 0.01002,
+    RMSE 0.01266, cosine 0.9999881, argmax 4560 일치
+- 실행 규모:
+  - source prefill: 30 invocation(28 layers + norm + LM)
+  - 2 decode steps: 116 invocation(각 step 28×KV/decode + norm + LM)
+  - 합계 146 invocation, source 실행 누적 약 774.5초(12.9분)
+  - fixed vendor prefill의 517,557 invocation과 달리 layer/단계 단위 큰 program 사용
+  - decode context 8: 453,349 words / 94,444,391 FP16 entries
+  - decode context 9: 453,757 words / 94,446,443 FP16 entries
+- ignored 재현 산출물:
+  - HF reference: `d_compiler/build/v3_reference_generate_hello_3.npz`
+  - source state/result: `d_compiler/build/v3_source_generate_hello/`
+- 재현 명령:
+
+```bash
+/home/chokwans99/anaconda3/envs/npu-tvm/bin/python \
+  d_compiler/make_v3_generation_reference.py --tokens 3
+
+/home/chokwans99/anaconda3/envs/npu-tvm/bin/python \
+  d_compiler/run_v3_source_generate.py --tokens 3 \
+  --reference d_compiler/build/v3_reference_generate_hello_3.npz
+```
+
+- 전체 회귀:
+  - repository의 26개 `test_*.py` entrypoint 통과
+  - source dynamic G-buffer/full-address broadcast/panel GEMM/fused decode 신규 회귀 포함
+  - legacy prefill→decode KV-cache generation, 0710/0818 ISA, layout/TIR/V2/V3 통과
+  - slow official vendor layer는 opt-in skip이며, 이번 source 28-layer+2 decode 실실행으로
+    더 큰 official 범위를 검증
 
 ## 5. 1차 목표 판정
 
@@ -351,6 +427,25 @@ weight/activation/누산 tile을 반복 반입해야 했기 때문이다.
 | issue 기록, 재현 script, 단계별 commit/push | PASS |
 
 따라서 compiler-v3의 **Llama 3.2 3B full-model prefill 및 정상 next-token 출력** 1차 목표는
-완료했다. V3-004 GELU semantic과 V3-007 vendor example coverage는 Llama의 SiLU
-prefill 성공 경로를 막지 않는 일반 backend 후속 과제다. V3-023 G-buffer 확대는 vendor
-실행기 rebuild가 필요한 별도 blocker다.
+완료했다. 이어서 parity source C-model의 동적 G-buffer와 wide-stride panel lowering을
+사용해 official KV-cache decode 2 step 및 3-token greedy sequence까지 완료했다.
+V3-004 GELU semantic과 V3-007 vendor example coverage는 Llama의 SiLU 경로를 막지 않는
+일반 backend 후속 과제이며, vendor binary 자체의 8192 제한은 유지되지만 source target으로
+full prefill/decode blocker를 해소했다.
+
+## 6. source full-model + decode 목표 판정
+
+| 완료 조건 | 결과 |
+|---|---|
+| vendor arithmetic/quirk parity 유지 | PASS — 64 programs + targeted parity |
+| 동적 G-buffer 및 가변 program | PASS |
+| official 28-layer source prefill | PASS |
+| prefill K/V cache seed | PASS — 28 layers × 8 KV heads |
+| autoregressive cache append/decode | PASS — context 7→8→9 |
+| full-vocabulary LM head | PASS — 16-bit field 보존 panel lowering |
+| HF greedy token sequence | PASS — `[358, 2846, 4560]` |
+| 전체 regression | PASS — 26 scripts |
+
+따라서 이번 목표인 **우리 source C-model 기반 official Llama 3.2 3B prefill 및 decode**는
+완료했다. CPU에 남은 동작은 tokenizer/embedding gather, 동적 KV-cache append, argmax이며,
+모델 산술은 ver.08 source C-model program으로 수행한다.

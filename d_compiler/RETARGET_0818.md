@@ -118,3 +118,20 @@ conda run -n npu-tvm python d_compiler/tests/test_backend_0818.py
 특히 현재 제공 실행 파일의 8192 FP16은 LLM layer의 weight/activation 전체를 담을 수
 없다. ISA 기능 업데이트와 별개인 물리 C-model 한계이므로, 이 문제가 해결되기 전에
 기존 실행 경로를 제거하면 전체 모델 회귀 기준도 함께 사라진다.
+
+## 8. 확장 source target 및 decode 후속 결과
+
+vendor 오류/quirk parity를 유지한 `_poc/mysim_0818.cpp`의 G-buffer만 동적 flat storage로
+확장하고 `backend="source-0818"`을 추가했다. official Llama 3.2 3B에서 28-layer prefill,
+layer별 K/V cache seed, exact-context autoregressive decode 두 step을 수행했다.
+
+- generated ids: `[358, 2846, 4560]`
+- decoded text: `" I'm trying"`
+- Hugging Face greedy reference와 전부 일치
+- logical stride 128256인 LM head는 16-bit descriptor field를 변경하지 않고 `[K,64]`
+  RHS panel lowering으로 실행
+- vendor binary는 8192 parity oracle로 유지하고, expanded full model만 source target 사용
+
+실행기는 `run_v3_source_generate.py`, 독립 reference 생성기는
+`make_v3_generation_reference.py`다. 세부 issue, 수치 및 실행 규모는
+`report/report_0818.md`의 Stage V3.7~V3.10에 기록했다.

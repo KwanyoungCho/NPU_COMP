@@ -8,6 +8,7 @@ import numpy as np
 
 from . import driver, model
 from .v3_model import Llama32Assets
+from .source_gemm_0818 import PackedRhsGemm
 
 
 @dataclass
@@ -70,9 +71,8 @@ class Llama32SourceCompiler:
         self.norm_program = driver.compile_module(
             model.build_v3_final_norm_module(self.cfg, 1),
             backend="source-0818", reuse=True)
-        self.lm_program = driver.compile_module(
-            model.build_v3_lm_head_module(self.cfg),
-            backend="source-0818", reuse=True)
+        self.lm_gemm = PackedRhsGemm(
+            self.cfg.D, self.assets.config["vocab_size"])
         self.decode_programs = {}
         self.invocations = 0
         self.elapsed_seconds = 0.0
@@ -87,7 +87,11 @@ class Llama32SourceCompiler:
             "prefill": self._program_stats(self.prefill_program),
             "decode_kv": self._program_stats(self.kv_program),
             "final_norm": self._program_stats(self.norm_program),
-            "lm_head": self._program_stats(self.lm_program),
+            "lm_head": {
+                "program_words": len(self.lm_gemm),
+                "gbuffer_entries": self.lm_gemm.gbuffer_entries,
+                "rhs_layout": "Kx64 column panels",
+            },
             "decode": {
                 str(context): self._program_stats(program)
                 for context, program in sorted(self.decode_programs.items())
@@ -174,11 +178,11 @@ class Llama32SourceCompiler:
             "weight": self.assets.final_norm().reshape(1, self.cfg.D),
         })
         if self._lm_weight is None:
-            self._lm_weight = self.assets.lm_head()
-        logits = self._run(self.lm_program, {
-            "x": normalized,
-            "weight": self._lm_weight,
-        }).reshape(-1)
+            self._lm_weight = self.assets.lm_head_packed(panel=self.lm_gemm.panel)
+        started = time.perf_counter()
+        logits = self.lm_gemm.run(normalized, self._lm_weight).reshape(-1)
+        self.elapsed_seconds += time.perf_counter() - started
+        self.invocations += 1
         return normalized, logits
 
     def prefill(self, input_ids, *, progress=None):

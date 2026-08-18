@@ -48,19 +48,25 @@ def _environment():
     return env
 
 
-def run(program, gbuf, *, capture_trace=False, source_bin=None, output_dtype=np.float32):
+def run(program, gbuf, *, capture_trace=False, source_bin=None, output_dtype=np.float32,
+        output_range=None):
     """Execute a program with a dynamically sized source-model G-buffer."""
     executable = Path(source_bin).resolve() if source_bin else build_source_model()
     if not executable.exists():
         raise FileNotFoundError(executable)
     values = np.asarray(gbuf, dtype=np.float16).reshape(-1)
     capacity = max(GBUF_CAPACITY, values.size)
-    initial = np.zeros(capacity, dtype="<f2")
-    initial[:values.size] = values
+    if values.size >= GBUF_CAPACITY:
+        initial = np.ascontiguousarray(values, dtype="<f2")
+    else:
+        initial = np.zeros(capacity, dtype="<f2")
+        initial[:values.size] = values
     with tempfile.TemporaryDirectory(prefix="npu0818-source-") as directory:
         directory = Path(directory)
         (directory / "program_memory.bin").write_bytes(_program_bytes(program))
-        (directory / "G_buffer_data.bin").write_bytes(initial.tobytes() + b"\n")
+        with (directory / "G_buffer_data.bin").open("wb") as file:
+            initial.tofile(file)
+            file.write(b"\n")
         env = _environment()
         if capture_trace:
             env.pop("NPU0818_QUIET", None)
@@ -72,10 +78,24 @@ def run(program, gbuf, *, capture_trace=False, source_bin=None, output_dtype=np.
         saved = directory / "saved_G_buffer_data.bin"
         if not saved.exists():
             raise RuntimeError("source model produced no snapshot; program must execute 0xF0")
-        raw = saved.read_bytes()
-        if not raw or raw[-1:] != b"\n" or (len(raw) - 1) % 2:
-            raise RuntimeError(f"malformed source-model snapshot size {len(raw)}")
-        output = np.frombuffer(raw[:-1], dtype="<f2")
+        size = saved.stat().st_size
+        if size < 1 or (size - 1) % 2:
+            raise RuntimeError(f"malformed source-model snapshot size {size}")
+        with saved.open("rb") as file:
+            file.seek(-1, os.SEEK_END)
+            if file.read(1) != b"\n":
+                raise RuntimeError("source-model snapshot has no final newline")
+            if output_range is None:
+                file.seek(0)
+                raw = file.read(size - 1)
+            else:
+                first, count = (int(value) for value in output_range)
+                if first < 0 or count < 0 or 2 * (first + count) > size - 1:
+                    raise RuntimeError(
+                        f"snapshot range {(first, count)} outside {(size - 1) // 2} entries")
+                file.seek(2 * first)
+                raw = file.read(2 * count)
+        output = np.frombuffer(raw, dtype="<f2")
         if np.dtype(output_dtype) == np.dtype(np.float16):
             output = output.copy()
         else:

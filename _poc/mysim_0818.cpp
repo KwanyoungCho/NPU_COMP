@@ -154,16 +154,20 @@ private:
         gbuffer_bytes_ = static_cast<std::size_t>(file.tellg());
         file.seekg(0);
         const std::size_t count = gbuffer_bytes_ / 2;
-        std::vector<unsigned char> raw(count * 2);
-        file.read(reinterpret_cast<char*>(raw.data()), raw.size());
         // Preserve the vendor's 8192-entry result for ordinary inputs while
         // allowing compiler-owned larger files to extend the same flat address
         // space.  This is the only intentional capacity extension.
         gbuffer_.assign(std::max(kVendorGBufferSize, count), 0.0f);
-        for (std::size_t i = 0; i < count; ++i) {
-            const std::uint16_t bits = static_cast<std::uint16_t>(raw[2 * i]) |
-                                       (static_cast<std::uint16_t>(raw[2 * i + 1]) << 8);
-            gbuffer_[i] = half_to_float(bits);
+        constexpr std::size_t kChunkEntries = 1u << 20;
+        std::vector<unsigned char> raw(std::min(kChunkEntries, count) * 2);
+        for (std::size_t base = 0; base < count; base += kChunkEntries) {
+            const std::size_t chunk = std::min(kChunkEntries, count - base);
+            file.read(reinterpret_cast<char*>(raw.data()), chunk * 2);
+            for (std::size_t i = 0; i < chunk; ++i) {
+                const std::uint16_t bits = static_cast<std::uint16_t>(raw[2 * i]) |
+                                           (static_cast<std::uint16_t>(raw[2 * i + 1]) << 8);
+                gbuffer_[base + i] = half_to_float(bits);
+            }
         }
         return true;
     }

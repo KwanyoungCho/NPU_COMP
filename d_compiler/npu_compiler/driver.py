@@ -92,7 +92,9 @@ def run_compiled(asm, mp, inputs, maxrun=None):
     out_off = mp.offset[out_var]; n_out = _numel(mp.shape[out_var])
     if source_target:
         from . import source_runtime_0818
-        full = source_runtime_0818.run(asm, gbuf, output_dtype=np.float16)
+        return source_runtime_0818.run(
+            asm, gbuf, output_dtype=np.float16,
+            output_range=(out_off, n_out)).reshape(mp.shape[out_var]).astype(np.float32)
     elif getattr(asm, "format_version", None) == "0818":
         from . import runtime_0818
         full = runtime_0818.run(asm, gbuf)

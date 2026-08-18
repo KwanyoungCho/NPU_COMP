@@ -147,6 +147,18 @@ class Llama32Assets:
             "model.embed_tokens.weight", (slice(None), slice(None)))
         return np.ascontiguousarray(matrix_vk.T)
 
+    def lm_head_packed(self, panel=64):
+        """Pack tied LM-head as consecutive B[K,panel] column panels."""
+        panel = int(panel)
+        vocab = self.config["vocab_size"]
+        hidden = self.config["hidden_size"]
+        if panel < 1 or vocab % panel:
+            raise ValueError(f"vocab {vocab} must be divisible by panel {panel}")
+        matrix_vk = self._slice(
+            "model.embed_tokens.weight", (slice(None), slice(None)))
+        panels = matrix_vk.reshape(vocab // panel, panel, hidden).transpose(0, 2, 1)
+        return np.ascontiguousarray(panels).reshape(-1)
+
     def norm(self, layer, post_attention=False):
         name = "post_attention_layernorm" if post_attention else "input_layernorm"
         return self._slice(f"model.layers.{layer}.{name}.weight", slice(None))
