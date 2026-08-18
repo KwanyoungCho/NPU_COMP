@@ -2,7 +2,8 @@
 //
 // This file intentionally follows the vendor executable, including observable
 // quirks.  It is an analysis/reference model, not an "improved" simulator:
-//   * G-buffer is fixed at 8192 FP16; the full program file is dynamic.
+//   * the vendor's flat G-buffer semantics are preserved, with capacity extended
+//     beyond its fixed 8192 FP16 static array for compiler-owned full models.
 //   * 0xF0 writes saved_G_buffer_data.bin and execution continues.
 //   * loads/saves consume the PARTIAL address/shape descriptors.
 //   * reduce-max starts from 0 (therefore all-negative inputs reduce to 0).
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -20,7 +22,7 @@
 
 namespace {
 
-constexpr std::size_t kGBufferSize = 8192;
+constexpr std::size_t kVendorGBufferSize = 8192;
 
 float half_to_float(std::uint16_t h) {
     const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
@@ -126,7 +128,7 @@ public:
     }
 
 private:
-    std::vector<float> gbuffer_ = std::vector<float>(kGBufferSize, 0.0f);
+    std::vector<float> gbuffer_;
     std::vector<std::uint32_t> program_;
     std::size_t gbuffer_bytes_ = 0;
     std::size_t program_bytes_ = 0;
@@ -151,9 +153,13 @@ private:
         file.seekg(0, std::ios::end);
         gbuffer_bytes_ = static_cast<std::size_t>(file.tellg());
         file.seekg(0);
-        std::vector<unsigned char> raw(gbuffer_bytes_);
+        const std::size_t count = gbuffer_bytes_ / 2;
+        std::vector<unsigned char> raw(count * 2);
         file.read(reinterpret_cast<char*>(raw.data()), raw.size());
-        const std::size_t count = std::min(kGBufferSize, raw.size() / 2);
+        // Preserve the vendor's 8192-entry result for ordinary inputs while
+        // allowing compiler-owned larger files to extend the same flat address
+        // space.  This is the only intentional capacity extension.
+        gbuffer_.assign(std::max(kVendorGBufferSize, count), 0.0f);
         for (std::size_t i = 0; i < count; ++i) {
             const std::uint16_t bits = static_cast<std::uint16_t>(raw[2 * i]) |
                                        (static_cast<std::uint16_t>(raw[2 * i + 1]) << 8);
@@ -207,9 +213,10 @@ private:
     }
 
     void write_g(std::uint32_t address, float value) {
-        if (address < gbuffer_.size()) {
-            gbuffer_[address] = round_half(value);
+        if (address >= gbuffer_.size()) {
+            gbuffer_.resize(static_cast<std::size_t>(address) + 1, 0.0f);
         }
+        gbuffer_[address] = round_half(value);
     }
 
     std::vector<float>& input(unsigned operand) { return operand == 0 ? input1_ : input2_; }
@@ -291,10 +298,17 @@ private:
             snapshot_file_.open("saved_G_buffer_data.bin", std::ios::binary | std::ios::trunc);
             snapshot_written_ = true;
         }
-        for (float value : gbuffer_) {
-            const std::uint16_t bits = float_to_half(value);
-            snapshot_file_.put(static_cast<char>(bits & 0xffu));
-            snapshot_file_.put(static_cast<char>((bits >> 8) & 0xffu));
+        constexpr std::size_t kChunkEntries = 1u << 20;
+        std::vector<unsigned char> raw(
+            std::min(kChunkEntries, gbuffer_.size()) * sizeof(std::uint16_t));
+        for (std::size_t base = 0; base < gbuffer_.size(); base += kChunkEntries) {
+            const std::size_t count = std::min(kChunkEntries, gbuffer_.size() - base);
+            for (std::size_t i = 0; i < count; ++i) {
+                const std::uint16_t bits = float_to_half(gbuffer_[base + i]);
+                raw[2 * i] = static_cast<unsigned char>(bits & 0xffu);
+                raw[2 * i + 1] = static_cast<unsigned char>((bits >> 8) & 0xffu);
+            }
+            snapshot_file_.write(reinterpret_cast<const char*>(raw.data()), count * 2);
         }
     }
 
@@ -490,7 +504,14 @@ private:
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    bool quiet = std::getenv("NPU0818_QUIET") != nullptr;
+    for (int i = 1; i < argc; ++i) {
+        quiet = quiet || std::strcmp(argv[i], "--quiet") == 0;
+    }
+    if (quiet) {
+        std::cout.setstate(std::ios_base::badbit);
+    }
     Model model;
     return model.run();
 }

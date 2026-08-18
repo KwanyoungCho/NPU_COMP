@@ -80,7 +80,8 @@
 | V3-020 | RESOLVED | BLOCKER | RMSNorm이 `x*x` 후 `/D`하여 residual outlier 330.75의 square가 FP16 `inf`; BOS가 layer 2부터 330.75에 고정되고 attention 오염 | `x/sqrt(D)`를 먼저 FP16 적용한 뒤 square/reduce. 330.75 입력 full-D RMSNorm finite, float reference mean abs 7.75e-6 |
 | V3-021 | MITIGATED | LOW | TVM conda 환경에 `pytest` 모듈이 없어 collection 명령 사용 불가 | repository의 23개 `test_*.py` 자체 entrypoint를 직접 실행. 환경 package 설치 없이 전체 범위 검증 |
 | V3-022 | RESOLVED | MEDIUM | RMS binding 추가 후 legacy A1 reuse에서 동일 physical offset이 free-list에 중복 삽입되어 live tensor 충돌 | free-list를 offset set으로 변경하고 bump 조건 수정. prefill/decode byte-exact, v2 comprehensive 회귀 통과 |
-| V3-023 | OPEN | BLOCKER | G-buffer generator만 8192보다 크게 만들면 vendor `a.out`의 16384-byte 정적 배열을 넘겨 BSS를 덮어씀 | vendor executable이 동적/확장 G-buffer로 rebuild되기 전에는 runtime에서 8192 초과 입력을 계속 거부 |
+| V3-023 | MITIGATED | BLOCKER | G-buffer generator만 8192보다 크게 만들면 vendor `a.out`의 16384-byte 정적 배열을 넘겨 BSS를 덮어씀 | vendor runtime은 계속 8192 초과를 거부하고, full-model은 parity-tested 동적 source C-model target으로 분리 |
+| V3-024 | RESOLVED | HIGH | source C-model의 G-buffer를 확장하면서 vendor arithmetic/quirk parity가 달라질 위험 | 기본 8192 parity는 64개 program+targeted quirk로 유지하고, compiler-owned source runtime만 동적 flat buffer와 quiet mode 사용 |
 
 ---
 
@@ -282,6 +283,29 @@ tied LM head, CPU argmax token을 reference와 비교하는 최종 장시간 단
 이 재감사는 위 Stage V3.1/V3.2에 기록된 “8192/32768 고정” 설명 중 program 부분을
 정정한다. 517,557회 invocation은 32K program limit 때문이 아니라, 8192-entry G-buffer에
 weight/activation/누산 tile을 반복 반입해야 했기 때문이다.
+
+### 2026-08-18 — Stage V3.7: vendor-compatible source C-model 용량 확장
+
+- 이후 full-model/decode 실행 대상은 분석 가능한 `_poc/mysim_0818.cpp`로 전환한다.
+  capacity 외의 실행 의미는 vendor와 동일하게 유지한다.
+  - Reduce Max `0x19`의 zero-seed 오류 유지
+  - vendor GELU `x*sigmoid(2x)` 유지
+  - `0xF0` snapshot 후 실행 계속, 무조건 종료 save 없음
+  - load/save 시 FP16 반올림 및 PE float32 계산 유지
+- G-buffer는 입력 FP16 entry 수에 맞춰 동적 할당하고, instruction이 더 높은 목적 주소에
+  쓰면 해당 주소까지 zero-initialized 확장한다. vendor 호환 입력의 최소 snapshot 크기는
+  기존과 같은 8192 entry다.
+- 대용량 snapshot은 1M-entry chunk별로 동일한 little-endian FP16 byte를 기록한다.
+  `NPU0818_QUIET`/`--quiet`는 trace formatting만 억제하며 계산과 파일 결과에는 관여하지 않는다.
+- `source_runtime_0818.py`가 source 변경 시 ignored build 영역에 C++ binary를 자동 rebuild하고,
+  동적 크기의 G-buffer input/output을 실행한다.
+- 검증:
+  - 64개 제공 program 및 targeted vendor/source snapshot/trace parity 전부 통과
+  - 33,001-word program 및 non-implicit-save parity 통과
+  - G-buffer address 9000 load → address 10000 save 결과 `3.25 + 2 = 5.25` 통과
+
+이 단계는 V3-023의 vendor binary 자체를 변경하지 않는다. vendor oracle은 계속 8192
+경계까지의 parity 기준으로 보존하고, 확장 실행은 동일 source semantics 위에서 수행한다.
 
 ## 5. 1차 목표 판정
 
