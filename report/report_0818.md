@@ -68,6 +68,10 @@
 | V3-008 | RESOLVED | BLOCKER | full checkpoint와 tokenizer가 로컬에 없어 실제 token 검증 불가 | official revision `13afe512...`의 2개 shard와 tokenizer를 ignored build 영역에 확보. 총 weight 6,425,529,048 bytes |
 | V3-009 | OPEN | HIGH | official weight는 BF16이지만 vendor G-buffer 입력은 FP16 | safetensors tile을 읽을 때 FP16 변환. reference도 같은 변환 지점으로 맞춰 token/정확도 영향 측정 |
 | V3-010 | MITIGATED | HIGH | tied embedding/lm_head가 128256x3072이며 전체 복사 시 약 788MB | embedding row와 LM-head `[K,V]` tile만 safetensors에서 slice하여 로드 |
+| V3-011 | RESOLVED | BLOCKER | A/B/C 64x64 세 tile은 12288 FP16이라 한 invocation에 들어가지 않음 | tile별 `m*k + k*n + m*n <= 8192`를 만족하도록 K를 동적으로 축소. 64x64 출력은 K=32 |
+| V3-012 | MITIGATED | HIGH | vendor invocation 사이에는 PE MAC 상태가 사라짐 | running C를 snapshot에서 host로 carry하고 다음 invocation 시작 시 PE output으로 load한 후 MAC bit 27 실행 |
+| V3-013 | MITIGATED | HIGH | vendor stdout trace가 큰 실행에서 pipe 메모리·I/O를 폭증시킴 | parity 때만 capture하고 production streaming은 `/dev/null`. vendor 내부 formatting 비용은 잔존 |
+| V3-014 | RESOLVED | HIGH | SiLU는 독립 unary opcode가 아니라 matrix ALU activation field라 기본 VECTOR mode 사용 시 미초기화 SRC2를 참조 | `matrix add immediate 0 + ACT_SILU`로 identity 연산 후 activation 수행 |
 
 ---
 
@@ -107,3 +111,26 @@
 G-buffer는 8192 FP16뿐이다. 다음 단계는 `[A tile, B tile, running C tile]`이 동시에
 8192 안에 들어오도록 GEMM을 분할하고, invocation 사이에는 snapshot의 C만 host가
 다음 invocation으로 전달하는 streaming runtime이다.
+
+### 2026-08-18 — Stage V3.2: fixed-buffer streaming vendor runtime
+
+- `VendorSession`이 동일 임시 작업 디렉터리를 재사용하며, 매 산술 tile마다 제공
+  `0818_npu_update/a_npu/a.out`을 실행한다. 분석용 source C-model은 사용하지 않는다.
+- streaming GEMM working set은 `[A(m,k), B(k,n), running C(m,n)]`이고 항상
+  `m*k + k*n + m*n <= 8192`, 각 PE dimension은 64 이하다.
+- 첫 K tile은 일반 matmul, 이후 tile은 이전 FP16 C를 PE output에 올린 뒤 MAC bit 27로
+  누산한다. invocation 경계마다 C가 FP16 반올림되는 계약을 reference에도 적용했다.
+- vendor-only primitive: add/sub/mul/div/max, sqrt/exp/neg/cos/sin, SiLU,
+  row Reduce Sum, all-negative-safe Reduce Max fold.
+- 검증:
+  - irregular GEMM `[65,70]@[70,67]` streaming reference와 bit-exact
+  - elementwise/SiLU/Reduce Sum/negative Reduce Max bit-exact
+  - official layer-0 q-projection `[1,3072]@[3072,128]`을 safetensors tile loader로
+    실행하고 같은 FP16-boundary reference와 bit-exact
+  - layer-0 Q projection 128 output 열: 96 vendor invocation, vendor 실행 누적 0.731초
+    (현재 머신 1회 측정, 프로그램 3,254 words)
+
+현재 구조는 V3-001을 기능적으로 우회한다. 남은 성능 하한은 full-model 3B weight를
+8192-entry window로 읽기 위해 필요한 수십만 회의 vendor process 실행과 vendor 내부
+trace formatting이다. 다음 단계에서 Relax graph를 host-resident tensor execution plan으로
+compile하여 layer 연산 전체를 이 primitive들로 연결하고 실제 invocation/time을 측정한다.

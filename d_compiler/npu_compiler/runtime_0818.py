@@ -69,7 +69,8 @@ def run(program, gbuf, *, capture_trace=False, vendor_bin=VENDOR_BIN):
             env["LD_LIBRARY_PATH"] = lib + (":" + env["LD_LIBRARY_PATH"]
                                                     if env.get("LD_LIBRARY_PATH") else "")
         proc = subprocess.run([str(vendor_bin)], cwd=tmp, env=env, check=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                              stdout=(subprocess.PIPE if capture_trace else subprocess.DEVNULL),
+                              stderr=(subprocess.STDOUT if capture_trace else subprocess.DEVNULL))
         saved = tmp / "saved_G_buffer_data.bin"
         if not saved.exists():
             raise RuntimeError("vendor produced no saved_G_buffer_data.bin; program must execute 0xF0")
