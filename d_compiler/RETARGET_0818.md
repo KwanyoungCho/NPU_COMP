@@ -25,8 +25,9 @@ float32이고 G-buffer save에서 FP16으로 반올림한다.
 
 ## 2. 문서 외에 반드시 반영한 vendor quirk
 
-- G-buffer는 여전히 **8192 FP16**, program memory는 **32768 words** 고정이다.
-  8192개를 넘긴 입력은 실행 파일에서 사용할 수 없다.
+- G-buffer는 여전히 **8192 FP16** 정적 배열이다. program은 file size만큼 동적으로
+  `malloc`되어 32768-word 고정 제한이 없다. 8192개를 넘긴 G-buffer 입력은 정적 배열
+  뒤를 덮어쓰므로 실행 파일에서 안전하게 사용할 수 없다.
 - `0xF0` 출력은 8192 FP16(16384 bytes)과 마지막 newline으로 총 16385 bytes다.
   한 실행에서 `0xF0`을 여러 번 실행하면 snapshot들이 같은 파일에 순서대로 추가되고,
   전체 파일 끝에 newline 하나만 붙는다.
@@ -82,15 +83,15 @@ PE에서 전치된 sub-tile을 만든 뒤 목적 row-major PARTIAL region에 직
 - Relax `max` lowering은 정확해야 하므로 buggy opcode `0x19`를 사용하지 않는다.
   첫 번째 실제 열을 accumulator로 잡고 column vector-max fold를 수행한다.
 - native GELU 명령을 선택하면 vendor 식 `x*sigmoid(2x)`가 결과 계약이다.
-- compiler는 vendor의 8192/32768 고정 한계를 compile/run 시 명시적 오류로 만든다.
-  vendor처럼 조용히 메모리를 오염시키지는 않는다.
+- compiler는 vendor의 8192-entry G-buffer 한계를 compile/run 시 명시적 오류로 만든다.
+  program은 실제 file-backed 실행 계약대로 별도 고정 상한을 두지 않는다.
 
 ## 6. 검증 결과
 
 - ver.08 encoder: 제공된 64개 binary, 총 13766 words decode/re-encode 일치.
 - 소스 C-model: 64개 제공 프로그램의 G-buffer snapshot이 vendor와 전부 일치.
 - 추가 parity: 임의 sub-tile, K-tile MAC, 음수 Reduce Max quirk, SiLU/GELU,
-  broadcast, `0xF0`을 vendor와 비교.
+  broadcast, `0xF0`, 33,001-word program 및 종료 시 비자동 save를 vendor와 비교.
 - backend E2E: multi-tile row-major matmul, all-negative row max, scalar broadcast,
   64x64 full-capacity transpose를 vendor에서 검증.
 - 기존 0710 ISA/runtime/matmul/elementwise 회귀 테스트 통과.
@@ -110,7 +111,8 @@ conda run -n npu-tvm python d_compiler/tests/test_backend_0818.py
 1. 실제 compiler graph 전체가 `backend="0818"`에서 compile되고 operator coverage가 확인됨.
 2. 실제 layer/model working set이 vendor의 8192-entry G-buffer 한도 안에서 실행되거나,
    vendor가 동적/확장 G-buffer로 다시 제공됨.
-3. 전체 graph가 32768 instruction words 이내이거나 loop/branch 지원이 추가됨.
+3. 전체 graph의 unrolled program 크기와 실행 시간이 현실적인 범위이거나 loop/branch
+   지원이 추가됨. vendor C-model에는 32768-word 고정 상한이 없다.
 4. 실제 모델 weight와 입력으로 layer/decode parity 및 품질 검증이 통과함.
 
 특히 현재 제공 실행 파일의 8192 FP16은 LLM layer의 weight/activation 전체를 담을 수

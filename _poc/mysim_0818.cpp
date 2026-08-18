@@ -2,7 +2,7 @@
 //
 // This file intentionally follows the vendor executable, including observable
 // quirks.  It is an analysis/reference model, not an "improved" simulator:
-//   * G-buffer and program memory are fixed at 8192 FP16 and 32768 words.
+//   * G-buffer is fixed at 8192 FP16; the full program file is dynamic.
 //   * 0xF0 writes saved_G_buffer_data.bin and execution continues.
 //   * loads/saves consume the PARTIAL address/shape descriptors.
 //   * reduce-max starts from 0 (therefore all-negative inputs reduce to 0).
@@ -21,7 +21,6 @@
 namespace {
 
 constexpr std::size_t kGBufferSize = 8192;
-constexpr std::size_t kProgramSize = 32768;
 
 float half_to_float(std::uint16_t h) {
     const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
@@ -128,7 +127,7 @@ public:
 
 private:
     std::vector<float> gbuffer_ = std::vector<float>(kGBufferSize, 0.0f);
-    std::vector<std::uint32_t> program_ = std::vector<std::uint32_t>(kProgramSize, 0);
+    std::vector<std::uint32_t> program_;
     std::size_t gbuffer_bytes_ = 0;
     std::size_t program_bytes_ = 0;
     std::size_t program_words_ = 0;
@@ -174,7 +173,8 @@ private:
         file.seekg(0);
         std::vector<unsigned char> raw(program_bytes_);
         file.read(reinterpret_cast<char*>(raw.data()), raw.size());
-        program_words_ = std::min(kProgramSize, raw.size() / 4);
+        program_words_ = raw.size() / 4;
+        program_.resize(program_words_);
         for (std::size_t i = 0; i < program_words_; ++i) {
             program_[i] = static_cast<std::uint32_t>(raw[4 * i]) |
                           (static_cast<std::uint32_t>(raw[4 * i + 1]) << 8) |
@@ -189,7 +189,10 @@ private:
         std::cout << "Program memory size :  " << std::hex << program_bytes_ << std::dec
                   << "\n\n\n\n0\n";
         for (int i = 0; i < 20; ++i) {
-            std::cout << std::hex << program_[i] << std::dec << '\n';
+            const std::uint32_t word = static_cast<std::size_t>(i) < program_.size()
+                                           ? program_[i]
+                                           : 0;
+            std::cout << std::hex << word << std::dec << '\n';
         }
         std::cout << "\n\n\n";
     }

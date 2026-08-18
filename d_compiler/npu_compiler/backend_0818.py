@@ -20,7 +20,7 @@ from .isa_0818 import (
     VECTOR,
     Asm,
 )
-from .runtime_0818 import GBUF_CAPACITY, PROGRAM_CAPACITY
+from .runtime_0818 import GBUF_CAPACITY
 
 
 class CodegenError(Exception):
@@ -53,8 +53,8 @@ def compile_module(mod, func_name="main", *, tile=64, reuse=False, validate=True
 def compile_func(func, mp, *, tile=64, validate=True, emit_log=None):
     """Compile a planned Relax function into vendor ver.08 instructions.
 
-    The vendor binary has fixed 8192-entry G-buffer and 32768-word program
-    memories.  ``validate`` keeps those real limits visible at compile time.
+    The vendor binary has a fixed 8192-entry G-buffer.  Its program file is
+    dynamically allocated, so ``validate`` only enforces the real G-buffer cap.
     """
     if tile <= 0 or tile > 64:
         raise ValueError(f"ver.08 PE tile must be in 1..64, got {tile}")
@@ -319,10 +319,4 @@ def compile_func(func, mp, *, tile=64, validate=True, emit_log=None):
                 emit_log.append((name, mp.shape.get(dst), arg_shapes, start, len(a.words)))
 
     a.finish()
-    if validate:
-        if len(a.words) > PROGRAM_CAPACITY:
-            raise CodegenError(
-                f"ver.08 vendor program overflow: {len(a.words)} words, "
-                f"capacity is {PROGRAM_CAPACITY}"
-            )
     return a

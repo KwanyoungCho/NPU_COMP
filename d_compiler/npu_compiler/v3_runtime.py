@@ -18,7 +18,6 @@ import numpy as np
 from .isa_0818 import ACT_SILU, DST, IMM, SCALAR, SRC1, SRC2, VECTOR, Asm
 from .runtime_0818 import (
     GBUF_CAPACITY,
-    PROGRAM_CAPACITY,
     VENDOR_BIN,
     _libstdcxx_dir,
     _program_bytes,
@@ -66,8 +65,6 @@ class VendorSession:
             raise ValueError(f"working set {values.size} exceeds vendor G-buffer {GBUF_CAPACITY}")
         program_bytes = _program_bytes(program)
         words = len(program_bytes) // 4
-        if words > PROGRAM_CAPACITY:
-            raise ValueError(f"program {words} exceeds vendor program memory {PROGRAM_CAPACITY}")
         padded = np.zeros(GBUF_CAPACITY, dtype="<f2")
         padded[:values.size] = values
         (self.workdir / "program_memory.bin").write_bytes(program_bytes)

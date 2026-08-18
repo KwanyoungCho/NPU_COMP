@@ -64,6 +64,22 @@ def _raw_snapshot(executable, program):
         return (directory / "saved_G_buffer_data.bin").read_bytes()
 
 
+def _snapshot_exists(executable, program):
+    with tempfile.TemporaryDirectory(prefix="npu0818-nosave-") as directory:
+        directory = Path(directory)
+        (directory / "program_memory.bin").write_bytes(program.to_bytes())
+        zeros = np.zeros(GBUF_CAPACITY, dtype="<f2")
+        (directory / "G_buffer_data.bin").write_bytes(zeros.tobytes() + b"\n")
+        env = os.environ.copy()
+        library = _libstdcxx_dir()
+        if library:
+            env["LD_LIBRARY_PATH"] = library + (
+                ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+        subprocess.run([str(executable)], cwd=directory, env=env, check=True,
+                       stdout=subprocess.DEVNULL)
+        return (directory / "saved_G_buffer_data.bin").exists()
+
+
 def test_targeted_vendor_quirks():
     tmp, source = _source_binary()
     try:
@@ -144,7 +160,37 @@ def test_all_supplied_program_snapshots():
         tmp.cleanup()
 
 
+def test_program_file_is_not_limited_to_32768_words():
+    """The vendor fetches the complete malloc-backed file, including word 33000."""
+    tmp, source = _source_binary()
+    try:
+        program = Asm()
+        program.words = [0] * 33000 + [0xF0]
+        program.tags = [None] * len(program.words)
+        zeros = np.zeros(1, dtype=np.float16)
+        vendor_saved = run(program, zeros)
+        source_saved = run(program, zeros, vendor_bin=source)
+        assert np.array_equal(source_saved, vendor_saved)
+        assert vendor_saved.size == GBUF_CAPACITY
+    finally:
+        tmp.cleanup()
+
+
+def test_process_exit_does_not_implicitly_save():
+    tmp, source = _source_binary()
+    try:
+        program = Asm()
+        for _ in range(20):
+            program.nop()
+        assert not _snapshot_exists(VENDOR_BIN, program)
+        assert not _snapshot_exists(source, program)
+    finally:
+        tmp.cleanup()
+
+
 if __name__ == "__main__":
     test_targeted_vendor_quirks()
     test_all_supplied_program_snapshots()
+    test_program_file_is_not_limited_to_32768_words()
+    test_process_exit_does_not_implicitly_save()
     print("ALL 0818 C-MODEL PARITY TESTS PASSED")

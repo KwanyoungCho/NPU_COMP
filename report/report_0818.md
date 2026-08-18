@@ -59,7 +59,7 @@
 | ID | 상태 | 심각도 | 내용 | 현재 대응 |
 |---|---|---:|---|---|
 | V3-001 | MITIGATED | BLOCKER | vendor G-buffer가 8192 FP16으로 고정되어 3B weight는 물론 일반적인 한 layer working set도 한 번에 담을 수 없음 | host-resident tensor와 8192 이하 `[A,B,C]` window로 분할. vendor 한계 자체는 유지 |
-| V3-002 | MITIGATED | BLOCKER | program memory 32768 words 고정, loop/branch/indirect addressing 없음 | Relax execution plan이 bounded program을 여러 vendor invocation으로 순차·병렬 dispatch |
+| V3-002 | RESOLVED | HIGH | program memory가 32768 words 고정이라고 판단했으나 실제 실행기는 전체 file을 `malloc`하여 실행 | 32K compiler/runtime guard 제거. 33,001-word program의 마지막 `0xF0` vendor/source parity로 검증 |
 | V3-003 | MITIGATED | HIGH | native Reduce Max `0x19`가 accumulator를 0으로 시작하여 all-negative row를 0으로 반환 | compiler는 첫 실제 열에서 시작하는 vector-max fold 사용. source C-model은 vendor bug 그대로 재현 |
 | V3-004 | OPEN | HIGH | vendor GELU가 표준 GELU가 아니라 `x*sigmoid(2x)` | native GELU 사용 시 모델 정확도 영향 측정. 필요하면 표준식을 primitive 조합으로 lowering |
 | V3-005 | MITIGATED | MEDIUM | `0xF0`은 HALT가 아니며 snapshot 후 계속 실행 | generated program의 마지막 유효 word로 `0xF0` 하나만 배치 |
@@ -80,6 +80,7 @@
 | V3-020 | RESOLVED | BLOCKER | RMSNorm이 `x*x` 후 `/D`하여 residual outlier 330.75의 square가 FP16 `inf`; BOS가 layer 2부터 330.75에 고정되고 attention 오염 | `x/sqrt(D)`를 먼저 FP16 적용한 뒤 square/reduce. 330.75 입력 full-D RMSNorm finite, float reference mean abs 7.75e-6 |
 | V3-021 | MITIGATED | LOW | TVM conda 환경에 `pytest` 모듈이 없어 collection 명령 사용 불가 | repository의 23개 `test_*.py` 자체 entrypoint를 직접 실행. 환경 package 설치 없이 전체 범위 검증 |
 | V3-022 | RESOLVED | MEDIUM | RMS binding 추가 후 legacy A1 reuse에서 동일 physical offset이 free-list에 중복 삽입되어 live tensor 충돌 | free-list를 offset set으로 변경하고 bump 조건 수정. prefill/decode byte-exact, v2 comprehensive 회귀 통과 |
+| V3-023 | OPEN | BLOCKER | G-buffer generator만 8192보다 크게 만들면 vendor `a.out`의 16384-byte 정적 배열을 넘겨 BSS를 덮어씀 | vendor executable이 동적/확장 G-buffer로 rebuild되기 전에는 runtime에서 8192 초과 입력을 계속 거부 |
 
 ---
 
@@ -254,6 +255,34 @@ tied LM head, CPU argmax token을 reference와 비교하는 최종 장시간 단
   `test_layout.py`의 prefill/decode reuse는 byte-exact이고 G-buffer peak는
   1,144,512 → 635,968(-44.4%)이다.
 
+### 2026-08-18 — 실행기 메모리 계약 재감사
+
+- ELF symbol과 disassembly를 다시 확인한 결과 두 용량의 성격이 서로 달랐다.
+  - `G_buffer_data_array`: 16384 bytes = 8192 FP16 정적 배열
+  - `G_buffer_data_array_fp16`: 16384 bytes = 8192 FP16 정적 배열
+  - `Global_buffer_file_write()` 반복 상한: `0x1fff`, 즉 출력도 항상 8192 FP16
+  - program: file size만큼 `malloc`한 `Program_mem_malloc`에서 fetch하고,
+    main loop도 `file_size / 4` words 전체를 실행
+- 따라서 기존의 **32768-word program limit 판단은 오판**이었다. 실제 vendor에서
+  33,001-word program의 word 33,000에 둔 `0xF0`이 실행되어 16,385-byte snapshot이
+  생성되는 것을 확인했고, 분석용 source C-model도 동적 program vector로 수정했다.
+- compiler/runtime의 `PROGRAM_CAPACITY=32768` 검사와 backend의 program overflow 오류를
+  제거했다. 이 변경은 program을 크게 한 번에 내보내는 것을 허용하지만, 현재 full-model
+  분할 실행의 주원인인 8192-entry G-buffer 제약을 해소하지는 않는다.
+- G-buffer 쪽은 generator의 출력 개수만 늘려서는 안 된다. vendor의 input read는 file
+  size 전체를 위 정적 배열 주소로 읽기 때문에 8192 초과분은 truncate가 아니라
+  **out-of-bounds write**가 된다. 확장하려면 vendor 실행기의 배열·read/write loop를 함께
+  동적화하거나 더 큰 용량으로 rebuild한 새 `a.out`이 필요하다.
+- 종료/save 동작도 재확인했다.
+  - program에 `0xF0`이 없으면 정상 process 종료 후에도 snapshot이 생성되지 않는다.
+  - `0xF0` 두 개는 모두 실행되며 2개 snapshot + newline인 32,769-byte 파일을 만든다.
+  - 즉 제공 PDF의 `Finish (end of program)` 표기와 달리 현재 `a.out`에서 `0xF0`은
+    **save이며 halt가 아니다**. compiler는 마지막 word에 정확히 한 번 둔다.
+
+이 재감사는 위 Stage V3.1/V3.2에 기록된 “8192/32768 고정” 설명 중 program 부분을
+정정한다. 517,557회 invocation은 32K program limit 때문이 아니라, 8192-entry G-buffer에
+weight/activation/누산 tile을 반복 반입해야 했기 때문이다.
+
 ## 5. 1차 목표 판정
 
 | 완료 조건 | 결과 |
@@ -266,5 +295,6 @@ tied LM head, CPU argmax token을 reference와 비교하는 최종 장시간 단
 | issue 기록, 재현 script, 단계별 commit/push | PASS |
 
 따라서 compiler-v3의 **Llama 3.2 3B full-model prefill 및 정상 next-token 출력** 1차 목표는
-완료했다. 남은 OPEN 항목(V3-004 GELU semantic, V3-007 vendor example coverage)은 Llama의
-SiLU prefill 성공 경로를 막지 않는 일반 backend 후속 과제다.
+완료했다. V3-004 GELU semantic과 V3-007 vendor example coverage는 Llama의 SiLU
+prefill 성공 경로를 막지 않는 일반 backend 후속 과제다. V3-023 G-buffer 확대는 vendor
+실행기 rebuild가 필요한 별도 blocker다.

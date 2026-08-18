@@ -15,7 +15,6 @@ import numpy as np
 _ROOT = Path(__file__).resolve().parents[2]
 VENDOR_BIN = _ROOT / "0818_npu_update" / "a_npu" / "a.out"
 GBUF_CAPACITY = 8192
-PROGRAM_CAPACITY = 32768
 
 
 def _program_bytes(program):
@@ -43,13 +42,11 @@ def _libstdcxx_dir():
 def run(program, gbuf, *, capture_trace=False, vendor_bin=VENDOR_BIN):
     """Run ver.08 and return its full 8192-entry FP16 G-buffer snapshot.
 
-    The real executable cannot represent a larger G-buffer or program.  Rejecting
-    overflow here prevents the vendor's silent memory corruption.
+    The vendor executable dynamically allocates the complete program file, but
+    its G-buffer is a fixed 8192-entry static array.  Rejecting G-buffer overflow
+    here prevents the vendor's silent memory corruption.
     """
     pbytes = _program_bytes(program)
-    nwords = len(pbytes) // 4
-    if nwords > PROGRAM_CAPACITY:
-        raise ValueError(f"0818 program has {nwords} words; vendor capacity is {PROGRAM_CAPACITY}")
     arr = np.asarray(gbuf, dtype=np.float16).reshape(-1)
     if arr.size > GBUF_CAPACITY:
         raise ValueError(f"0818 G-buffer has {arr.size} FP16 values; vendor capacity is {GBUF_CAPACITY}")

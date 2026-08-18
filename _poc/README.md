@@ -3,7 +3,8 @@
 > 이 문서의 `mysim.cpp`는 0710 호환/확장 모델이다. 0818 vendor 실행 파일의
 > 동작을 그대로 재현한 소스는 `mysim_0818.cpp`이며, 64개 제공 프로그램과 추가
 > sub-tile/Reduce-Max/GELU 케이스를 vendor snapshot과 대조한다. 0818 모델은
-> 분석 기준이므로 vendor의 고정 용량과 관찰된 quirk를 의도적으로 수정하지 않는다.
+> 분석 기준이므로 vendor의 고정 8192-entry G-buffer와 관찰된 quirk를 의도적으로
+> 수정하지 않으며, program file은 vendor처럼 전체 크기를 동적으로 읽는다.
 
 소스가 없는 NPU c-model 바이너리(`a_npu/a.out`)를 역추출하여 **동작이 byte-exact로 동일한**
 C++ 시뮬레이터를 재구현한 것. `b_program/inst_*` 예제 **55개 전부 출력이 1바이트도 안 틀림**
