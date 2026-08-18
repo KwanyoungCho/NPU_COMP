@@ -66,7 +66,7 @@
 | V3-006 | MITIGATED | MEDIUM | vector save lane 수가 연산 결과 크기가 아니라 현재 `vlen`으로 결정 | scalar reduction 직후 `vlen=1` 명시 |
 | V3-007 | OPEN | MEDIUM | 제공 64개 예제 대부분이 0710 encoding을 유지하여 새 기능 coverage가 부족 | compiler-owned targeted vendor parity 프로그램 유지·확장 |
 | V3-008 | RESOLVED | BLOCKER | full checkpoint와 tokenizer가 로컬에 없어 실제 token 검증 불가 | official revision `13afe512...`의 2개 shard와 tokenizer를 ignored build 영역에 확보. 총 weight 6,425,529,048 bytes |
-| V3-009 | MITIGATED | HIGH | official weight는 BF16이지만 vendor G-buffer 입력은 FP16 | safetensors tile에서 FP16 변환. official layer-0 HF FP16 대비 mean abs 0.000613/cosine 0.999982 확인, full token 영향은 최종 측정 |
+| V3-009 | RESOLVED | HIGH | official weight는 BF16이지만 vendor G-buffer 입력은 FP16 | safetensors tile에서 FP16 변환. fresh full logits cosine 0.999988, argmax token HF와 일치 |
 | V3-010 | MITIGATED | HIGH | tied embedding/lm_head가 128256x3072이며 전체 복사 시 약 788MB | embedding row와 LM-head `[K,V]` tile만 safetensors에서 slice하여 로드 |
 | V3-011 | RESOLVED | BLOCKER | A/B/C 64x64 세 tile은 12288 FP16이라 한 invocation에 들어가지 않음 | tile별 `m*k + k*n + m*n <= 8192`를 만족하도록 K를 동적으로 축소. 64x64 출력은 K=32 |
 | V3-012 | MITIGATED | HIGH | vendor invocation 사이에는 PE MAC 상태가 사라짐 | running C를 snapshot에서 host로 carry하고 다음 invocation 시작 시 PE output으로 load한 후 MAC bit 27 실행 |
@@ -76,8 +76,10 @@
 | V3-016 | MITIGATED | MEDIUM | indirect addressing이 없어 slice/concat을 vendor 안에서 동적 주소로 연결할 수 없음 | slice/concat은 산술 없는 host layout operation, transpose/broadcast와 모든 model arithmetic은 vendor opcode로 실행 |
 | V3-017 | RESOLVED | HIGH | per-head weight API는 official fused q/k/v/o tensor와 직접 대응하지 않아 full checkpoint mapping 오류 위험 | fused-projection Relax graph 추가: Q/K/V 1회 projection, head slice/GQA, context concat 후 official O projection |
 | V3-018 | MITIGATED | HIGH | vendor executable을 weight window마다 새 process로 실행해 layer 0 serial wall 177초 | 독립 output-column group만 4개 workdir에서 병렬 실행. serial과 bit-exact, layer 0 wall 67.8초 |
-| V3-019 | OPEN | HIGH | streaming FP16 경계가 HF eager FP16보다 많아 layer별 수치 drift 누적 가능 | 독립 HF hidden/logits reference 저장, 매 layer max/mean/RMSE/cosine 및 최종 argmax 추적 |
+| V3-019 | RESOLVED | HIGH | streaming FP16 경계가 HF eager FP16보다 많아 layer별 수치 drift 누적 가능 | 독립 HF reference로 전 layer 추적. fresh final normalized cosine 0.999803, logits cosine 0.999988, argmax 일치 |
 | V3-020 | RESOLVED | BLOCKER | RMSNorm이 `x*x` 후 `/D`하여 residual outlier 330.75의 square가 FP16 `inf`; BOS가 layer 2부터 330.75에 고정되고 attention 오염 | `x/sqrt(D)`를 먼저 FP16 적용한 뒤 square/reduce. 330.75 입력 full-D RMSNorm finite, float reference mean abs 7.75e-6 |
+| V3-021 | MITIGATED | LOW | TVM conda 환경에 `pytest` 모듈이 없어 collection 명령 사용 불가 | repository의 23개 `test_*.py` 자체 entrypoint를 직접 실행. 환경 package 설치 없이 전체 범위 검증 |
+| V3-022 | RESOLVED | MEDIUM | RMS binding 추가 후 legacy A1 reuse에서 동일 physical offset이 free-list에 중복 삽입되어 live tensor 충돌 | free-list를 offset set으로 변경하고 bump 조건 수정. prefill/decode byte-exact, v2 comprehensive 회귀 통과 |
 
 ---
 
@@ -205,3 +207,64 @@ tied LM head, CPU argmax token을 reference와 비교하는 최종 장시간 단
   mean abs 0.00000775다.
 - overflow 전의 `hidden_after_layer_02` checkpoint는 HF와 거의 일치하므로 해당 지점부터
   수정 graph로 resume한다. 실패 결과와 모든 checkpoint도 ignored build 영역에 보존했다.
+
+### 2026-08-18 — Stage V3.6: fresh full-model prefill 성공
+
+- RMSNorm 수정 후 layer-2 checkpoint resume run에서 token `358` 일치를 먼저 확인했다.
+  이어서 현재 compiler를 embedding부터 시작하는 별도 fresh checkpoint에서 재실행했다.
+- fresh 실행 범위:
+  `embedding → 28 transformer layers → final RMSNorm → tied LM head[128256] → CPU argmax`
+- 실행 대상 산술은 전부 제공 `0818_npu_update/a_npu/a.out`이다. 분석용
+  `_poc/mysim_0818.cpp`는 호출하지 않았다. host는 tokenizer/embedding gather,
+  slice/concat layout, checkpoint, 최종 argmax만 담당한다.
+- fresh full 결과:
+  - prompt: `Hello, NPU compiler!`
+  - input ids: `[128000, 9906, 11, 452, 6459, 19979, 0]`
+  - vendor/HF next token: **358**, decode **`" I"`** — argmax 일치
+  - vendor invocation: **517,557**
+  - 8-worker vendor 실행시간 합: 8,213.7초
+  - wall: **1,665.3초 (27.8분)**
+  - final normalized vs HF: max abs 0.3594, mean abs 0.01579,
+    RMSE 0.03067, cosine **0.9998027**
+  - last logits vs HF: max abs 0.07422, mean abs 0.009960,
+    RMSE 0.01273, cosine **0.9999877**
+- 마지막 HF가 직접 노출하는 raw layer checkpoint(layer 27)도 mean abs 0.01069,
+  cosine 0.9999903이다.
+- 재현 명령:
+
+```bash
+/home/chokwans99/anaconda3/envs/npu-tvm/bin/python \
+  d_compiler/run_v3_prefill.py --workers 8 \
+  --checkpoint d_compiler/build/v3_prefill_hello_fresh
+```
+
+- ignored 실행 산출물:
+  - HF reference: `d_compiler/build/v3_reference_hello.npz`
+  - fresh vendor result: `d_compiler/build/v3_prefill_hello_fresh/final.npz`
+  - 요약: `d_compiler/build/v3_prefill_hello_fresh/result.json`
+  - layer checkpoints/metrics: 같은 디렉터리의 `hidden_after_layer_*.npy`,
+    `progress.jsonl`, `state.json`
+- 회귀:
+  - repository의 23개 test script를 직접 실행
+  - 0818 ISA/C-model parity/backend, V3 model/runtime/Relax executor 통과
+  - real 3B q/k/v/o/FFN weight test 통과
+  - legacy decode/generation, layout/tiling/TIR, v2 comprehensive 통과
+  - slow official layer test는 일반 sweep에서는 opt-in skip이며, 그보다 큰 fresh full run으로 검증
+- 회귀 중 발견한 legacy A1 allocator 중복 free-offset 문제(V3-022)도 함께 수정했다.
+  `test_layout.py`의 prefill/decode reuse는 byte-exact이고 G-buffer peak는
+  1,144,512 → 635,968(-44.4%)이다.
+
+## 5. 1차 목표 판정
+
+| 완료 조건 | 결과 |
+|---|---|
+| vendor 0818 executable만 compute target으로 사용 | PASS |
+| official Llama 3.2 3B config/weight, 28 layers full prefill | PASS |
+| layer/reference 수치 검증 | PASS |
+| full vocabulary logits 생성 | PASS |
+| HF와 argmax token 일치 및 tokenizer decode | PASS — `358`, `" I"` |
+| issue 기록, 재현 script, 단계별 commit/push | PASS |
+
+따라서 compiler-v3의 **Llama 3.2 3B full-model prefill 및 정상 next-token 출력** 1차 목표는
+완료했다. 남은 OPEN 항목(V3-004 GELU semantic, V3-007 vendor example coverage)은 Llama의
+SiLU prefill 성공 경로를 막지 않는 일반 backend 후속 과제다.

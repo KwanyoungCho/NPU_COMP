@@ -422,7 +422,10 @@ def plan(func, pack=True, pack_params=False, layouts=True, reuse=False, fuse_opr
     emit_idx = reads_at = last_read = None
     consumed_set, fused_root = set(), {}
     keep_alive = set(param_set)
-    free_list = {}                                         # footprint -> [freed offsets]
+    # A physical offset may be reached through more than one graph value after
+    # earlier reuse.  A set prevents duplicate free-list entries from assigning
+    # that same offset to two simultaneously-live later values.
+    free_list = {}                                         # footprint -> {freed offsets}
     if reuse:
         emit_idx, reads_at, last_read, consumed_set, fused_root = _liveness(seq, bindings, fuse_oproj)
         val_of = {b.var: b.value for b in bindings}
@@ -434,15 +437,18 @@ def plan(func, pack=True, pack_params=False, layouts=True, reuse=False, fuse_opr
     def _alloc_reuse(v, lay):
         shape, dtype = _shape_dtype(v.struct_info)
         size = _footprint(shape, lay)
-        lst = free_list.get(size)
-        off = lst.pop() if lst else mp.top
-        if not lst:
+        pool = free_list.get(size)
+        if pool:
+            off = pool.pop()
+        else:
+            off = mp.top
             mp.top += size
         mp.offset[v] = off; mp.shape[v] = shape; mp.dtype[v] = dtype; mp.layout[v] = lay
         for u in reads_at.get(emit_idx.get(v, -1), []):   # free inputs dead after this binding
             if (last_read.get(u) == emit_idx[v] and u not in keep_alive
                     and u in mp.offset and u not in mp.const_data):
-                free_list.setdefault(_footprint(mp.shape[u], mp.layout[u]), []).append(mp.offset[u])
+                free_list.setdefault(
+                    _footprint(mp.shape[u], mp.layout[u]), set()).add(mp.offset[u])
 
     for binding in bindings:
         val = binding.value
