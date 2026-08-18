@@ -26,6 +26,12 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
     kernel reads weights contiguously (no gather); run_compiled packs the fed data.
     layouts=True enables the A4 tile-blocked layout propagation (matmul-chain
     gather/scatter elimination); layouts=False = pre-A4 row-major, for A/B comparison."""
+    if backend in ("0818", "vendor-0818"):
+        # ver.08 has native MAIN/PARTIAL sub-tile addressing.  Its backend owns a
+        # row-major plan and deliberately does not inherit the 0710 packed layouts.
+        from . import backend_0818
+        return backend_0818.compile_module(
+            mod, func_name, tile=64 if tile is None else tile, reuse=reuse)
     if backend == "tir":                      # matmul-only modules via pure TIR path
         from . import tir_backend
         return tir_backend.compile_func(mod, func_name)
@@ -78,7 +84,11 @@ def run_compiled(asm, mp, inputs, maxrun=None):
         gbuf[off:off + arr.size] = arr
     out_var = mp.output
     out_off = mp.offset[out_var]; n_out = _numel(mp.shape[out_var])
-    full = _runtime.run(asm, gbuf, gn=mp.top, maxrun=maxrun)
+    if getattr(asm, "format_version", None) == "0818":
+        from . import runtime_0818
+        full = runtime_0818.run(asm, gbuf)
+    else:
+        full = _runtime.run(asm, gbuf, gn=mp.top, maxrun=maxrun)
     return full[out_off:out_off + n_out].reshape(mp.shape[out_var])
 
 

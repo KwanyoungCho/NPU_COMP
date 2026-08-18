@@ -1,0 +1,87 @@
+# 0818 Vendor C-model 기반 Compiler V3 진행 보고서
+
+> 시작일: 2026-08-18
+>
+> 기준 브랜치: `compiler-v2` → 개발 브랜치 `compiler-v3`
+>
+> 1차 목표: **vendor 0818 C-model만으로 Llama 3.2 3B full-model prefill을 실행하고,
+> logits에서 정상적인 next token을 출력한다.**
+
+이 문서는 compiler-v3 개발 중 확인된 사실, 재현 방법, 해결 여부와 검증 결과를
+누적 기록한다. issue는 `V3-###` 식별자를 유지하며, 해결 커밋과 회귀 테스트를 함께
+기록한다.
+
+---
+
+## 1. 완료 기준
+
+1. compiler/runtime의 최종 실행 대상은
+   `0818_npu_update/a_npu/a.out` 하나다. `_poc/mysim_0818.cpp`는 분석 및 vendor
+   parity 검증에만 사용한다.
+2. Meta Llama 3.2 3B의 실제 config와 weight를 사용하여 prompt prefill 전체 layer가
+   끝까지 실행된다.
+3. 동일 FP16 입력에 대한 reference 실행과 주요 layer/checkpoint를 비교한다.
+4. 최종 logits의 argmax token이 reference와 일치하고, tokenizer로 decode 가능한
+   token을 출력한다.
+5. 모든 우회·제약·정확도 차이를 이 문서에 기록하고 재현 테스트를 남긴다.
+6. 단계별 완료 시 report를 포함하여 commit하고 `origin/compiler-v3`에 push한다.
+
+---
+
+## 2. 0818 기준선
+
+### 2.1 구현
+
+- ver.08 전용 ISA encoder/assembler
+- 고정 파일 인터페이스를 사용하는 vendor runtime
+- vendor 실행 의미를 재현한 분석용 C++ source C-model
+- MAIN/PARTIAL descriptor로 row-major tensor의 sub-tile을 직접 접근하는 backend
+- `driver.compile_module(..., backend="0818")` 및 vendor 자동 실행
+
+### 2.2 검증
+
+- 제공 64개 프로그램, 13,766 instruction words decode/re-encode 일치
+- 64개 프로그램의 vendor/source G-buffer snapshot 및 실행 trace 본문 일치
+- 임의 sub-tile, MAC, broadcast, Reduce Max quirk, SiLU/GELU, 반복 `0xF0` parity
+- multi-tile matmul, row sum/max, full-capacity 64x64 transpose vendor E2E
+- 기존 0710 ISA/runtime/matmul/elementwise 회귀 유지
+
+### 2.3 Layout 결정
+
+- G-buffer tensor: row-major
+- 제거: 0710용 tile-blocked global layout, weight pre-pack, matmul gather/scatter
+- 유지: 물리 PE 실행 단위인 최대 64x64 tiling과 K-tile MAC
+
+---
+
+## 3. Issue tracker
+
+| ID | 상태 | 심각도 | 내용 | 현재 대응 |
+|---|---|---:|---|---|
+| V3-001 | OPEN | BLOCKER | vendor G-buffer가 8192 FP16으로 고정되어 3B weight는 물론 일반적인 한 layer working set도 한 번에 담을 수 없음 | 실행 분할·외부 binary chaining 가능성 조사. vendor 자체 한계는 명시적 compile error로 보호 |
+| V3-002 | OPEN | BLOCKER | program memory 32768 words 고정, loop/branch/indirect addressing 없음 | graph 분할 및 여러 vendor invocation을 전제로 설계 검토 |
+| V3-003 | MITIGATED | HIGH | native Reduce Max `0x19`가 accumulator를 0으로 시작하여 all-negative row를 0으로 반환 | compiler는 첫 실제 열에서 시작하는 vector-max fold 사용. source C-model은 vendor bug 그대로 재현 |
+| V3-004 | OPEN | HIGH | vendor GELU가 표준 GELU가 아니라 `x*sigmoid(2x)` | native GELU 사용 시 모델 정확도 영향 측정. 필요하면 표준식을 primitive 조합으로 lowering |
+| V3-005 | MITIGATED | MEDIUM | `0xF0`은 HALT가 아니며 snapshot 후 계속 실행 | generated program의 마지막 유효 word로 `0xF0` 하나만 배치 |
+| V3-006 | MITIGATED | MEDIUM | vector save lane 수가 연산 결과 크기가 아니라 현재 `vlen`으로 결정 | scalar reduction 직후 `vlen=1` 명시 |
+| V3-007 | OPEN | MEDIUM | 제공 64개 예제 대부분이 0710 encoding을 유지하여 새 기능 coverage가 부족 | compiler-owned targeted vendor parity 프로그램 유지·확장 |
+
+---
+
+## 4. 진행 로그
+
+### 2026-08-18 — Baseline: ver.08 retarget
+
+- PDF와 vendor executable을 독립적으로 분석해 ver.08 field와 실행 의미를 확정했다.
+- source C-model과 vendor parity를 확보했다.
+- row-major direct sub-tile backend를 추가했다.
+- full-model 착수 전 blocker는 V3-001/002다. ISA 기능 추가와 달리 vendor executable의
+  고정 메모리 용량은 그대로이므로, compiler-v3에서는 한 번의 거대한 program이 아닌
+  **vendor invocation 간 분할 실행** 가능성을 가장 먼저 검증한다.
+
+다음 단계:
+
+1. 현재 기준선을 `compiler-v2`에 commit/push
+2. `compiler-v3` 생성/push
+3. 기존 Llama 3.2 3B import·weight·prefill 경로 inventory
+4. V3-001/002를 실제 최소 graph로 재현하고 분할 실행 계약 결정
