@@ -77,6 +77,7 @@
 | V3-017 | RESOLVED | HIGH | per-head weight API는 official fused q/k/v/o tensor와 직접 대응하지 않아 full checkpoint mapping 오류 위험 | fused-projection Relax graph 추가: Q/K/V 1회 projection, head slice/GQA, context concat 후 official O projection |
 | V3-018 | MITIGATED | HIGH | vendor executable을 weight window마다 새 process로 실행해 layer 0 serial wall 177초 | 독립 output-column group만 4개 workdir에서 병렬 실행. serial과 bit-exact, layer 0 wall 67.8초 |
 | V3-019 | OPEN | HIGH | streaming FP16 경계가 HF eager FP16보다 많아 layer별 수치 drift 누적 가능 | 독립 HF hidden/logits reference 저장, 매 layer max/mean/RMSE/cosine 및 최종 argmax 추적 |
+| V3-020 | RESOLVED | BLOCKER | RMSNorm이 `x*x` 후 `/D`하여 residual outlier 330.75의 square가 FP16 `inf`; BOS가 layer 2부터 330.75에 고정되고 attention 오염 | `x/sqrt(D)`를 먼저 FP16 적용한 뒤 square/reduce. 330.75 입력 full-D RMSNorm finite, float reference mean abs 7.75e-6 |
 
 ---
 
@@ -187,3 +188,20 @@ weight로 실행하는 것이다.
 
 다음은 동일 7-token prompt로 28개 layer를 checkpoint하면서 끝까지 실행하고 final norm,
 tied LM head, CPU argmax token을 reference와 비교하는 최종 장시간 단계다.
+
+### 2026-08-18 — Stage V3.5: full prefill 1차 실행 및 RMSNorm blocker
+
+- 28 layer + final norm + tied LM head를 vendor-only로 처음 끝까지 실행했다.
+  - 500,864 vendor invocation
+  - 4-worker vendor 실행시간 합 6,773.0초, wall 2,187.0초(36.5분)
+  - vendor token `452` (`" N"`) vs HF token `358` (`" I"`): **불일치**
+- layer 2 output까지는 HF cosine 0.9999993/mean abs 0.00133이지만 layer 3부터 drift가
+  급증했다. checkpoint를 조사한 결과 BOS residual이 layer 2에서 330.75가 된 후 끝까지
+  정확히 같은 값으로 고정됐다.
+- 원인은 기존 RMSNorm 순서다. `x*x`가 FP16 max 65504를 먼저 넘어 `inf`가 되고,
+  나중의 `1/D` scale은 overflow를 복구하지 못했다.
+- 수정 lowering은 `scaled=x/sqrt(D)`, `mean=sum(scaled*scaled)`이다. full D=3072,
+  outlier=330.75 회귀에서 finite이며 float reference 대비 max abs 0.000244,
+  mean abs 0.00000775다.
+- overflow 전의 `hidden_after_layer_02` checkpoint는 HF와 거의 일치하므로 해당 지점부터
+  수정 graph로 resume한다. 실패 결과와 모든 checkpoint도 ignored build 영역에 보존했다.

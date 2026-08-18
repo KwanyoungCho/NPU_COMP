@@ -148,9 +148,24 @@ def test_fused_projection_prefill_graph():
     return stats
 
 
+def test_rmsnorm_large_residual_stays_finite():
+    sequence = 1
+    cfg = model.REDUCED
+    plan = compile_module(model.build_v3_final_norm_module(cfg, sequence))
+    values = np.ones((sequence, cfg.D), dtype=np.float16)
+    values[0, 3] = np.float16(330.75)
+    weight = np.ones((1, cfg.D), dtype=np.float16)
+    expected = plan.run({"x": values, "weight": weight}, vendor=NumpyBoundarySession())
+    with VendorSession() as vendor:
+        actual = plan.run({"x": values, "weight": weight}, vendor=vendor)
+    assert np.array_equal(actual, expected)
+    assert np.all(np.isfinite(actual))
+
+
 if __name__ == "__main__":
     error, stats, summary = test_reduced_prefill_relax_graph()
     fused_stats = test_fused_projection_prefill_graph()
+    test_rmsnorm_large_residual_stays_finite()
     print(f"REDUCED PREFILL max_error={error} stats={stats}")
     print(f"FUSED PREFILL stats={fused_stats}")
     print(f"PLAN {summary}")

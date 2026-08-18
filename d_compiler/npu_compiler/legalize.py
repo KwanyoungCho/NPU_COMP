@@ -39,11 +39,13 @@ def rms_norm(bb, x, w, seq, d, eps=0.0):
     reduce via ones-matmul, broadcast via ones-matmul, 1/rms via ones-divide.
     eps (e.g. 1e-5) added as a constant tensor (immediate can't encode it).
     """
-    sq = bb.emit(relax.op.multiply(x, x))                       # [seq,d]
-    # scale by 1/d BEFORE reducing so the running sum stays near mean(x^2): sum(x^2)
-    # over large d (e.g. 3072) otherwise overflows FP16 (max 65504) -> inf -> 0 output.
-    sq = bb.emit(relax.op.multiply(sq, _c(np.full((seq, d), 1.0 / d))))
-    mean = reduce_sum_lastdim(bb, sq, seq, d)                   # = mean(x^2), overflow-safe
+    # Scale x BEFORE squaring.  Scaling x^2 afterwards is too late: a residual
+    # outlier above sqrt(65504) has already become FP16 inf.  The power remains
+    # near one and the reduction directly computes sum((x/sqrt(d))^2).
+    scaled = bb.emit(relax.op.multiply(
+        x, _c(np.full((seq, d), 1.0 / np.sqrt(float(d))))))
+    sq = bb.emit(relax.op.multiply(scaled, scaled))              # [seq,d]
+    mean = reduce_sum_lastdim(bb, sq, seq, d)                   # ~= mean(x^2), overflow-safe
     if eps:
         mean = bb.emit(relax.op.add(mean, _c(np.full((seq, 1), eps))))       # + eps
     rms = bb.emit(relax.op.sqrt(mean))                         # [seq,1]

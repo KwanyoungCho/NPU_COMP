@@ -74,7 +74,9 @@ def main():
 
     def progress(layer, layer_hidden, delta):
         record = {"layer": layer + 1, **delta}
-        if reference is not None:
+        # HF exposes pre-layer states 0..27 and the final normalized state at
+        # index 28; it does not expose raw output of layer 27.
+        if reference is not None and layer + 1 < compiler.assets.config["num_hidden_layers"]:
             record["reference"] = metrics(
                 layer_hidden, reference["hidden_states"][layer + 1])
         with progress_path.open("a") as file:
@@ -87,9 +89,12 @@ def main():
             checkpoint_dir=args.checkpoint, progress=progress)
 
     final_metrics = None
+    normalized_metrics = None
     expected_token = None
     if reference is not None:
         final_metrics = metrics(result.logits, reference["last_logits"])
+        normalized_metrics = metrics(
+            result.normalized, reference["hidden_states"][-1])
         expected_token = int(reference["next_token_id"])
     np.savez(
         args.checkpoint / "final.npz", input_ids=result.input_ids,
@@ -100,6 +105,7 @@ def main():
         "next_token_id": result.next_token_id,
         "decoded": decoded,
         "expected_token_id": expected_token,
+        "normalized_reference": normalized_metrics,
         "logits_reference": final_metrics,
         "stats": result.stats,
     }
