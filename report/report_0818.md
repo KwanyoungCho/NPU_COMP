@@ -58,15 +58,15 @@
 
 | ID | 상태 | 심각도 | 내용 | 현재 대응 |
 |---|---|---:|---|---|
-| V3-001 | OPEN | BLOCKER | vendor G-buffer가 8192 FP16으로 고정되어 3B weight는 물론 일반적인 한 layer working set도 한 번에 담을 수 없음 | 실행 분할·외부 binary chaining 가능성 조사. vendor 자체 한계는 명시적 compile error로 보호 |
-| V3-002 | OPEN | BLOCKER | program memory 32768 words 고정, loop/branch/indirect addressing 없음 | graph 분할 및 여러 vendor invocation을 전제로 설계 검토 |
+| V3-001 | MITIGATED | BLOCKER | vendor G-buffer가 8192 FP16으로 고정되어 3B weight는 물론 일반적인 한 layer working set도 한 번에 담을 수 없음 | host-resident tensor와 8192 이하 `[A,B,C]` window로 분할. vendor 한계 자체는 유지 |
+| V3-002 | MITIGATED | BLOCKER | program memory 32768 words 고정, loop/branch/indirect addressing 없음 | Relax execution plan이 bounded program을 여러 vendor invocation으로 순차·병렬 dispatch |
 | V3-003 | MITIGATED | HIGH | native Reduce Max `0x19`가 accumulator를 0으로 시작하여 all-negative row를 0으로 반환 | compiler는 첫 실제 열에서 시작하는 vector-max fold 사용. source C-model은 vendor bug 그대로 재현 |
 | V3-004 | OPEN | HIGH | vendor GELU가 표준 GELU가 아니라 `x*sigmoid(2x)` | native GELU 사용 시 모델 정확도 영향 측정. 필요하면 표준식을 primitive 조합으로 lowering |
 | V3-005 | MITIGATED | MEDIUM | `0xF0`은 HALT가 아니며 snapshot 후 계속 실행 | generated program의 마지막 유효 word로 `0xF0` 하나만 배치 |
 | V3-006 | MITIGATED | MEDIUM | vector save lane 수가 연산 결과 크기가 아니라 현재 `vlen`으로 결정 | scalar reduction 직후 `vlen=1` 명시 |
 | V3-007 | OPEN | MEDIUM | 제공 64개 예제 대부분이 0710 encoding을 유지하여 새 기능 coverage가 부족 | compiler-owned targeted vendor parity 프로그램 유지·확장 |
 | V3-008 | RESOLVED | BLOCKER | full checkpoint와 tokenizer가 로컬에 없어 실제 token 검증 불가 | official revision `13afe512...`의 2개 shard와 tokenizer를 ignored build 영역에 확보. 총 weight 6,425,529,048 bytes |
-| V3-009 | OPEN | HIGH | official weight는 BF16이지만 vendor G-buffer 입력은 FP16 | safetensors tile을 읽을 때 FP16 변환. reference도 같은 변환 지점으로 맞춰 token/정확도 영향 측정 |
+| V3-009 | MITIGATED | HIGH | official weight는 BF16이지만 vendor G-buffer 입력은 FP16 | safetensors tile에서 FP16 변환. official layer-0 HF FP16 대비 mean abs 0.000613/cosine 0.999982 확인, full token 영향은 최종 측정 |
 | V3-010 | MITIGATED | HIGH | tied embedding/lm_head가 128256x3072이며 전체 복사 시 약 788MB | embedding row와 LM-head `[K,V]` tile만 safetensors에서 slice하여 로드 |
 | V3-011 | RESOLVED | BLOCKER | A/B/C 64x64 세 tile은 12288 FP16이라 한 invocation에 들어가지 않음 | tile별 `m*k + k*n + m*n <= 8192`를 만족하도록 K를 동적으로 축소. 64x64 출력은 K=32 |
 | V3-012 | MITIGATED | HIGH | vendor invocation 사이에는 PE MAC 상태가 사라짐 | running C를 snapshot에서 host로 carry하고 다음 invocation 시작 시 PE output으로 load한 후 MAC bit 27 실행 |
@@ -74,6 +74,9 @@
 | V3-014 | RESOLVED | HIGH | SiLU는 독립 unary opcode가 아니라 matrix ALU activation field라 기본 VECTOR mode 사용 시 미초기화 SRC2를 참조 | `matrix add immediate 0 + ACT_SILU`로 identity 연산 후 activation 수행 |
 | V3-015 | RESOLVED | BLOCKER | 기존 Relax backend는 graph 전체 tensor를 한 G-buffer에 배치하므로 real layer가 8192 capacity를 근본적으로 초과 | Relax binding을 host-resident value와 bounded vendor kernel 호출로 compile하는 `RelaxVendorPlan` 구현 |
 | V3-016 | MITIGATED | MEDIUM | indirect addressing이 없어 slice/concat을 vendor 안에서 동적 주소로 연결할 수 없음 | slice/concat은 산술 없는 host layout operation, transpose/broadcast와 모든 model arithmetic은 vendor opcode로 실행 |
+| V3-017 | RESOLVED | HIGH | per-head weight API는 official fused q/k/v/o tensor와 직접 대응하지 않아 full checkpoint mapping 오류 위험 | fused-projection Relax graph 추가: Q/K/V 1회 projection, head slice/GQA, context concat 후 official O projection |
+| V3-018 | MITIGATED | HIGH | vendor executable을 weight window마다 새 process로 실행해 layer 0 serial wall 177초 | 독립 output-column group만 4개 workdir에서 병렬 실행. serial과 bit-exact, layer 0 wall 67.8초 |
+| V3-019 | OPEN | HIGH | streaming FP16 경계가 HF eager FP16보다 많아 layer별 수치 drift 누적 가능 | 독립 HF hidden/logits reference 저장, 매 layer max/mean/RMSE/cosine 및 최종 argmax 추적 |
 
 ---
 
@@ -156,3 +159,31 @@ compile하여 layer 연산 전체를 이 primitive들로 연결하고 실제 inv
 이제 컴파일 경로가 small graph 수준에서 연결되었다. 다음 단계는 official tensor naming과
 fused Q/K/V/O projection을 이 execution model에 연결하여 layer 하나를 실제 3B shape와
 weight로 실행하는 것이다.
+
+### 2026-08-18 — Stage V3.4: official layer 및 parallel schedule
+
+- official checkpoint 자체를 lazy `LinearTileSource[K,N]`로 Relax parameter에 연결했다.
+  safetensors mmap handle은 유지하며 필요한 tile만 BF16→FP16 변환한다.
+- V3 prefill graph는 official architecture대로 fused Q/K/V projection, GQA head slice,
+  RoPE/causal stable softmax, context concat, fused O projection, SwiGLU를 구성한다.
+- independent reference:
+  - prompt `Hello, NPU compiler!`
+  - ids `[128000, 9906, 11, 452, 6459, 19979, 0]`
+  - Hugging Face eager FP16 full forward 0.566초
+  - reference next token `358`, decode `" I"`
+  - layer hidden 29개와 last logits를 ignored build artifact로 보관
+- official layer 0 vendor 결과:
+  - serial: 16,693 invocation, wall 177.4초
+  - HF `hidden_states[1]` 대비 max abs 0.1953, mean abs 0.0006135,
+    RMSE 0.004120, cosine 0.9999815
+- GEMM scheduler는 동일 A를 공유하는 여러 output-column tile을 한 G-buffer window에
+  packing한다. 공식 Q projection 3072열은 1,200 invocation이다.
+- 누산 의존성이 없는 column group을 4개 vendor workdir에서 병렬화했다.
+  - Q projection wall 17.9초 → 5.0초
+  - layer 0 wall 177.4초 → 67.8초
+  - invocation 16,693 및 최종 output은 serial과 bit-exact
+- `run_v3_prefill.py`는 layer별 hidden checkpoint/resume, HF metric JSONL,
+  최종 logits/token artifact를 제공한다.
+
+다음은 동일 7-token prompt로 28개 layer를 checkpoint하면서 끝까지 실행하고 final norm,
+tied LM head, CPU argmax token을 reference와 비교하는 최종 장시간 단계다.

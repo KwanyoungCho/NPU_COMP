@@ -24,20 +24,33 @@ class NumpyBoundarySession:
         output = np.empty((rows, cols), np.float16)
         for row0 in range(0, rows, 64):
             part_rows = min(64, rows - row0)
-            for col0 in range(0, cols, 64):
-                part_cols = min(64, cols - col0)
-                step = VendorSession._gemm_capacity(part_rows, part_cols)
-                acc = np.zeros((part_rows, part_cols), np.float16)
+            starts = list(range(0, cols, 64))
+            widths = [min(64, cols - start) for start in starts]
+            index = 0
+            while index < len(starts):
+                count, step = VendorSession._select_gemm_group(
+                    part_rows, widths[index:], inner)
+                group_starts = starts[index:index + count]
+                group_widths = widths[index:index + count]
+                accumulators = [np.zeros((part_rows, width), np.float16)
+                                for width in group_widths]
                 for inner0 in range(0, inner, step):
                     part_inner = min(step, inner - inner0)
-                    product = (
-                        lhs[row0:row0 + part_rows, inner0:inner0 + part_inner].astype(
-                            np.float32)
-                        @ rhs[inner0:inner0 + part_inner,
-                              col0:col0 + part_cols].astype(np.float32)
-                    )
-                    acc = np.asarray(acc.astype(np.float32) + product, np.float16)
-                output[row0:row0 + part_rows, col0:col0 + part_cols] = acc
+                    for item, (col0, part_cols) in enumerate(
+                            zip(group_starts, group_widths)):
+                        product = (
+                            lhs[row0:row0 + part_rows,
+                                inner0:inner0 + part_inner].astype(np.float32)
+                            @ rhs[inner0:inner0 + part_inner,
+                                  col0:col0 + part_cols].astype(np.float32)
+                        )
+                        accumulators[item] = np.asarray(
+                            accumulators[item].astype(np.float32) + product, np.float16)
+                for col0, part_cols, accumulator in zip(
+                        group_starts, group_widths, accumulators):
+                    output[row0:row0 + part_rows,
+                           col0:col0 + part_cols] = accumulator
+                index += count
         return output
 
     @staticmethod
@@ -109,8 +122,36 @@ def test_reduced_prefill_relax_graph():
     return max_error, stats, summary
 
 
+def test_fused_projection_prefill_graph():
+    sequence = 2
+    cfg = model.REDUCED
+    weights = model.make_weights(cfg, seed=1818, ws=0.04)
+    inputs = {
+        "x": weights["x"][:sequence],
+        "Wn1": weights["Wn1"],
+        "Wn2": weights["Wn2"],
+        "Wq": np.concatenate([weights[f"Wq{head}"] for head in range(cfg.H)], axis=1),
+        "Wk": np.concatenate([weights[f"Wk{head}"] for head in range(cfg.KV)], axis=1),
+        "Wv": np.concatenate([weights[f"Wv{head}"] for head in range(cfg.KV)], axis=1),
+        "Wo": np.concatenate([weights[f"Wo{head}"] for head in range(cfg.H)], axis=0),
+        "Wg": weights["Wg"],
+        "Wu": weights["Wu"],
+        "Wd": weights["Wd"],
+    }
+    plan = compile_module(model.build_v3_prefill_layer_module(cfg, sequence))
+    expected = plan.run(inputs, vendor=NumpyBoundarySession())
+    with VendorSession() as vendor:
+        actual = plan.run(inputs, vendor=vendor)
+        stats = vendor.stats()
+    assert np.array_equal(actual, expected)
+    assert plan.summary()["ops"]["relax.matmul"] == 15
+    return stats
+
+
 if __name__ == "__main__":
     error, stats, summary = test_reduced_prefill_relax_graph()
+    fused_stats = test_fused_projection_prefill_graph()
     print(f"REDUCED PREFILL max_error={error} stats={stats}")
+    print(f"FUSED PREFILL stats={fused_stats}")
     print(f"PLAN {summary}")
     print("ALL V3 RELAX-EXECUTOR TESTS PASSED")

@@ -288,6 +288,84 @@ def build_prefill_layer_module(cfg, S):
     return bb.finalize()
 
 
+def build_v3_prefill_layer_module(cfg, S):
+    """Fused-projection prefill graph used by the vendor-streaming V3 compiler.
+
+    Q/K/V/O match the official checkpoint tensors directly.  The graph keeps
+    head slicing explicit for GQA/RoPE/attention, then concatenates all contexts
+    before one official ``o_proj`` matmul.
+    """
+    D, H, KV, HD, F = cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
+    if H * HD != D:
+        raise ValueError(f"V3 fused Q/O require H*HD == D, got {H}*{HD} != {D}")
+    GPK = H // KV
+    op = relax.op
+    x = _P("x", (S, D))
+    Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
+    Wq = _P("Wq", (D, D)); Wk = _P("Wk", (D, KV * HD))
+    Wv = _P("Wv", (D, KV * HD)); Wo = _P("Wo", (D, D))
+    Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
+    params = [x, Wn1, Wn2, Wq, Wk, Wv, Wo, Wg, Wu, Wd]
+    pos_c = _pos_ramp_c(S); freqs_c = _rope_freqs_c(cfg)
+    scale_c = _const(np.full((S, S), 1.0 / float(np.sqrt(HD))))
+    mask_c = _const(legalize.causal_mask(S))
+
+    def head_slice(bb, tensor, index):
+        return bb.emit(op.strided_slice(
+            tensor, axes=[1], begin=[index * HD], end=[(index + 1) * HD]))
+
+    bb = relax.BlockBuilder()
+    with bb.function("main", params):
+        with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos_c, freqs_c, S, HD)
+            xn = rms_norm_(bb, x, Wn1, S, D, cfg.eps)
+            q_all = bb.emit(op.matmul(xn, Wq))
+            k_all = bb.emit(op.matmul(xn, Wk))
+            v_all = bb.emit(op.matmul(xn, Wv))
+            kt, values = [], []
+            for kv in range(KV):
+                key = legalize.rope(bb, head_slice(bb, k_all, kv), cos, sin)
+                kt.append(bb.emit(op.permute_dims(key, axes=[1, 0])))
+                values.append(head_slice(bb, v_all, kv))
+            contexts = []
+            for head in range(H):
+                query = legalize.rope(bb, head_slice(bb, q_all, head), cos, sin)
+                score = bb.emit(op.matmul(query, kt[head // GPK]))
+                score = bb.emit(op.multiply(score, scale_c))
+                score = bb.emit(op.add(score, mask_c))
+                probability = legalize.softmax_lastdim(bb, score, S, S)
+                contexts.append(bb.emit(op.matmul(probability, values[head // GPK])))
+            context = bb.emit(op.concat(contexts, axis=1))
+            attention = bb.emit(op.matmul(context, Wo))
+            y = _residual_ffn(bb, x, attention, Wn2, Wg, Wu, Wd, S, D, F, cfg.eps)
+            gv = bb.emit_output(y)
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
+def build_v3_final_norm_module(cfg, S):
+    """Final model RMSNorm over all prefill positions."""
+    x = _P("x", (S, cfg.D)); weight = _P("weight", (1, cfg.D))
+    bb = relax.BlockBuilder()
+    with bb.function("main", [x, weight]):
+        with bb.dataflow():
+            output = rms_norm_(bb, x, weight, S, cfg.D, cfg.eps)
+            gv = bb.emit_output(output)
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
+def build_v3_lm_head_module(cfg):
+    """Last-position hidden state -> tied vocabulary logits."""
+    x = _P("x", (1, cfg.D)); weight = _P("weight", (cfg.D, 128256))
+    bb = relax.BlockBuilder()
+    with bb.function("main", [x, weight]):
+        with bb.dataflow():
+            gv = bb.emit_output(bb.emit(relax.op.matmul(x, weight)))
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
 def build_attn_ffn_module(cfg, MAX):
     """Decode kernel 2: x_new[1,D] + Kt[HD,MAX]/Vc[MAX,HD] (+ runtime mask) -> y[1,D].
     Attention runs over the whole MAX cache; `mask` zeros slots j>pos."""

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -26,6 +28,18 @@ def default_model_path():
 
 class ModelAssetError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class LinearTileSource:
+    """Lazy B[K,N] operand consumed directly by the V3 GEMM scheduler."""
+
+    shape: tuple
+    loader: object
+    name: str
+
+    def load_tile(self, k_slice, n_slice):
+        return self.loader(k_slice, n_slice)
 
 
 class Llama32Assets:
@@ -65,6 +79,8 @@ class Llama32Assets:
         if missing:
             raise ModelAssetError(f"missing checkpoint shard(s): {missing}")
         self._tokenizer = None
+        self._files = {}
+        self._files_lock = threading.Lock()
 
     @property
     def tokenizer(self):
@@ -79,9 +95,14 @@ class Llama32Assets:
         if key not in self.weight_map:
             raise KeyError(key)
         from safetensors import safe_open
-        with safe_open(self.shards[self.weight_map[key]], framework="pt", device="cpu") as file:
-            tensor = file.get_slice(key)[selection]
-            return np.ascontiguousarray(tensor.to(dtype=__import__("torch").float16).numpy())
+        shard = self.shards[self.weight_map[key]]
+        # safe_open handles are persistent but their slice API is serialized;
+        # vendor processes still run concurrently after each small tile is read.
+        with self._files_lock:
+            if shard not in self._files:
+                self._files[shard] = safe_open(shard, framework="pt", device="cpu")
+            tensor = self._files[shard].get_slice(key)[selection]
+        return np.ascontiguousarray(tensor.to(dtype=__import__("torch").float16).numpy())
 
     def embedding(self, token_ids):
         """Embedding lookup without loading the full 128256x3072 table."""
@@ -102,6 +123,14 @@ class Llama32Assets:
         tile_nk = self._slice(key, (n_slice, k_slice))
         return np.ascontiguousarray(tile_nk.T)
 
+    def linear_source(self, layer, module, shape):
+        shape = tuple(shape)
+        return LinearTileSource(
+            shape,
+            lambda k_slice, n_slice: self.linear_tile(layer, module, k_slice, n_slice),
+            f"layer{layer}.{module}",
+        )
+
     def norm(self, layer, post_attention=False):
         name = "post_attention_layernorm" if post_attention else "input_layernorm"
         return self._slice(f"model.layers.{layer}.{name}.weight", slice(None))
@@ -113,6 +142,10 @@ class Llama32Assets:
         """Return tied LM-head B[K,V] from embedding rows [V,K]."""
         tile_vk = self._slice("model.embed_tokens.weight", (n_slice, k_slice))
         return np.ascontiguousarray(tile_vk.T)
+
+    def lm_head_source(self):
+        shape = (self.config["hidden_size"], self.config["vocab_size"])
+        return LinearTileSource(shape, self.lm_head_tile, "tied_lm_head")
 
     def validate_keyset(self):
         required = {"model.embed_tokens.weight", "model.norm.weight"}

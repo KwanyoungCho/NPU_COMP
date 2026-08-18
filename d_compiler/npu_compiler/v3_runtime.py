@@ -10,6 +10,7 @@ import os
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -115,6 +116,53 @@ class VendorSession:
         self.program_cache[key] = asm
         return asm
 
+    @staticmethod
+    def _gemm_group_capacity(m, widths):
+        """Largest K for one A tile and several independent B/C output tiles."""
+        total_n = sum(widths)
+        remaining = GBUF_CAPACITY - m * total_n
+        return min(64, remaining // (m + total_n)) if remaining > 0 else 0
+
+    @classmethod
+    def _select_gemm_group(cls, m, widths, k_total, max_group=8):
+        """Pick the local N-tile group with the fewest invocations per output."""
+        best = None
+        for count in range(1, min(max_group, len(widths)) + 1):
+            capacity = cls._gemm_group_capacity(m, widths[:count])
+            if capacity < 1:
+                break
+            calls = (k_total + capacity - 1) // capacity
+            candidate = (calls / count, calls, -capacity, count, capacity)
+            if best is None or candidate[:3] < best[:3]:
+                best = candidate
+        if best is None:
+            raise VendorRuntimeError(f"no legal grouped GEMM tile for m={m}, widths={widths}")
+        return best[3], best[4]
+
+    def _gemm_group_program(self, m, k, widths, accumulate):
+        key = ("gemm_group", m, k, tuple(widths), bool(accumulate))
+        if key in self.program_cache:
+            return self.program_cache[key]
+        a_size = m * k
+        offset = a_size
+        regions = []
+        for n in widths:
+            b_offset = offset
+            offset += k * n
+            c_offset = offset
+            offset += m * n
+            regions.append((n, b_offset, c_offset))
+        asm = Asm()
+        for n, b_offset, c_offset in regions:
+            if accumulate:
+                asm.addr(SRC1, c_offset).vlen(m * n).load(0, SRC1).v_copy()
+            asm.matrix_region(SRC1, 0, m, k).load(1, SRC1)
+            asm.matrix_region(SRC2, b_offset, k, n).load(1, SRC2)
+            asm.m_mul(VECTOR, mac=accumulate)
+            asm.matrix_region(DST, c_offset, m, n).save(1)
+        self.program_cache[key] = asm.finish()
+        return self.program_cache[key]
+
     def gemm(self, lhs, rhs=None, *, rhs_loader=None, n=None):
         """FP16 streaming GEMM using only vendor matrix/MAC operations.
 
@@ -141,32 +189,49 @@ class VendorSession:
         result = np.empty((m_total, n_total), dtype=np.float16)
         for m0 in range(0, m_total, 64):
             mt = min(64, m_total - m0)
-            for n0 in range(0, n_total, 64):
-                nt = min(64, n_total - n0)
-                max_k = self._gemm_capacity(mt, nt)
-                if max_k < 1:
-                    raise VendorRuntimeError(f"no legal GEMM tile for m={mt}, n={nt}")
-                accumulator = np.zeros((mt, nt), dtype=np.float16)
+            n_starts = list(range(0, n_total, 64))
+            n_widths = [min(64, n_total - start) for start in n_starts]
+            n_index = 0
+            while n_index < len(n_starts):
+                count, max_k = self._select_gemm_group(
+                    mt, n_widths[n_index:], k_total)
+                starts = n_starts[n_index:n_index + count]
+                widths = n_widths[n_index:n_index + count]
+                accumulators = [np.zeros((mt, width), dtype=np.float16)
+                                for width in widths]
                 first = True
                 for k0 in range(0, k_total, max_k):
                     kt = min(max_k, k_total - k0)
                     a_tile = np.ascontiguousarray(lhs[m0:m0 + mt, k0:k0 + kt])
-                    b_tile = np.asarray(
-                        loader(slice(k0, k0 + kt), slice(n0, n0 + nt)), dtype=np.float16)
-                    if b_tile.shape != (kt, nt):
-                        raise ValueError(f"rhs loader returned {b_tile.shape}, expected {(kt, nt)}")
-                    b_tile = np.ascontiguousarray(b_tile)
-                    a_size, b_size = a_tile.size, b_tile.size
-                    c_off = a_size + b_size
-                    working = np.empty(c_off + accumulator.size, dtype=np.float16)
-                    working[:a_size] = a_tile.reshape(-1)
-                    working[a_size:c_off] = b_tile.reshape(-1)
-                    working[c_off:] = accumulator.reshape(-1)
-                    program = self._gemm_program(mt, kt, nt, accumulate=not first)
+                    pieces = [a_tile.reshape(-1)]
+                    b_tiles = []
+                    for start, width, accumulator in zip(starts, widths, accumulators):
+                        b_tile = np.asarray(
+                            loader(slice(k0, k0 + kt), slice(start, start + width)),
+                            dtype=np.float16)
+                        if b_tile.shape != (kt, width):
+                            raise ValueError(
+                                f"rhs loader returned {b_tile.shape}, expected {(kt, width)}")
+                        b_tile = np.ascontiguousarray(b_tile)
+                        b_tiles.append(b_tile)
+                        pieces.extend((b_tile.reshape(-1), accumulator.reshape(-1)))
+                    working = np.concatenate(pieces)
+                    program = self._gemm_group_program(
+                        mt, kt, widths, accumulate=not first)
                     snapshot = self.run_program(program, working)
-                    accumulator = snapshot[c_off:c_off + accumulator.size].reshape(mt, nt)
+                    offset = a_tile.size
+                    next_accumulators = []
+                    for width, b_tile, accumulator in zip(widths, b_tiles, accumulators):
+                        offset += b_tile.size
+                        size = accumulator.size
+                        next_accumulators.append(
+                            snapshot[offset:offset + size].reshape(mt, width))
+                        offset += size
+                    accumulators = next_accumulators
                     first = False
-                result[m0:m0 + mt, n0:n0 + nt] = accumulator
+                for start, width, accumulator in zip(starts, widths, accumulators):
+                    result[m0:m0 + mt, start:start + width] = accumulator
+                n_index += count
         return result
 
     def _binary_program(self, name, length):
@@ -395,4 +460,114 @@ class VendorSession:
             "program_words": self.program_words,
             "elapsed_seconds": self.elapsed_seconds,
             "cached_programs": len(self.program_cache),
+        }
+
+
+class ParallelVendorSession:
+    """Column-parallel wrapper over independent vendor executable workdirs.
+
+    GEMM output-column groups have no dependency on each other.  They may run in
+    parallel, while every K accumulation chain stays ordered inside one
+    :class:`VendorSession`.  Non-GEMM primitives use the first session.
+    """
+
+    def __init__(self, workers=4, vendor_bin=VENDOR_BIN):
+        workers = int(workers)
+        if workers < 1:
+            raise ValueError("vendor workers must be positive")
+        self.sessions = [VendorSession(vendor_bin) for _ in range(workers)]
+        self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="npu-vendor")
+
+    def close(self):
+        if self.executor is not None:
+            self.executor.shutdown(wait=True)
+            self.executor = None
+        for session in self.sessions:
+            session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    @staticmethod
+    def _column_chunks(n_total, workers, m, k_total):
+        starts = list(range(0, n_total, 64))
+        widths = [min(64, n_total - start) for start in starts]
+        groups = []
+        index = 0
+        while index < len(starts):
+            count, _ = VendorSession._select_gemm_group(m, widths[index:], k_total)
+            groups.append((starts[index], starts[index + count - 1] +
+                           widths[index + count - 1]))
+            index += count
+        active = min(workers, len(groups))
+        if active == 1:
+            return [(0, n_total)]
+        base, extra = divmod(len(groups), active)
+        chunks = []
+        group_index = 0
+        for worker in range(active):
+            count = base + (worker < extra)
+            selected = groups[group_index:group_index + count]
+            chunks.append((selected[0][0], selected[-1][1]))
+            group_index += count
+        return chunks
+
+    def gemm(self, lhs, rhs=None, *, rhs_loader=None, n=None):
+        lhs = np.asarray(lhs, dtype=np.float16)
+        if rhs is not None:
+            rhs = np.asarray(rhs, dtype=np.float16)
+            n_total = rhs.shape[1]
+        else:
+            if rhs_loader is None or n is None:
+                raise ValueError("gemm requires rhs or rhs_loader plus n")
+            n_total = int(n)
+        chunks = ([(0, n_total)] if lhs.shape[0] > 64 else
+                  self._column_chunks(
+                      n_total, len(self.sessions), lhs.shape[0], lhs.shape[1]))
+        if len(chunks) == 1:
+            return self.sessions[0].gemm(lhs, rhs, rhs_loader=rhs_loader, n=n)
+
+        def run(index, start, end):
+            if rhs is not None:
+                return self.sessions[index].gemm(lhs, rhs[:, start:end])
+
+            def shifted_loader(k_slice, n_slice):
+                return rhs_loader(
+                    k_slice, slice(n_slice.start + start, n_slice.stop + start))
+            return self.sessions[index].gemm(
+                lhs, rhs_loader=shifted_loader, n=end - start)
+
+        futures = [self.executor.submit(run, index, start, end)
+                   for index, (start, end) in enumerate(chunks)]
+        return np.concatenate([future.result() for future in futures], axis=1)
+
+    def binary(self, *args, **kwargs):
+        return self.sessions[0].binary(*args, **kwargs)
+
+    def unary(self, *args, **kwargs):
+        return self.sessions[0].unary(*args, **kwargs)
+
+    def broadcast_to(self, *args, **kwargs):
+        return self.sessions[0].broadcast_to(*args, **kwargs)
+
+    def transpose2d(self, *args, **kwargs):
+        return self.sessions[0].transpose2d(*args, **kwargs)
+
+    def reduce_sum_last(self, *args, **kwargs):
+        return self.sessions[0].reduce_sum_last(*args, **kwargs)
+
+    def reduce_max_last(self, *args, **kwargs):
+        return self.sessions[0].reduce_max_last(*args, **kwargs)
+
+    def stats(self):
+        child = [session.stats() for session in self.sessions]
+        return {
+            "invocations": sum(item["invocations"] for item in child),
+            "program_words": sum(item["program_words"] for item in child),
+            "elapsed_seconds": sum(item["elapsed_seconds"] for item in child),
+            "cached_programs": sum(item["cached_programs"] for item in child),
+            "workers": len(self.sessions),
         }

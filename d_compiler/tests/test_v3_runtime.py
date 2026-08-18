@@ -9,26 +9,36 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, "d_compiler"))
 
 from npu_compiler.v3_model import Llama32Assets, ModelAssetError
-from npu_compiler.v3_runtime import VendorSession
+from npu_compiler.v3_runtime import ParallelVendorSession, VendorSession
 
 
 def _streaming_reference(lhs, rhs):
-    """Match VendorSession.gemm's adaptive K tiles and FP16 boundary rounding."""
+    """Match grouped N tiles, adaptive K, and FP16 boundary rounding."""
     m_total, k_total = lhs.shape
     n_total = rhs.shape[1]
     result = np.empty((m_total, n_total), dtype=np.float16)
     for m0 in range(0, m_total, 64):
         mt = min(64, m_total - m0)
-        for n0 in range(0, n_total, 64):
-            nt = min(64, n_total - n0)
-            step = VendorSession._gemm_capacity(mt, nt)
-            acc = np.zeros((mt, nt), dtype=np.float16)
+        starts = list(range(0, n_total, 64))
+        widths = [min(64, n_total - start) for start in starts]
+        index = 0
+        while index < len(starts):
+            count, step = VendorSession._select_gemm_group(mt, widths[index:], k_total)
+            group_starts = starts[index:index + count]
+            group_widths = widths[index:index + count]
+            accumulators = [np.zeros((mt, width), dtype=np.float16)
+                            for width in group_widths]
             for k0 in range(0, k_total, step):
                 kt = min(step, k_total - k0)
-                partial = (lhs[m0:m0 + mt, k0:k0 + kt].astype(np.float32) @
-                           rhs[k0:k0 + kt, n0:n0 + nt].astype(np.float32))
-                acc = np.asarray(acc.astype(np.float32) + partial, dtype=np.float16)
-            result[m0:m0 + mt, n0:n0 + nt] = acc
+                for item, (start, width) in enumerate(zip(group_starts, group_widths)):
+                    partial = (lhs[m0:m0 + mt, k0:k0 + kt].astype(np.float32) @
+                               rhs[k0:k0 + kt, start:start + width].astype(np.float32))
+                    accumulators[item] = np.asarray(
+                        accumulators[item].astype(np.float32) + partial, dtype=np.float16)
+            for start, width, accumulator in zip(
+                    group_starts, group_widths, accumulators):
+                result[m0:m0 + mt, start:start + width] = accumulator
+            index += count
     return result
 
 
@@ -81,7 +91,22 @@ def test_real_q_projection_tile_stream():
     assert np.array_equal(got, expected)
 
 
+def test_parallel_columns_preserve_schedule():
+    rng = np.random.default_rng(4)
+    lhs = np.asarray(rng.normal(0, 0.1, (7, 130)), dtype=np.float16)
+    rhs = np.asarray(rng.normal(0, 0.1, (130, 385)), dtype=np.float16)
+    with VendorSession() as serial:
+        expected = serial.gemm(lhs, rhs)
+        serial_calls = serial.stats()["invocations"]
+    with ParallelVendorSession(3) as parallel:
+        actual = parallel.gemm(lhs, rhs)
+        parallel_calls = parallel.stats()["invocations"]
+    assert np.array_equal(actual, expected)
+    assert parallel_calls == serial_calls
+
+
 if __name__ == "__main__":
     test_streaming_gemm_and_primitives()
     test_real_q_projection_tile_stream()
+    test_parallel_columns_preserve_schedule()
     print("ALL V3 STREAMING-RUNTIME TESTS PASSED")

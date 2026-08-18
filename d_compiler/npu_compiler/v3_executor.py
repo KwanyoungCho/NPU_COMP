@@ -165,6 +165,9 @@ class RelaxVendorPlan:
         if name == "alias" or name == "tuple":
             return args[0]
         if name == "relax.matmul":
+            if hasattr(args[1], "load_tile"):
+                return vendor.gemm(
+                    args[0], rhs_loader=args[1].load_tile, n=args[1].shape[1])
             return vendor.gemm(args[0], args[1])
         binary = {
             "relax.add": "add",
@@ -222,7 +225,8 @@ class RelaxVendorPlan:
                 raise ValueError(f"expected {len(self.param_names)} inputs, got {len(values)}")
         slots = [None] * self._slot_count
         for index, value in enumerate(values):
-            slots[index] = np.asarray(value, dtype=np.float16)
+            slots[index] = (value if hasattr(value, "load_tile")
+                            else np.asarray(value, dtype=np.float16))
 
         owns_vendor = vendor is None
         if owns_vendor:
