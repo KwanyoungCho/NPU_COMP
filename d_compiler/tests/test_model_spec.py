@@ -74,7 +74,8 @@ def test_gemma4_e2b_spec():
         assert attention.num_kv_heads == 1
         assert attention.qk_norm
         assert layer.activation == "gelu_tanh"
-        assert layer.ffn_hidden == 6144
+        # Checkpoint fact: the shared-KV last 20 layers use the double-wide MLP.
+        assert layer.ffn_hidden == (12288 if layer.index >= 15 else 6144)
         assert layer.ple_dim == 256
         if attention.kind == "sliding":
             assert attention.head_dim == 256
@@ -109,6 +110,20 @@ def test_gemma4_e2b_spec():
         assert layer in slot.shared_layer_ids
     for layer in range(15):
         assert plan.slot_for(layer).owner_layer == layer
+
+
+def test_gemma4_spec_matches_downloaded_config():
+    """When the official config.json is on disk, the built-in defaults must
+    produce the identical spec."""
+    import json
+    path = os.path.join(
+        ROOT, "d_compiler", "build", "gemma4_e2b_hf", "config.json")
+    if not os.path.exists(path):
+        print("  (skip: gemma4_e2b_hf/config.json not downloaded)")
+        return
+    with open(path) as file:
+        text_config = json.load(file)["text_config"]
+    assert gemma4_e2b_spec(text_config) == gemma4_e2b_spec()
 
 
 def test_invalid_specs():
@@ -154,5 +169,6 @@ def test_invalid_specs():
 if __name__ == "__main__":
     test_llama32_spec()
     test_gemma4_e2b_spec()
+    test_gemma4_spec_matches_downloaded_config()
     test_invalid_specs()
     print("ALL MODEL SPEC TESTS PASSED")
