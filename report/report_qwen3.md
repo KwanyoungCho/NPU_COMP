@@ -102,7 +102,7 @@ source 실행 누적: 552.8초 (9.2분)
 | 최종 logits vs HF | cosine 0.9999915 |
 | vendor a.out closure (proxy layer) | PASS — max abs 0.0 |
 | Llama/Gemma 회귀 유지 | PASS |
-| 전체 regression sweep | PASS — 36 entrypoints |
+| 전체 regression sweep | PASS — 35 entrypoints |
 
 이로써 세 model family(Llama 3.2 3B, Gemma 4 E2B, Qwen3-4B)가 동일한
 0818 compiler core(공통 spec/generation/legalize/backend) 위에서 HF greedy와
