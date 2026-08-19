@@ -74,4 +74,36 @@ generated ids: [358, 1184, 311]
 decoded text: " I need to"
 ~~~
 
-(최종 판정은 full 3-token 실행 후 기록)
+`Qwen3SourceCompiler` + `run_qwen3_source_generate.py`의 첫 실행 결과:
+
+~~~text
+generated ids: [358, 1184, 311]
+decoded text: " I need to"
+HF greedy golden과 완전 일치 (match: true)
+최종 decode logits vs HF: max abs 0.0273, mean abs 0.0089,
+                          RMSE 0.0099, cosine 0.9999915
+invocations: 114 = prefill (36 layer + norm + LM)
+                 + 2 decode steps × (36 layer + norm + LM)
+source 실행 누적: 552.8초 (9.2분)
+~~~
+
+프로그램 규모: prefill layer 511,076 words (36 layer 재사용), decode context
+7/8 = 526,328/526,872 words, panel LM head 1,825,607 words.
+
+## 5. 최종 판정 — Qwen3-4B text
+
+| 완료 조건 | 결과 |
+|---|---|
+| HF checkpoint에서 출발 (config/tokenizer/weight 직접 소비) | PASS |
+| TVM Relax + 공통 legalize/backend 경로 유지 | PASS |
+| official 36-layer prefill (QK-Norm, GQA 32/8, q폭 4096) | PASS |
+| fused decode (in-program K/V append, step당 host 연장 1회) | PASS |
+| HF greedy token 일치 | PASS — `[358, 1184, 311]`, `" I need to"` |
+| 최종 logits vs HF | cosine 0.9999915 |
+| vendor a.out closure (proxy layer) | PASS — max abs 0.0 |
+| Llama/Gemma 회귀 유지 | PASS |
+| 전체 regression sweep | PASS — 36 entrypoints |
+
+이로써 세 model family(Llama 3.2 3B, Gemma 4 E2B, Qwen3-4B)가 동일한
+0818 compiler core(공통 spec/generation/legalize/backend) 위에서 HF greedy와
+일치하는 prefill/decode를 수행한다.
