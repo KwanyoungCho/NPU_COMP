@@ -429,6 +429,75 @@ def build_v3_decode_layer_module(cfg, context):
     return bb.finalize()
 
 
+def build_v3_decode_fused_layer_module(cfg, context):
+    """One decode layer as a single program: K/V projection + cache append +
+    attention/FFN, so no host work is needed inside a layer.
+
+    The ``Kt{kv}``/``Vc{kv}`` inputs hold the previous ``context-1`` positions.
+    The program computes the current token's roped K/V, concatenates it into
+    each head's cache on-device (the append target is a static address because
+    ``context`` is compile-time constant), runs attention over the full
+    ``context``, and returns ``[y, K0,V0,...]`` so the host can extend every
+    layer's cache once per decode step.
+    """
+    D, H, KV, HD, F = cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
+    context = int(context)
+    if context < 2:
+        raise ValueError("fused decode needs at least one cached position")
+    if H * HD != D:
+        raise ValueError(f"V3 fused Q/O require H*HD == D, got {H}*{HD} != {D}")
+    GPK = H // KV
+    op = relax.op
+    x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
+    Wq = _P("Wq", (D, D)); Wk = _P("Wk", (D, KV * HD))
+    Wv = _P("Wv", (D, KV * HD)); Wo = _P("Wo", (D, D))
+    kt = [_P(f"Kt{kv}", (HD, context - 1)) for kv in range(KV)]
+    values = [_P(f"Vc{kv}", (context - 1, HD)) for kv in range(KV)]
+    pos = _P("pos", (1, 1))
+    Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
+    params = [x, Wn1, Wn2, Wq, Wk, Wv, Wo] + kt + values + [pos, Wg, Wu, Wd]
+    freqs_c = _rope_freqs_c(cfg)
+    scale_c = _const(np.full((1, context), 1.0 / float(np.sqrt(HD))))
+
+    def head_slice(bb, tensor, index):
+        return bb.emit(op.strided_slice(
+            tensor, axes=[1], begin=[index * HD], end=[(index + 1) * HD]))
+
+    bb = relax.BlockBuilder()
+    with bb.function("main", params):
+        with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
+            xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
+            q_all = bb.emit(op.matmul(xn, Wq))
+            k_all = bb.emit(op.matmul(xn, Wk))
+            v_all = bb.emit(op.matmul(xn, Wv))
+            new_kv, kt_full, v_full = [], [], []
+            for kv in range(KV):
+                key = legalize.rope(bb, head_slice(bb, k_all, kv), cos, sin)     # [1,HD]
+                value = head_slice(bb, v_all, kv)                                # [1,HD]
+                key_col = bb.emit(op.permute_dims(key, axes=[1, 0]))             # [HD,1]
+                kt_full.append(bb.emit(op.concat([kt[kv], key_col], axis=1)))    # [HD,context]
+                # concat is last-axis only: append V through its transpose.
+                vt_old = bb.emit(op.permute_dims(values[kv], axes=[1, 0]))       # [HD,context-1]
+                value_col = bb.emit(op.permute_dims(value, axes=[1, 0]))         # [HD,1]
+                vt_full = bb.emit(op.concat([vt_old, value_col], axis=1))        # [HD,context]
+                v_full.append(bb.emit(op.permute_dims(vt_full, axes=[1, 0])))    # [context,HD]
+                new_kv.extend((key, value))
+            contexts = []
+            for head in range(H):
+                query = legalize.rope(bb, head_slice(bb, q_all, head), cos, sin)
+                score = bb.emit(op.matmul(query, kt_full[head // GPK]))
+                score = bb.emit(op.multiply(score, scale_c))
+                probability = legalize.softmax_lastdim(bb, score, 1, context)
+                contexts.append(bb.emit(op.matmul(probability, v_full[head // GPK])))
+            context_row = bb.emit(op.concat(contexts, axis=1))
+            attention = bb.emit(op.matmul(context_row, Wo))
+            y = _residual_ffn(bb, x, attention, Wn2, Wg, Wu, Wd, 1, D, F, cfg.eps)
+            gv = bb.emit_output(bb.emit(op.concat([y] + new_kv, axis=1)))
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
 def build_v3_final_norm_module(cfg, S):
     """Final model RMSNorm over all prefill positions."""
     x = _P("x", (S, cfg.D)); weight = _P("weight", (1, cfg.D))

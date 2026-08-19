@@ -42,9 +42,6 @@ class Llama32SourceCompiler(SourceGenerationSession):
             model.build_v3_prefill_layer_module(
                 self.cfg, self.sequence, return_cache=True),
             backend="source-0818", reuse=True)
-        self.kv_program = driver.compile_module(
-            model.build_v3_decode_kv_module(self.cfg),
-            backend="source-0818", reuse=True)
         self.norm_program = driver.compile_module(
             model.build_v3_final_norm_module(self.cfg, 1),
             backend="source-0818", reuse=True)
@@ -54,7 +51,6 @@ class Llama32SourceCompiler(SourceGenerationSession):
     def compile_stats(self):
         return {
             "prefill": self._program_stats(self.prefill_program),
-            "decode_kv": self._program_stats(self.kv_program),
             "final_norm": self._program_stats(self.norm_program),
             "lm_head": {
                 "program_words": len(self.lm_gemm),
@@ -104,18 +100,9 @@ class Llama32SourceCompiler(SourceGenerationSession):
         context = int(context)
         if context not in self.decode_programs:
             self.decode_programs[context] = driver.compile_module(
-                model.build_v3_decode_layer_module(self.cfg, context),
+                model.build_v3_decode_fused_layer_module(self.cfg, context),
                 backend="source-0818", reuse=True)
         return self.decode_programs[context]
-
-    def _decode_kv_inputs(self, layer, hidden, position):
-        return {
-            "x": hidden,
-            "Wn1": self._norm(layer),
-            "Wk": self._weight(layer, "self_attn.k_proj"),
-            "Wv": self._weight(layer, "self_attn.v_proj"),
-            "pos": np.asarray([[position]], dtype=np.float16),
-        }
 
     def _decode_inputs(self, layer, hidden, position, keys, values):
         inputs = {
@@ -123,6 +110,8 @@ class Llama32SourceCompiler(SourceGenerationSession):
             "Wn1": self._norm(layer),
             "Wn2": self._norm(layer, post_attention=True),
             "Wq": self._weight(layer, "self_attn.q_proj"),
+            "Wk": self._weight(layer, "self_attn.k_proj"),
+            "Wv": self._weight(layer, "self_attn.v_proj"),
             "Wo": self._weight(layer, "self_attn.o_proj"),
             "pos": np.asarray([[position]], dtype=np.float16),
             "Wg": self._weight(layer, "mlp.gate_proj"),
@@ -184,14 +173,26 @@ class Llama32SourceCompiler(SourceGenerationSession):
             normalized, logits, token, stats)
 
     def decode_token(self, token_id, position, keys, values, *, progress=None):
-        """Consume one token, append every layer cache, and produce next logits."""
+        """Consume one token, append every layer cache, and produce next logits.
+
+        Each layer is a single fused program that projects and appends this
+        token's K/V on-device; the host extends the caches once per step after
+        every layer has run (layer L's new K/V is only read again at the next
+        decode position).
+        """
         hidden = self.assets.embedding([int(token_id)])
         context = int(position) + 1
         decode_program = self._decode_program(context)
+        projections = []
         for layer in range(self.spec.num_layers):
             before = time.perf_counter()
-            projected = self._run(
-                self.kv_program, self._decode_kv_inputs(layer, hidden, position))
+            output = self._run(decode_program, self._decode_inputs(
+                layer, hidden, position, keys[layer], values[layer]))
+            hidden = output[:, :self.cfg.D]
+            projections.append(output[:, self.cfg.D:])
+            if progress is not None:
+                progress("decode", layer, hidden, time.perf_counter() - before)
+        for layer, projected in enumerate(projections):
             slot = self.cache_plan.slot_for(layer)
             head_dim = slot.head_dim
             for kv in range(slot.num_kv_heads):
@@ -202,10 +203,6 @@ class Llama32SourceCompiler(SourceGenerationSession):
                     np.concatenate((keys[layer][kv], key.T), axis=1), dtype=np.float16)
                 values[layer][kv] = np.ascontiguousarray(
                     np.concatenate((values[layer][kv], value), axis=0), dtype=np.float16)
-            hidden = self._run(decode_program, self._decode_inputs(
-                layer, hidden, position, keys[layer], values[layer]))
-            if progress is not None:
-                progress("decode", layer, hidden, time.perf_counter() - before)
         _, logits = self._logits(hidden)
         return hidden, logits, int(np.argmax(logits.astype(np.float32)))
 

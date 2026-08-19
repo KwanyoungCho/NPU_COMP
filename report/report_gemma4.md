@@ -125,3 +125,39 @@ decode context 8/9 = 453,349/453,757 words, panel LM head 1,845,685 words.
 official config validation, tokenizer/chat template, 독립 HF reference,
 checkpoint keyset inventory다. G4-002(`use_double_wide_mlp` semantics)를 이 단계에서
 확정한다.
+
+### 2026-08-19 — 단일-program decode layer 융합
+
+decode layer 하나가 기존에는 두 program(K/V projection → host cache append →
+attention/FFN)으로 실행되었다. 이를 layer당 하나의 program으로 융합했다.
+Gemma decode(G4.6~G4.7)도 이 구조를 기본으로 사용한다.
+
+- `model.build_v3_decode_fused_layer_module(cfg, context)` (신규 Relax graph builder):
+  - cache 입력 `Kt{kv}[HD,context-1]`/`Vc{kv}[context-1,HD]`는 이전 position까지만 보관
+  - program 내부에서 현재 token의 roped K/V를 계산하고 on-device concat으로
+    `[HD,context]`/`[context,HD]` full cache를 구성 (context가 compile-time 상수라
+    append 위치도 static address)
+  - backend concat은 rank-2 last-axis 전용이므로 V append는 transpose 경유
+    (copy 연산만 추가, 산술 없음)
+  - 출력 `[y, K0,V0,...]` — host는 **decode step당 1회** 모든 layer의 cache를 연장
+    (layer L의 새 K/V는 다음 position에서만 다시 읽히므로 layer 사이 개입 불필요)
+  - 기존 pipeline 그대로: BlockBuilder + legalize primitive → memplan → ver.08 codegen.
+    별도 실행 경로/ISA 변경 없음
+- `Llama32SourceCompiler.decode_token`: layer당 fused program 1회 실행, projection을
+  모아 step 끝에 일괄 append. 공개 API와 `state.npz` 형식 불변.
+  기존 split builder(`build_v3_decode_kv_module`/`build_v3_decode_layer_module`)는
+  회귀 비교용으로 유지.
+
+검증:
+
+- 신규 `test_single_program_decode_matches_split` (proxy REDUCED):
+  fused output이 split 경로(kv program + host append + decode program)와
+  **byte-exact**, 신규 K/V도 kv program 출력과 byte-exact, streaming oracle 비교 통과
+- clean full-model 재실행 (`v3_source_generate_hello_fused/`):
+  - token `[358, 2846, 4560]`, `" I'm trying"` — HF greedy 일치
+  - 최종 decode logits vs HF가 split 경로 golden과 **마지막 자리까지 동일**
+    (max abs 0.07421875, cosine 0.9999881354510036) — full 3B 규모에서 동등성 확인
+  - invocation **146 → 90** (token당 58 → 30), source 실행 누적 452.1초
+  - fused decode program: context 8/9 = 517,781/518,189 words
+    (기존 split 합계 453,349+30,451과 유사, cache copy 명령 포함)
+- 전체 test sweep 27개 entrypoint PASS

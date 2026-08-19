@@ -91,6 +91,63 @@ def test_fused_prefill_cache_and_decode():
     assert np.isfinite(decoded).all()
 
 
+def test_single_program_decode_matches_split():
+    """The one-program decode layer (in-program K/V append) must reproduce the
+    split kv-projection + host-append + attention path exactly."""
+    cfg = model.REDUCED
+    sequence = 3
+    weights, inputs = _inputs(cfg, sequence)
+    prefill = model.build_v3_prefill_layer_module(cfg, sequence, return_cache=True)
+    compiled = driver.compile_module(prefill, backend="source-0818")
+    output = np.asarray(driver.run_compiled(*compiled, inputs), dtype=np.float16)
+
+    hidden = np.asarray(weights["x"][sequence:sequence + 1], dtype=np.float16)
+    position = np.asarray([[sequence]], dtype=np.float16)
+    kv_compiled = driver.compile_module(
+        model.build_v3_decode_kv_module(cfg), backend="source-0818")
+    projected = np.asarray(driver.run_compiled(*kv_compiled, {
+        "x": hidden, "Wn1": inputs["Wn1"], "Wk": inputs["Wk"],
+        "Wv": inputs["Wv"], "pos": position,
+    }), dtype=np.float16)
+
+    split_inputs = {
+        "x": hidden, "Wn1": inputs["Wn1"], "Wn2": inputs["Wn2"],
+        "Wq": inputs["Wq"], "Wo": inputs["Wo"], "pos": position,
+        "Wg": inputs["Wg"], "Wu": inputs["Wu"], "Wd": inputs["Wd"],
+    }
+    fused_inputs = {
+        "x": hidden, "Wn1": inputs["Wn1"], "Wn2": inputs["Wn2"],
+        "Wq": inputs["Wq"], "Wk": inputs["Wk"], "Wv": inputs["Wv"],
+        "Wo": inputs["Wo"], "pos": position,
+        "Wg": inputs["Wg"], "Wu": inputs["Wu"], "Wd": inputs["Wd"],
+    }
+    offset = cfg.D
+    for kv in range(cfg.KV):
+        old_key = output[:, offset:offset + cfg.HD]
+        offset += cfg.HD
+        old_value = output[:, offset:offset + cfg.HD]
+        offset += cfg.HD
+        new_key = projected[:, 2 * kv * cfg.HD:(2 * kv + 1) * cfg.HD]
+        new_value = projected[:, (2 * kv + 1) * cfg.HD:(2 * kv + 2) * cfg.HD]
+        split_inputs[f"Kt{kv}"] = np.concatenate((old_key, new_key), axis=0).T
+        split_inputs[f"Vc{kv}"] = np.concatenate((old_value, new_value), axis=0)
+        fused_inputs[f"Kt{kv}"] = np.ascontiguousarray(old_key.T)
+        fused_inputs[f"Vc{kv}"] = old_value
+
+    split_compiled = driver.compile_module(
+        model.build_v3_decode_layer_module(cfg, sequence + 1), backend="source-0818")
+    split_hidden = np.asarray(
+        driver.run_compiled(*split_compiled, split_inputs), dtype=np.float16)
+
+    fused = _compare_source_and_streaming(
+        model.build_v3_decode_fused_layer_module(cfg, sequence + 1), fused_inputs)
+    fused = np.asarray(fused, dtype=np.float16)
+    assert fused.shape == (1, cfg.D + 2 * cfg.KV * cfg.HD)
+    assert np.array_equal(fused[:, :cfg.D], split_hidden)
+    assert np.array_equal(fused[:, cfg.D:], projected)
+
+
 if __name__ == "__main__":
     test_fused_prefill_cache_and_decode()
+    test_single_program_decode_matches_split()
     print("ALL V3 SOURCE PREFILL/DECODE TESTS PASSED")
