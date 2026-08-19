@@ -236,3 +236,17 @@ spec 반영:
 - `make_gemma4_generation_reference.py`: official checkpoint의
   `Gemma4ForConditionalGeneration` FP16 eager CPU로 독립 greedy reference 생성
   (Llama 방법론과 동일).
+- 독립 HF greedy reference 확보 (CPU 29.4초,
+  `d_compiler/build/gemma4_reference_generate_hello_3.npz`):
+
+~~~text
+prompt: Hello, NPU compiler!
+input ids: [2, 9259, 236764, 646, 11152, 47133, 236888]
+generated ids: [108, 236777, 236789]
+decoded text: "\n\nI'"
+FP16 logits finite: true
+~~~
+
+이것이 Gemma 4 E2B text-only prefill/decode의 golden target이다. 다음 단계는
+Gemma assets loader(safetensors slice, `model.language_model.*` prefix),
+PyTorch/HF module 기반 frontend 경로, Gemma layer graph builder(G4.3~G4.4)다.
