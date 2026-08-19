@@ -8,8 +8,24 @@ sys.path.insert(0, os.path.join(ROOT, "d_compiler"))
 
 from npu_compiler.model_spec import (
     AttentionSpec, LayerSpec, ModelSpec,
-    build_cache_plan, gemma4_e2b_spec, llama32_spec,
+    build_cache_plan, gemma4_e2b_spec, llama32_spec, qwen3_spec,
 )
+
+QWEN3_4B_CONFIG = {
+    "hidden_size": 2560,
+    "intermediate_size": 9728,
+    "num_hidden_layers": 36,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+    "vocab_size": 151936,
+    "rms_norm_eps": 1e-6,
+    "rope_theta": 1000000,
+    "hidden_act": "silu",
+    "tie_word_embeddings": True,
+    "sliding_window": None,
+    "use_sliding_window": False,
+}
 from npu_compiler.v3_model import Llama32Assets
 
 
@@ -112,6 +128,36 @@ def test_gemma4_e2b_spec():
         assert plan.slot_for(layer).owner_layer == layer
 
 
+def test_qwen3_spec():
+    spec = qwen3_spec(QWEN3_4B_CONFIG)
+    assert spec.num_layers == 36
+    assert spec.hidden_size == 2560
+    assert spec.vocab_size == 151936
+    assert spec.tie_word_embeddings
+    assert not spec.scale_embeddings
+    assert spec.final_logit_softcapping is None
+    for layer in spec.layers:
+        attention = layer.attention
+        assert attention.kind == "full"
+        assert attention.num_query_heads == 32
+        assert attention.num_kv_heads == 8
+        assert attention.head_dim == 128
+        assert attention.qk_norm
+        assert attention.score_scale is None      # default 1/sqrt(head_dim)
+        assert attention.rope_theta == 1000000.0
+        assert not attention.llama3_rope_scaling
+        assert layer.activation == "silu"
+        assert layer.ffn_hidden == 9728
+        assert layer.owns_cache
+        assert layer.ple_dim == 0
+    plan = build_cache_plan(spec)
+    assert len(plan.slots) == 36
+    assert all(slot.num_kv_heads == 8 for slot in plan.slots)
+
+    # Gemma overrides the scale explicitly; Qwen3 keeps the default.
+    assert gemma4_e2b_spec().layers[0].attention.score_scale == 1.0
+
+
 def test_gemma4_spec_matches_downloaded_config():
     """When the official config.json is on disk, the built-in defaults must
     produce the identical spec."""
@@ -169,6 +215,7 @@ def test_invalid_specs():
 if __name__ == "__main__":
     test_llama32_spec()
     test_gemma4_e2b_spec()
+    test_qwen3_spec()
     test_gemma4_spec_matches_downloaded_config()
     test_invalid_specs()
     print("ALL MODEL SPEC TESTS PASSED")

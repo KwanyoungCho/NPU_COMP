@@ -29,9 +29,11 @@ class AttentionSpec:
     rope_theta: float = 10000.0
     partial_rotary_factor: float = 1.0
     llama3_rope_scaling: bool = False
-    # QK-Norm models normalize Q/K and use score scale 1; otherwise the score
-    # scale is 1/sqrt(head_dim).
+    # Whether Q/K get a per-head RMSNorm (Gemma 4, Qwen3).
     qk_norm: bool = False
+    # Attention score scale; None means the default 1/sqrt(head_dim).  Gemma 4
+    # replaces the scale with 1.0; Qwen3 keeps the default despite QK-Norm.
+    score_scale: float | None = None
 
     def __post_init__(self):
         if self.kind not in ATTENTION_KINDS:
@@ -220,6 +222,7 @@ def gemma4_e2b_spec(config=None):
         window=config["sliding_window"],
         rope_theta=rope["sliding_attention"]["rope_theta"],
         qk_norm=True,
+        score_scale=1.0,
     )
     full = AttentionSpec(
         kind="full",
@@ -229,6 +232,7 @@ def gemma4_e2b_spec(config=None):
         rope_theta=rope["full_attention"]["rope_theta"],
         partial_rotary_factor=rope["full_attention"]["partial_rotary_factor"],
         qk_norm=True,
+        score_scale=1.0,
     )
     kinds = ["full" if name == "full_attention" else "sliding"
              for name in config["layer_types"]]
@@ -264,4 +268,37 @@ def gemma4_e2b_spec(config=None):
         tie_word_embeddings=bool(config.get("tie_word_embeddings", True)),
         scale_embeddings=True,
         final_logit_softcapping=config["final_logit_softcapping"],
+    )
+
+
+def qwen3_spec(config):
+    """Spec for official Qwen3 dense models from their HF config dict.
+
+    Llama-shaped stack (full causal attention, per-layer KV, SiLU gated MLP)
+    with Gemma-style per-head QK-Norm; the score scale stays the default
+    1/sqrt(head_dim) and the query width H*head_dim differs from hidden_size.
+    """
+    if config.get("hidden_act", "silu") != "silu":
+        raise ValueError(f"unexpected activation {config['hidden_act']}")
+    if config.get("sliding_window") or config.get("use_sliding_window"):
+        raise ValueError("sliding-window Qwen3 configs are not supported yet")
+    attention = AttentionSpec(
+        kind="full",
+        num_query_heads=config["num_attention_heads"],
+        num_kv_heads=config["num_key_value_heads"],
+        head_dim=config["head_dim"],
+        rope_theta=float(config.get("rope_theta", 1000000.0)),
+        qk_norm=True,
+    )
+    layers = tuple(
+        LayerSpec(index, attention, config["intermediate_size"], "silu", index)
+        for index in range(config["num_hidden_layers"])
+    )
+    return ModelSpec(
+        name="qwen3",
+        hidden_size=config["hidden_size"],
+        vocab_size=config["vocab_size"],
+        rms_norm_eps=float(config.get("rms_norm_eps", 1e-6)),
+        layers=layers,
+        tie_word_embeddings=bool(config.get("tie_word_embeddings", True)),
     )
