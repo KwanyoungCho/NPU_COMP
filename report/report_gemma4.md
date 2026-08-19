@@ -365,3 +365,34 @@ layer(15~34)가 연장된 cache를 읽는다 (G4-008 설계 그대로).
   Gemma layer 형태(sliding owner — QK/V norm, RoPE, tanh-GELU MLP, PLE,
   layer scalar)를 **무수정 vendor a.out**의 fixed-buffer streaming plan으로
   실행 → source 단일 program과 **max abs 0.0 완전 일치**.
+
+### 2026-08-19 — PLE 테이블 완성 및 최종 회귀
+
+- 전체 262144-token PLE 테이블 생성 완료: 4,697,620,480 bytes (정확히
+  262144×8960×2), 저장 위치 `/data2/.../ple_table_f16.bin`.
+- `test_gemma4_ple`의 stored-row 검증: 표본 token의 저장 row가 생성 수식 및
+  source C-model program과 **bit-exact 일치** — 이후 실행은 lookup만 사용.
+- repository 전체 test sweep: **32개 entrypoint 전부 PASS**
+  (Llama/0710/0818 기존 회귀 + Gemma 신규 6종 포함).
+
+## 4. 1차 목표 판정 — Gemma 4 E2B text-only
+
+| 완료 조건 | 결과 |
+|---|---|
+| HF/PyTorch checkpoint에서 출발 (config/tokenizer/weight 직접 소비) | PASS |
+| TVM Relax + 공통 legalize/backend 경로 유지 (custom 실행 경로 없음) | PASS |
+| 표준 tanh-GELU를 compiler lowering으로, C-model 무수정 | PASS — vendor/source bit-exact |
+| official 35-layer prefill (sliding/full, double-wide, PLE, QK/V-norm) | PASS |
+| KV-공유 decode (owner append → shared alias, exact context) | PASS |
+| HF greedy token 일치 | PASS — `[108, 236777, 236789]`, `"\n\nI'"` |
+| 최종 logits vs HF | cosine 0.9999975 |
+| Llama 3.2 3B 회귀 유지 | PASS — `[358, 2846, 4560]` |
+| vendor a.out 마무리 확인 | PASS — GELU 및 layer 사슬 일치 |
+| 전체 regression sweep | PASS — 32 entrypoints |
+
+남은 후속 과제 (별도 단계):
+
+- G4-005 (FP16 range): 더 긴 prompt/생성에서의 layer checkpoint 감시 유지
+- G4.7: sliding window 512 초과 decode 및 global chunked online softmax
+  (`LowerAttentionToStreaming` — Llama long-context와 공통 pass로)
+- vision/audio/양자화/MTP는 범위 밖
