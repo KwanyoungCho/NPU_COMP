@@ -2,39 +2,17 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 
 import numpy as np
 
 from . import driver, model
+from .generation import SourceGenerationSession, SourcePrefillResult
+from .model_spec import build_cache_plan, llama32_spec
 from .v3_model import Llama32Assets
 from .source_gemm_0818 import PackedRhsGemm
 
 
-@dataclass
-class SourcePrefillResult:
-    input_ids: np.ndarray
-    hidden: np.ndarray
-    keys: list
-    values: list
-    normalized: np.ndarray
-    logits: np.ndarray
-    next_token_id: int
-    stats: dict
-
-
-@dataclass
-class SourceGenerationResult:
-    input_ids: np.ndarray
-    generated_ids: np.ndarray
-    hidden: np.ndarray
-    keys: list
-    values: list
-    logits: np.ndarray
-    stats: dict
-
-
-class Llama32SourceCompiler:
+class Llama32SourceCompiler(SourceGenerationSession):
     """Compile static-shape layer programs and run them on the source C-model.
 
     A complete layer is one program and one expanded G-buffer invocation.  Decode
@@ -54,10 +32,9 @@ class Llama32SourceCompiler:
 
     def __init__(self, sequence, assets=None, *, cache_weights=True):
         self.assets = assets or Llama32Assets()
+        super().__init__(llama32_spec(self.assets.config), sequence)
         self.cfg = model.LLAMA_3_2_3B
-        self.sequence = int(sequence)
-        if self.sequence < 1:
-            raise ValueError("prefill sequence must be positive")
+        self.cache_plan = build_cache_plan(self.spec)
         self.cache_weights = bool(cache_weights)
         self._weights = {}
         self._lm_weight = None
@@ -71,16 +48,8 @@ class Llama32SourceCompiler:
         self.norm_program = driver.compile_module(
             model.build_v3_final_norm_module(self.cfg, 1),
             backend="source-0818", reuse=True)
-        self.lm_gemm = PackedRhsGemm(
-            self.cfg.D, self.assets.config["vocab_size"])
+        self.lm_gemm = PackedRhsGemm(self.cfg.D, self.spec.vocab_size)
         self.decode_programs = {}
-        self.invocations = 0
-        self.elapsed_seconds = 0.0
-
-    @staticmethod
-    def _program_stats(compiled):
-        asm, memory = compiled
-        return {"program_words": len(asm.words), "gbuffer_entries": memory.top}
 
     def compile_stats(self):
         return {
@@ -97,13 +66,6 @@ class Llama32SourceCompiler:
                 for context, program in sorted(self.decode_programs.items())
             },
         }
-
-    def _run(self, compiled, inputs):
-        started = time.perf_counter()
-        output = driver.run_compiled(*compiled, inputs)
-        self.elapsed_seconds += time.perf_counter() - started
-        self.invocations += 1
-        return np.asarray(output, dtype=np.float16)
 
     def _weight(self, layer, module):
         key = (int(layer), module)
@@ -167,7 +129,8 @@ class Llama32SourceCompiler:
             "Wu": self._weight(layer, "mlp.up_proj"),
             "Wd": self._weight(layer, "mlp.down_proj"),
         }
-        for kv in range(self.cfg.KV):
+        slot = self.cache_plan.slot_for(layer)
+        for kv in range(slot.num_kv_heads):
             inputs[f"Kt{kv}"] = keys[kv]
             inputs[f"Vc{kv}"] = values[kv]
         return inputs
@@ -192,19 +155,21 @@ class Llama32SourceCompiler:
         hidden = self.assets.embedding(input_ids)
         layer_keys, layer_values = [], []
         started = time.perf_counter()
-        width = 2 * self.cfg.KV * self.cfg.HD
-        for layer in range(self.assets.config["num_hidden_layers"]):
+        for layer in range(self.spec.num_layers):
             before = time.perf_counter()
             output = self._run(self.prefill_program, self._prefill_inputs(layer, hidden))
+            slot = self.cache_plan.slot_for(layer)
+            head_dim = slot.head_dim
+            width = 2 * slot.num_kv_heads * head_dim
             hidden = output[:, :self.cfg.D]
             cache = output[:, self.cfg.D:self.cfg.D + width]
             keys, values = [], []
-            for kv in range(self.cfg.KV):
-                base = 2 * kv * self.cfg.HD
+            for kv in range(slot.num_kv_heads):
+                base = 2 * kv * head_dim
                 keys.append(np.ascontiguousarray(
-                    cache[:, base:base + self.cfg.HD].T, dtype=np.float16))
+                    cache[:, base:base + head_dim].T, dtype=np.float16))
                 values.append(np.ascontiguousarray(
-                    cache[:, base + self.cfg.HD:base + 2 * self.cfg.HD],
+                    cache[:, base + head_dim:base + 2 * head_dim],
                     dtype=np.float16))
             layer_keys.append(keys)
             layer_values.append(values)
@@ -223,14 +188,16 @@ class Llama32SourceCompiler:
         hidden = self.assets.embedding([int(token_id)])
         context = int(position) + 1
         decode_program = self._decode_program(context)
-        for layer in range(self.assets.config["num_hidden_layers"]):
+        for layer in range(self.spec.num_layers):
             before = time.perf_counter()
             projected = self._run(
                 self.kv_program, self._decode_kv_inputs(layer, hidden, position))
-            for kv in range(self.cfg.KV):
-                base = 2 * kv * self.cfg.HD
-                key = projected[:, base:base + self.cfg.HD]
-                value = projected[:, base + self.cfg.HD:base + 2 * self.cfg.HD]
+            slot = self.cache_plan.slot_for(layer)
+            head_dim = slot.head_dim
+            for kv in range(slot.num_kv_heads):
+                base = 2 * kv * head_dim
+                key = projected[:, base:base + head_dim]
+                value = projected[:, base + head_dim:base + 2 * head_dim]
                 keys[layer][kv] = np.ascontiguousarray(
                     np.concatenate((keys[layer][kv], key.T), axis=1), dtype=np.float16)
                 values[layer][kv] = np.ascontiguousarray(
@@ -241,28 +208,6 @@ class Llama32SourceCompiler:
                 progress("decode", layer, hidden, time.perf_counter() - before)
         _, logits = self._logits(hidden)
         return hidden, logits, int(np.argmax(logits.astype(np.float32)))
-
-    def generate(self, input_ids, count, *, progress=None):
-        count = int(count)
-        if count < 1:
-            raise ValueError("generation count must be positive")
-        started = time.perf_counter()
-        prefill = self.prefill(input_ids, progress=progress)
-        generated = [prefill.next_token_id]
-        hidden = prefill.hidden[-1:]
-        logits = prefill.logits
-        keys, values = prefill.keys, prefill.values
-        while len(generated) < count:
-            position = self.sequence + len(generated) - 1
-            hidden, logits, next_id = self.decode_token(
-                generated[-1], position, keys, values, progress=progress)
-            generated.append(next_id)
-        stats = self.stats()
-        stats["wall_seconds"] = time.perf_counter() - started
-        return SourceGenerationResult(
-            np.asarray(input_ids, dtype=np.int64),
-            np.asarray(generated, dtype=np.int64),
-            hidden, keys, values, logits, stats)
 
     def stats(self):
         return {
