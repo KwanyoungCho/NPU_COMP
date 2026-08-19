@@ -18,6 +18,10 @@
 1. compiler/runtime의 최종 실행 대상은
    `0818_npu_update/a_npu/a.out` 하나다. `_poc/mysim_0818.cpp`는 분석 및 vendor
    parity 검증에만 사용한다.
+   *(2026-08-18 Stage V3.7에서 갱신: vendor binary의 8192-entry G-buffer로는
+   full model이 물리적으로 불가하여, 이후 full-model 실행은 capacity만 확장한
+   parity source C-model을 사용하고 vendor binary는 8192 범위의 oracle로
+   보존하는 것으로 사용자와 합의함.)*
 2. Meta Llama 3.2 3B의 실제 config와 weight를 사용하여 prompt prefill 전체 layer가
    끝까지 실행된다.
 3. 동일 FP16 입력에 대한 reference 실행과 주요 layer/checkpoint를 비교한다.
@@ -61,7 +65,7 @@
 | V3-001 | MITIGATED | BLOCKER | vendor G-buffer가 8192 FP16으로 고정되어 3B weight는 물론 일반적인 한 layer working set도 한 번에 담을 수 없음 | host-resident tensor와 8192 이하 `[A,B,C]` window로 분할. vendor 한계 자체는 유지 |
 | V3-002 | RESOLVED | HIGH | program memory가 32768 words 고정이라고 판단했으나 실제 실행기는 전체 file을 `malloc`하여 실행 | 32K compiler/runtime guard 제거. 33,001-word program의 마지막 `0xF0` vendor/source parity로 검증 |
 | V3-003 | MITIGATED | HIGH | native Reduce Max `0x19`가 accumulator를 0으로 시작하여 all-negative row를 0으로 반환 | compiler는 첫 실제 열에서 시작하는 vector-max fold 사용. source C-model은 vendor bug 그대로 재현 |
-| V3-004 | OPEN | HIGH | vendor GELU가 표준 GELU가 아니라 `x*sigmoid(2x)` | native GELU 사용 시 모델 정확도 영향 측정. 필요하면 표준식을 primitive 조합으로 lowering |
+| V3-004 | RESOLVED | HIGH | vendor GELU가 표준 GELU가 아니라 `x*sigmoid(2x)` | (2026-08-19, G4-001) `legalize.gelu_tanh`가 표준 tanh-GELU를 mul/add/neg/exp/div 조합으로 lowering. vendor/source/FP16-emulation bit-exact, Gemma 4 E2B full model에서 실사용 검증. native GELU opcode 의미는 vendor 그대로 유지 |
 | V3-005 | MITIGATED | MEDIUM | `0xF0`은 HALT가 아니며 snapshot 후 계속 실행 | generated program의 마지막 유효 word로 `0xF0` 하나만 배치 |
 | V3-006 | MITIGATED | MEDIUM | vector save lane 수가 연산 결과 크기가 아니라 현재 `vlen`으로 결정 | scalar reduction 직후 `vlen=1` 명시 |
 | V3-007 | OPEN | MEDIUM | 제공 64개 예제 대부분이 0710 encoding을 유지하여 새 기능 coverage가 부족 | compiler-owned targeted vendor parity 프로그램 유지·확장 |
@@ -78,7 +82,7 @@
 | V3-018 | MITIGATED | HIGH | vendor executable을 weight window마다 새 process로 실행해 layer 0 serial wall 177초 | 독립 output-column group만 4개 workdir에서 병렬 실행. serial과 bit-exact, layer 0 wall 67.8초 |
 | V3-019 | RESOLVED | HIGH | streaming FP16 경계가 HF eager FP16보다 많아 layer별 수치 drift 누적 가능 | 독립 HF reference로 전 layer 추적. fresh final normalized cosine 0.999803, logits cosine 0.999988, argmax 일치 |
 | V3-020 | RESOLVED | BLOCKER | RMSNorm이 `x*x` 후 `/D`하여 residual outlier 330.75의 square가 FP16 `inf`; BOS가 layer 2부터 330.75에 고정되고 attention 오염 | `x/sqrt(D)`를 먼저 FP16 적용한 뒤 square/reduce. 330.75 입력 full-D RMSNorm finite, float reference mean abs 7.75e-6 |
-| V3-021 | MITIGATED | LOW | TVM conda 환경에 `pytest` 모듈이 없어 collection 명령 사용 불가 | repository의 현재 26개 `test_*.py` 자체 entrypoint를 직접 실행. 환경 package 설치 없이 전체 범위 검증 |
+| V3-021 | MITIGATED | LOW | TVM conda 환경에 `pytest` 모듈이 없어 collection 명령 사용 불가 | repository의 `test_*.py` 자체 entrypoint를 직접 실행(작성 당시 26개, 2026-08-19 현재 35개). 환경 package 설치 없이 전체 범위 검증 |
 | V3-022 | RESOLVED | MEDIUM | RMS binding 추가 후 legacy A1 reuse에서 동일 physical offset이 free-list에 중복 삽입되어 live tensor 충돌 | free-list를 offset set으로 변경하고 bump 조건 수정. prefill/decode byte-exact, v2 comprehensive 회귀 통과 |
 | V3-023 | MITIGATED | BLOCKER | G-buffer generator만 8192보다 크게 만들면 vendor `a.out`의 16384-byte 정적 배열을 넘겨 BSS를 덮어씀 | vendor runtime은 계속 8192 초과를 거부하고, full-model은 parity-tested 동적 source C-model target으로 분리 |
 | V3-024 | RESOLVED | HIGH | source C-model의 G-buffer를 확장하면서 vendor arithmetic/quirk parity가 달라질 위험 | 기본 8192 parity는 64개 program+targeted quirk로 유지하고, compiler-owned source runtime만 동적 flat buffer와 quiet mode 사용 |
@@ -449,3 +453,197 @@ full prefill/decode blocker를 해소했다.
 따라서 이번 목표인 **우리 source C-model 기반 official Llama 3.2 3B prefill 및 decode**는
 완료했다. CPU에 남은 동작은 tokenizer/embedding gather, 동적 KV-cache append, argmax이며,
 모델 산술은 ver.08 source C-model program으로 수행한다.
+
+---
+
+## 7. 최종 ISA 리뷰 — HW 설계 이관 (2026-08-19)
+
+이 절은 NPU 설계팀과의 최종 ISA 미팅 및 실제 하드웨어 설계 착수를 위해,
+지금까지의 **전체 검증 스코프에서 확정된 명령어별 사용 현황·오류·개선 요구**를
+집대성한 것이다. 근거는 전부 실측이다: ver.08 encoder/decoder round-trip,
+vendor `a.out` 64개 프로그램 + targeted parity, 그리고 세 개의 official model
+full 실행이다.
+
+### 7.1 검증 스코프 (이 리뷰의 근거)
+
+| Model | 구조 특성 | 결과 |
+|---|---|---|
+| Llama 3.2 3B (28L) | GQA 24/8, SwiGLU, RoPE(llama3 scaling) | HF greedy `[358,2846,4560]` 일치, logits cosine 0.9999881 |
+| Gemma 4 E2B (35L) | sliding/global 혼합, KV 공유 20층, QK/V-Norm, PLE, double-wide MLP, tanh-GELU, partial RoPE | HF greedy `[108,236777,236789]` 일치, cosine 0.9999975 |
+| Qwen3-4B (36L) | GQA 32/8, QK-Norm, q폭(4096)≠hidden(2560), SwiGLU | HF greedy `[358,1184,311]` 일치, cosine 0.9999915 |
+
+모든 모델 산술(matmul, 4종 norm, softmax, RoPE, SiLU/GELU, PLE, 활성화)이
+ver.08 프로그램으로 수행되었고, host는 gather/layout/argmax만 담당했다.
+따라서 아래 명령어 평가는 "LLM inference 전 범위를 실제로 돌려본" 결과다.
+
+### 7.2 명령어 전수 조사
+
+프로그램 word 사용 통계는 세 model family의 대표 layer/decode 프로그램 6개
+(합계 20,114 words)에서 opcode를 decode해 집계했다. full-scale 프로그램
+(Llama prefill layer 497,563 words 등)도 같은 구성비를 가진다.
+
+**A. 사용 중 — LLM 실행의 필수 명령** (word 점유율 포함)
+
+| Opcode | 명령 | 용도 | 표본 내 word 수 (비중) |
+|---|---|---|---:|
+| `0x80` | 주소 설정 (lo/hi × MAIN/PARTIAL) | 모든 접근의 주소 상태 | 9,652 (48.0%) — 주소 1회 설정 = word 2개(lo+hi) |
+| `0x90` | load (strided 포함) | tile/vector 반입, transpose | 2,382 (11.8%) |
+| `0x82` | vlen 설정 | vector 길이 상태 | 2,063 (10.3%) |
+| `0x98` | save (strided 포함) | 결과 기록 | 2,020 (10.0%) |
+| `0x17` | v_copy | 값 이동(누산기 반입 등) | 912 (4.5%) |
+| `0x88`/`0x89` | rows/cols 설정 | matrix descriptor | 1,738 (8.6%) |
+| `0x15` | broadcast (scalar/row/col) | norm 분모, scale 살포 | 460 (2.3%) |
+| `0x0A` | v_mul | elementwise 곱 | 249 |
+| `0x14` | v_reduce_sum | norm/softmax 행 합 | 160 |
+| `0x42` | m_mul + MAC(bit27) | **matmul/K-tile 누산 — 연산의 심장** | 93 |
+| `0x01` | v_add | residual/eps 등 | 93 |
+| `0x12` (max) | v_max | softmax 행 최대 fold (0x19 대체) | 74 |
+| `0x0B` | v_div | softmax/norm/sigmoid | 60 |
+| `0x0E` | v_sqrt | RMSNorm | 36 |
+| `0x16` | v_sign_inv | RoPE rotate-half, GELU | 33 |
+| `0x40` | m_add (+ACT_SILU) | SiLU 활성화 경로 | 27 |
+| `0x0F` | v_exp | softmax, GELU/sigmoid lowering | 24 |
+| `0x02` | v_sub | stable softmax max 차감 | 20 |
+| `0x18` | v_cos/sin | on-device RoPE | 12 |
+| `0xF0` | snapshot | 프로그램 끝 결과 저장 | 6 |
+
+핵심 구성비: **주소/모양/길이 설정 66.9% + load/save 21.9% + 데이터 이동(v_copy)
+4.5% = 93.3%가 제어/이동이고, 실제 산술은 6.7%**다. §7.5의 제안 1~3이 여기서
+나온다.
+
+**B. 구현되어 있으나 사용하지 않는 명령**
+
+| Opcode | 명령 | 미사용 이유 |
+|---|---|---|
+| `0x19` | native reduce max | **버그(7.3-①)로 의도적 회피** — v_max fold로 대체 |
+| `0x40..43`의 ACT_GELU(11) | native GELU | **수식이 표준과 다름(7.3-②)** — 정확성 경로에서 회피, parity test로만 검증 |
+| `0x0D`/`0x43` | v_move/m_move | v_copy/m_add+0으로 충분 |
+| `0x41` | m_sub | 필요 시 v_sub 사용 |
+| `0x0C` | v_muladd | 누산은 m_mul MAC로; elementwise FMA 수요는 현재 없음 |
+| `0x11` | v_compare | LLM FP 경로에 불필요 |
+| `0x08`/`0x09` | logical/shift | 정수 연산 불필요 |
+| `0x13` | int/float 변환 | 불필요 |
+| `0x00` | nop | 사용 안 함 |
+| activation 예약값 `01` | — | 실행기에서 GELU와 동일 동작(정의 필요, 7.3-⑦) |
+| `0xFF` | (v07 HALT) | ver.08에서 HALT 아님 — 미사용 |
+
+미사용 명령을 HW에서 제거할지는 설계팀 판단이나, **0x19와 native GELU는
+"제거"가 아니라 "수정"을 권고**한다(7.5).
+
+**C. 존재하지 않아 SW로 우회 중인 기능** — 7.5의 개선 제안으로 연결
+
+- indirect addressing (KV cache append를 host가 수행)
+- loop/repeat (모든 프로그램 완전 unroll: layer당 18만~51만 words, LM head 180만~190만 words)
+- 32-bit 폭의 rows/cols descriptor (LM head stride 128256/151936/262144 표현 불가 → panel 재배열)
+- invocation 간 상태 유지 (weight/cache 상주 불가 → 매 실행 재공급)
+
+### 7.3 오류·불일치 상세 (재현·우회·권고)
+
+**① `0x19` Reduce Max — accumulator 0 초기화 버그 [V3-003, HW 수정 필수]**
+- 현상: 전부 음수인 vector의 max를 0으로 반환.
+- 우회: 첫 실제 열을 accumulator로 삼는 column-strided `v_max` fold. softmax
+  행마다 (rows/64 × cols)회의 strided load+max가 추가됨.
+- 권고: accumulator를 **첫 원소 또는 -inf로 초기화**. 수정되면 softmax의
+  max 단계가 행당 1개 op로 줄어든다.
+
+**② native GELU = `x·sigmoid(2x)` — 표준식 아님 [V3-004→G4-001, HW 결정 필요]**
+- 현상: 표준 `gelu_pytorch_tanh`(=`0.5x(1+tanh(√(2/π)(x+0.044715x³)))`)와 다른
+  근사식. Gemma 등 GELU 모델의 정확성 요건을 만족하지 못함.
+- 우회: 8-op primitive 조합으로 lowering (mul/add/neg/exp/add/div/mul).
+  vendor에서 bit-exact 검증됨. 비용: 활성화 1회가 8배 word.
+- 권고: **표준 tanh-GELU를 native로 제공**(또는 activation field에 mode 추가:
+  현재식/표준식). SiLU는 현재 그대로 정확하고 유용함.
+
+**③ `0xF0`/종료 semantics — 문서와 실행 불일치 [V3-002/005, 문서·HW 정합 필요]**
+- PDF는 `Finish (end of program)`로 기재하나 실제 실행기는 **snapshot 저장 후
+  계속 실행**하고, 프로그램에 0xF0이 없으면 **정상 종료에도 저장하지 않음**.
+  복수 0xF0은 같은 파일에 순서대로 append.
+- program memory도 PDF의 32768-word 고정과 달리 file 크기만큼 동적 할당.
+- 권고: HW 스펙 확정 시 halt/save/flush를 명시적으로 분리 정의하고 문서를
+  실행기와 일치시킬 것.
+
+**④ 주소 상태 머신의 hazard [V3-025 실사고]**
+- 32-bit 주소를 16-bit half 두 번으로 설정하는 상태식 설계라, high half를
+  생략하면 **이전 명령의 stale high가 그대로 사용**됨. 8K 범위에서는 항상 0이라
+  숨어 있다가 확장 주소(>65535)에서 오작동(RMSNorm 출력 0).
+- 추가: `0x15`(broadcast)는 **주소 half를 설정하는 동시에 실행**되므로, 32-bit
+  주소를 만들려면 저-half 설정 시 무의미한 broadcast가 한 번 더 실행됨.
+- 권고: (a) 주소를 한 word로 설정하는 형식(또는 24-bit immediate), (b) 설정과
+  실행의 분리, (c) 최소한 상태 레지스터의 명세화(초기값/유지 규칙).
+
+**⑤ vector save의 lane 수가 결과 크기가 아니라 현재 `vlen` [V3-006]**
+- reduce 후 scalar 저장 시 `vlen=1` 재설정을 잊으면 쓰레기 lane까지 기록.
+- 권고: save가 직전 연산의 결과 길이를 따르게 하거나, 최소한 스펙에 명시.
+
+**⑥ matrix descriptor rows/cols 16-bit [V3-027 실사고]**
+- LM head 논리 RHS `[K, vocab]`의 stride(128256/151936/262144)가 표현 불가.
+  최초 구현이 조용히 truncate되어 오답 token(7272)을 냈다 — **범위 초과가
+  오류가 아니라 silent wrap**인 점이 특히 위험.
+- 우회: `[K,64]` panel 재배열 GEMM(프로그램 180만~190만 words, host 재배열
+  788~805MB).
+- 권고: rows/cols를 **24/32-bit로 확장**하거나, 범위 초과 시 오류를 내도록.
+  descriptor 폭 확장은 LLM vocab 규모에서 필수적이다.
+
+**⑦ activation field 예약값 `01`이 GELU로 동작**
+- 예약값의 동작을 정의하거나 거부해야 함. (실행기 관찰로 발견)
+
+**⑧ FP16 저장 경계로 인한 overflow class [V3-020 실사고, G4-005]**
+- PE 내부는 float32이나 모든 중간 tensor가 FP16으로 저장되므로,
+  `x²`(RMSNorm) 같은 중간값이 65504를 넘으면 즉시 inf. Llama BOS residual
+  330.75에서 실제 발생(token 오답). "제곱 전 1/√D 스케일링" lowering으로 해결.
+- exp의 overflow → inf → `1/inf=0` 전파는 IEEE와 동일함을 실측 확인했고,
+  tanh-GELU lowering의 포화가 이에 **의존**한다.
+- 권고: (a) IEEE inf/NaN 전파 semantics를 스펙에 보증으로 명시, (b) 가능하면
+  선택적 FP32 저장 모드(또는 norm 계열 fused op)를 검토. 필수는 아님 —
+  현재 lowering 순서로 세 모델 모두 정확성을 달성했다.
+
+### 7.4 vendor C-model 실행기 이슈 (ISA 외적, HW/차기 C-model 반영 권고)
+
+| # | 이슈 | 상세 및 권고 |
+|---|---|---|
+| 1 | **G-buffer 8192 고정 + 경계 검사 없음** [V3-001/023] | 8192 entry 초과 입력 파일이 truncate가 아니라 **정적 배열 밖 BSS를 덮어씀**. 3B 모델 한 layer working set(≈1억 entry)도 수용 불가 → full model은 확장 source C-model로만 실행 가능했음. HW: 실용 용량 산정 필수(layer 단위 실행 기준 최소 수억 FP16) + 모든 입출력 경로에 경계 검사 |
+| 2 | invocation 간 상태 소멸 | 프로세스 단위 실행이라 weight/KV cache 상주 불가. 매 invocation마다 layer weight(수십 MB)를 입력 파일로 재공급 — 시뮬레이션 wall time의 지배 요인. HW: weight/cache 상주 메모리 계층. C-model: state save/restore 옵션 |
+| 3 | trace 출력 항상 on [V3-013] | 대형 실행에서 stdout formatting이 pipe/I/O 폭증 유발. source 재현본에 `NPU0818_QUIET` 추가로 해결 — vendor 배포본에도 quiet 스위치 권고 |
+| 4 | 고정 파일명 I/O (`G_buffer_data.bin` 등) | 병렬 실행 시 workdir 분리 필요 [V3-018]. 인자화 권고 |
+| 5 | indirect addressing 부재 [V3-016] | KV cache append(위치가 token마다 변동)를 host가 수행. HW: base+offset register 간접 주소 또는 append 전용 기제 — decode의 host 개입을 완전 제거 가능 |
+| 6 | loop/branch 부재 | 완전 unroll로 layer당 18만~51만 words, decode는 **context 길이마다 재컴파일**(예: ctx8/ctx9 별도 프로그램 45만 words씩). HW: repeat count + 주소 auto-increment만 있어도 프로그램 크기 수백 배 압축 및 context-독립 decode 가능 |
+| 7 | 주소 설정 오버헤드 | §7.2 실측: 전체 word의 48%가 `0x80`(주소 설정, half 2회씩), 제어/이동 합계 93%. HW: descriptor 자동 증가, tile loop, 단일-word 주소 설정으로 program 대역폭 대폭 절감 |
+| 8 | PE 64×64 + float32 내부 + MAC(bit27) | **문제 없음 — 유지 권고.** 세 모델 전부 이 계약으로 정확성 달성. K-tile 간 PE 누산 유지가 FP16 경계 반올림을 줄여 single-program 방식의 정확도 이점을 만들었음 |
+| 9 | MAIN/PARTIAL sub-tile 직접 접근 | **매우 유용 — 유지 권고.** row-major 원본에서 임의 sub-tile을 직접 load/save하게 되어 0710의 tile-blocked 재배열/gather/scatter가 전부 제거됨 |
+| 10 | on-device cos/sin (`0x18`) | **유용 — 유지.** RoPE 테이블 상주 없이 position 입력만으로 decode 가능해짐 |
+
+### 7.5 HW 개선 제안 우선순위
+
+**[필수 — 이대로면 full-model 실사용 불가]**
+1. G-buffer 실용 용량 확보(+경계 검사). 기준: 대상 모델 한 layer의
+   weight+activation working set (3~4B급에서 FP16 수억 entry).
+2. rows/cols descriptor 16-bit → 24/32-bit (LLM vocab stride).
+3. weight/cache 상주(invocation 간 상태 유지)를 전제한 실행 모델.
+
+**[강력 권장 — SW 우회 비용이 큼]**
+4. Reduce Max(0x19) accumulator 초기화 수정.
+5. 표준 tanh-GELU 제공(또는 activation mode bit).
+6. loop/repeat + 주소 auto-increment: 프로그램 크기(현재 layer당 수십만 word,
+   제어 word 93%)와 context별 재컴파일 제거.
+7. indirect addressing(base+offset): KV append/chunk binding의 host 개입 제거.
+
+**[정리·명세화 — 저비용]**
+8. 0xF0/종료/HALT semantics 문서-실행 일치, 0xFF 처리 정의.
+9. 주소 half 상태 머신 명세화(가능하면 단일-word 설정) + 0x15의 설정/실행 분리.
+10. vector save lane 규칙 명세화, activation 예약값 01 정의.
+11. IEEE inf/NaN 전파 보증 명시(현재 lowering이 의존).
+12. 미사용 opcode(0x08/09/0C/0D/11/13/41/43) 존치 여부 결정 — LLM 용도로는
+    제거해도 무방하나, 0x0C(muladd)는 elementwise FMA로 활용 여지 있음.
+
+### 7.6 통합 이슈 색인
+
+- `V3-001 ~ V3-029`: 본 문서 §3 (V3-004는 2026-08-19 RESOLVED로 갱신).
+- `G4-001 ~ G4-008`: `report/report_gemma4.md` §1 — 표준 GELU lowering(G4-001),
+  double-wide MLP semantics(G4-002), weight 없는 V-Norm의 keyset 부재(G4-004),
+  FP16 range 감시(G4-005, 유일한 OPEN), proportional RoPE 확정(G4-006),
+  scale 사슬 검증(G4-007), KV 공유 decode 순서(G4-008).
+- Qwen3: 신규 ISA 이슈 없음. 발견 사항은 HF `output_hidden_states` 마지막
+  원소가 final-norm 적용값이라는 reference 해석 주의뿐
+  (`report/report_qwen3.md` §2).
+- 전체 회귀: 35개 test entrypoint, 세 모델 golden 전부 PASS 상태에서 본
+  리뷰를 작성함.
