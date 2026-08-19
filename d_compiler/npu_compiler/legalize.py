@@ -175,6 +175,28 @@ def silu(bb, z, rows, cols):
     return bb.emit(relax.op.nn.silu(z))
 
 
+def gelu_tanh(bb, x, rows, cols):
+    """Standard ``gelu_pytorch_tanh`` from NPU primitives (Gemma correctness path).
+
+    The native GELU opcode computes the vendor approximation x*sigmoid(2x)
+    (V3-004), so it cannot be used here.  Algebraically
+    0.5*x*(1+tanh(c*(x+0.044715*x^3))) == x*sigmoid(2c*(x+0.044715*x^3)),
+    and the polynomial is factored as x*(2c + 2c*0.044715*x^2) so the largest
+    intermediate is x^2, not x^3.  Saturation is exact at both ends: a large
+    positive argument makes exp(-t) zero (gelu -> x); a large negative one
+    overflows exp to FP16 inf whose reciprocal is zero (gelu -> 0).
+    """
+    c2 = float(2.0 * np.sqrt(2.0 / np.pi))
+    xx = bb.emit(relax.op.multiply(x, x))                                    # x^2
+    poly = bb.emit(relax.op.multiply(xx, _c(np.full((rows, cols), c2 * 0.044715))))
+    poly = bb.emit(relax.op.add(poly, _c(np.full((rows, cols), c2))))
+    t2 = bb.emit(relax.op.multiply(x, poly))                                 # 2c(x+0.044715x^3)
+    e = bb.emit(relax.op.exp(bb.emit(relax.op.negative(t2))))
+    den = bb.emit(relax.op.add(e, _c(np.ones((rows, cols)))))
+    sig = bb.emit(relax.op.divide(_c(np.ones((rows, cols))), den))
+    return bb.emit(relax.op.multiply(x, sig))
+
+
 def swiglu(bb, x, Wg, Wu, Wd, seq, d, f):
     """SwiGLU FFN: down( silu(x@Wg) * (x@Wu) ).  x[seq,d], Wg/Wu[d,f], Wd[f,d]."""
     gate = bb.emit(relax.op.matmul(x, Wg))                     # [seq,f]

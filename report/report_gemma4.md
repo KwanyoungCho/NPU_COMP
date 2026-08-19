@@ -17,9 +17,9 @@ issue는 `G4-###` 식별자로 기록한다.
 
 | ID | 상태 | 심각도 | 내용 | 현재 대응 |
 |---|---|---:|---|---|
-| G4-001 | OPEN | HIGH | Gemma `gelu_pytorch_tanh`는 vendor native GELU `x*sigmoid(2x)`와 다름 (V3-004 승계) | correctness mode에서 표준 tanh-GELU를 primitive sequence로 lowering 예정. C-model은 변경하지 않음 |
+| G4-001 | RESOLVED | HIGH | Gemma `gelu_pytorch_tanh`는 vendor native GELU `x*sigmoid(2x)`와 다름 (V3-004 승계) | `legalize.gelu_tanh` primitive lowering 구현. C-model 무변경. vendor/source/FP16-emulation bit-exact, float64 대비 max 1.86e-3, 극단값 포화 정확 (`test_gelu_tanh.py`) |
 | G4-002 | RESOLVED | MEDIUM | `use_double_wide_mlp: true`의 정확한 semantics 미확정 | checkpoint header + official 구현으로 확정: KV-shared 마지막 20개 layer(15~34)의 gate/up/down intermediate가 6144→12288로 2배, gating 수식 자체는 동일한 `down(act(gate(x)) * up(x))`. spec의 per-layer `ffn_hidden`에 반영 |
-| G4-003 | OPEN | BLOCKER | Gemma 4 E2B checkpoint를 받을 디스크 공간 부족 — 단일 10.25GB safetensors, text-only(`model.language_model.*`)만 골라도 9.29GB인데 여유 8.8GB | 사용자에게 공간 확보/저장 위치 문의. HTTP Range로 header만 받아 inventory는 완료 |
+| G4-003 | RESOLVED | BLOCKER | Gemma 4 E2B checkpoint를 받을 디스크 공간 부족 — 단일 10.25GB safetensors, text-only(`model.language_model.*`)만 골라도 9.29GB인데 여유 8.8GB | 사용자 지시로 `/data2/chokwans99/npu_models/gemma4_e2b_hf/`에 전체 다운로드. repo 기본 경로 `d_compiler/build/gemma4_e2b_hf/model.safetensors`는 symlink |
 
 ---
 
@@ -213,3 +213,26 @@ spec 반영:
   (`layer_types`/`rope_parameters` 사용). 내장 기본값 `GEMMA4_E2B_TEXT`는
   다운로드된 config.json과의 동일성 test로 검증.
 - per-layer `ffn_hidden`: 0~14는 6144, 15~34는 12288.
+
+### 2026-08-19 — Stage G4.2/G4.3: checkpoint 확보 및 표준 tanh-GELU lowering
+
+- 사용자 지시로 `/data2`(별도 디스크, 235GB 여유)에 전체 checkpoint를 받았다
+  (G4-003 해소). repo 기본 경로에는 symlink만 두어 홈 디스크를 쓰지 않는다.
+  경로 재지정은 `NPU_GEMMA4_PATH`.
+- `legalize.gelu_tanh(bb, x, rows, cols)` 추가 (G4-001):
+  - `0.5x(1+tanh(c(x+0.044715x³))) == x·sigmoid(2c(x+0.044715x³))` 항등식을 사용해
+    mul/add/negative/exp/divide primitive만으로 lowering. native GELU opcode는
+    사용하지 않고 C-model도 변경하지 않는다.
+  - 다항식을 `x·(2c + 2c·0.044715·x²)`로 인수분해해 최대 중간값을 x³이 아닌
+    x²로 낮췄다.
+  - 포화 계약: 큰 양수는 `exp(-t)=0 → x` 그대로, 큰 음수는 exp가 FP16 inf로
+    overflow해 `1/inf=0 → 0`. IEEE inf 전파를 vendor에서 실측 확인.
+- `tests/test_gelu_tanh.py` (28번째 entrypoint):
+  - dense `[-8,8]`/near-zero/극단값 3개 case에서
+    **vendor a.out == source C-model == FP16 step-emulation bit-exact**
+  - float64 표준식 대비 max abs 1.86e-3 (FP16 인자 반올림 한계 수준)
+  - ±300/±3000 포화 정확 (`gelu(+big)=+big`, `gelu(-big)=0`)
+  - native vendor GELU와 결과가 구분됨을 확인 (lowering이 실제로 다른 함수)
+- `make_gemma4_generation_reference.py`: official checkpoint의
+  `Gemma4ForConditionalGeneration` FP16 eager CPU로 독립 greedy reference 생성
+  (Llama 방법론과 동일).
