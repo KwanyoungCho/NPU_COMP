@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, "d_compiler"))
 
-from make_gemma4_ple_table import compute_rows
+from npu_compiler.gemma4_ple import compute_rows
 from npu_compiler import driver
 from npu_compiler.gemma4_graph import build_gemma4_ple_module
 from npu_compiler.gemma4_model import Gemma4Assets, default_model_path
