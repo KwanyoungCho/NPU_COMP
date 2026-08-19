@@ -52,6 +52,8 @@ def rms_norm(bb, x, w, seq, d, eps=0.0):
     inv = bb.emit(relax.op.divide(_c(np.ones((seq, 1))), rms))  # 1/rms  [seq,1]
     scale = broadcast_col(bb, inv, seq, d)                      # [seq,d]
     xn = bb.emit(relax.op.multiply(x, scale))                  # x/rms
+    if w is None:                                              # weight-less norm (Gemma V-norm)
+        return xn
     wb = bb.emit(relax.op.broadcast_to(w, relax.ShapeExpr([seq, d])))  # w[1,d] -> [seq,d]
     return bb.emit(relax.op.multiply(xn, wb))                  # * weight
 

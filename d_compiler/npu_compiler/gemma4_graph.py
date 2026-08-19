@@ -21,6 +21,130 @@ def _P(name, shape):
     return relax.Var(name, relax.TensorStructInfo(list(shape), "float16"))
 
 
+def gemma_freqs_row(attention):
+    """Half-duplicated RoPE frequency row [1,HD] for one attention spec.
+
+    Proportional RoPE keeps the full-head-dim exponent but only the first
+    ``partial_rotary_factor*HD/2`` angles are non-zero; zero frequency gives
+    cos=1/sin=0, so the standard full-dim rotate-half passes those dims
+    through unchanged and no slice/concat variant of rope is needed.
+    """
+    hd = attention.head_dim
+    half = hd // 2
+    angles = int(attention.partial_rotary_factor * hd) // 2
+    freqs = np.zeros(half, dtype=np.float64)
+    freqs[:angles] = attention.rope_theta ** (-2.0 * np.arange(angles) / hd)
+    return np.concatenate([freqs, freqs])[None, :]
+
+
+def banded_causal_mask(S, window=None):
+    """[S,S] additive mask: causal; sliding also drops i-j >= window."""
+    mask = np.zeros((S, S), dtype="float32")
+    for i in range(S):
+        for j in range(S):
+            if j > i or (window is not None and i - j >= window):
+                mask[i, j] = -30000.0
+    return mask
+
+
+def build_gemma4_prefill_layer_module(spec, layer_index, S, return_cache=True):
+    """One official Gemma 4 decoder layer over S prompt tokens.
+
+    Owner layers project/norm/rope K and norm V in-program and (optionally)
+    return them concatenated after the hidden state for cache seeding; shared
+    layers instead take the owner's Kt/V as inputs.  All arithmetic — QK-Norm,
+    weight-less V-norm, scale-1 attention, tanh-GELU gated MLP, PLE injection,
+    layer scalar — runs on the NPU; ``pli`` rows come from the precomputed
+    PLE table.
+    """
+    layer = spec.layers[layer_index]
+    attention = layer.attention
+    if attention.num_kv_heads != 1:
+        raise ValueError("Gemma 4 graph assumes a single KV head")
+    D = spec.hidden_size
+    HD = attention.head_dim
+    H = attention.num_query_heads
+    F = layer.ffn_hidden
+    Pd = layer.ple_dim
+    eps = spec.rms_norm_eps
+    owner = layer.owns_cache
+    op = relax.op
+
+    x = _P("x", (S, D))
+    pli = _P("pli", (S, Pd))
+    Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D)); Wn3 = _P("Wn3", (1, D))
+    Wn4 = _P("Wn4", (1, D)); Wn5 = _P("Wn5", (1, D))
+    Wq = _P("Wq", (D, H * HD)); Wqn = _P("Wqn", (1, HD))
+    Wo = _P("Wo", (H * HD, D))
+    Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
+    Wpg = _P("Wpg", (D, Pd)); Wpp = _P("Wpp", (Pd, D))
+    ls = _P("ls", (1, 1))
+    params = [x, pli, Wn1, Wn2, Wn3, Wn4, Wn5, Wq, Wqn]
+    if owner:
+        Wk = _P("Wk", (D, HD)); Wkn = _P("Wkn", (1, HD)); Wv = _P("Wv", (D, HD))
+        params += [Wk, Wkn, Wv]
+    else:
+        Kt = _P("Kt", (HD, S)); Vc = _P("Vc", (S, HD))
+        params += [Kt, Vc]
+    params += [Wo, Wg, Wu, Wd, Wpg, Wpp, ls]
+
+    pos_c = _c(np.arange(S, dtype="float32").reshape(S, 1))
+    freqs_c = _c(gemma_freqs_row(attention))
+    window = attention.window if attention.kind == "sliding" else None
+    mask_c = _c(banded_causal_mask(S, window))
+
+    def head_slice(bb, tensor, index):
+        return bb.emit(op.strided_slice(
+            tensor, axes=[1], begin=[index * HD], end=[(index + 1) * HD]))
+
+    bb = relax.BlockBuilder()
+    with bb.function("main", params):
+        with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos_c, freqs_c, S, HD)
+            xn = legalize.rms_norm(bb, x, Wn1, S, D, eps=eps)
+            q_all = bb.emit(op.matmul(xn, Wq))
+            if owner:
+                key = bb.emit(op.matmul(xn, Wk))
+                key = legalize.rms_norm(bb, key, Wkn, S, HD, eps=eps)
+                key = legalize.rope(bb, key, cos, sin)
+                value = bb.emit(op.matmul(xn, Wv))
+                value = legalize.rms_norm(bb, value, None, S, HD, eps=eps)
+                kt = bb.emit(op.permute_dims(key, axes=[1, 0]))
+            else:
+                kt, value = Kt, Vc
+            contexts = []
+            for head in range(H):
+                query = head_slice(bb, q_all, head)
+                query = legalize.rms_norm(bb, query, Wqn, S, HD, eps=eps)
+                query = legalize.rope(bb, query, cos, sin)
+                score = bb.emit(op.matmul(query, kt))          # scale is 1.0
+                score = bb.emit(op.add(score, mask_c))
+                probability = legalize.softmax_lastdim(bb, score, S, S)
+                contexts.append(bb.emit(op.matmul(probability, value)))
+            attention_out = bb.emit(op.matmul(
+                bb.emit(op.concat(contexts, axis=1)), Wo))
+            h1 = bb.emit(op.add(
+                x, legalize.rms_norm(bb, attention_out, Wn2, S, D, eps=eps)))
+            f = legalize.rms_norm(bb, h1, Wn3, S, D, eps=eps)
+            gate = legalize.gelu_tanh(bb, bb.emit(op.matmul(f, Wg)), S, F)
+            up = bb.emit(op.matmul(f, Wu))
+            ffn = bb.emit(op.matmul(bb.emit(op.multiply(gate, up)), Wd))
+            h2 = bb.emit(op.add(
+                h1, legalize.rms_norm(bb, ffn, Wn4, S, D, eps=eps)))
+            gate2 = legalize.gelu_tanh(bb, bb.emit(op.matmul(h2, Wpg)), S, Pd)
+            gated = bb.emit(op.multiply(gate2, pli))
+            projected = bb.emit(op.matmul(gated, Wpp))
+            h3 = bb.emit(op.add(
+                h2, legalize.rms_norm(bb, projected, Wn5, S, D, eps=eps)))
+            scale = bb.emit(op.broadcast_to(ls, relax.ShapeExpr([S, D])))
+            y = bb.emit(op.multiply(h3, scale))
+            if owner and return_cache:
+                y = bb.emit(op.concat([y, key, value], axis=1))
+            gv = bb.emit_output(y)
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
 def build_gemma4_ple_module(spec, S):
     """per_layer_input for S tokens: [S, num_layers*ple_dim].
 

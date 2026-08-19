@@ -22,7 +22,7 @@ issue는 `G4-###` 식별자로 기록한다.
 | G4-003 | RESOLVED | BLOCKER | Gemma 4 E2B checkpoint를 받을 디스크 공간 부족 — 단일 10.25GB safetensors, text-only(`model.language_model.*`)만 골라도 9.29GB인데 여유 8.8GB | 사용자 지시로 `/data2/chokwans99/npu_models/gemma4_e2b_hf/`에 전체 다운로드. repo 기본 경로 `d_compiler/build/gemma4_e2b_hf/model.safetensors`는 symlink |
 | G4-004 | RESOLVED | HIGH | owner layer의 V에 **weight 없는 RMSNorm**(`with_scale=False`)이 적용됨 — weight parameter가 없어 checkpoint keyset에는 흔적이 없으므로 tensor 목록만으로 graph를 만들면 누락 위험 | official 구현에서 확인. attention graph에 weight-less RMSNorm(d=head_dim, eps) 포함. `rms_norm` builder의 weight 곱 생략 변형 사용 |
 | G4-005 | OPEN | HIGH | 35 layer FP16 range: HF는 norm을 float32 내부 연산으로 하지만 우리는 모든 중간값이 FP16 — Gemma 계열의 큰 activation에서 V3-020류 overflow 가능성 | 안전 순서 norm(선-스케일링) 유지, layer별 checkpoint/finite 검사로 발생 지점 즉시 격리. HF FP16 reference가 finite 완주한 것은 긍정 신호 |
-| G4-006 | OPEN | MEDIUM | full-attention layer의 `proportional` RoPE + `partial_rotary_factor 0.25`의 정확한 주파수/적용 식 미확정 | 구현은 slice/concat+기존 rope로 가능. G4.3에서 HF rotary 중간값과 대조해 식 확정 |
+| G4-006 | RESOLVED | MEDIUM | full-attention layer의 `proportional` RoPE + `partial_rotary_factor 0.25`의 정확한 주파수/적용 식 미확정 | HF `_compute_proportional_rope_parameters` 확인: full head_dim 지수의 주파수 중 rotary 초과분을 **0으로** 두고 full-dim rotate-half를 그대로 적용 (freq 0 → cos=1/sin=0 → passthrough). slice/concat 불필요, 기존 `legalize.rope` 재사용 — `gemma4_graph.gemma_freqs_row` |
 | G4-007 | OPEN | MEDIUM | scale 사슬(embedding ×√1536, projection ×1/√1536, PLE 결합 ×1/√2, PLE token ×√256)의 적용 순서·dtype이 FP16 경계에서 수치를 좌우 | 단계별 FP16 emulation과 HF 중간값 대조로 각 지점 검증 (V3-020 교훈) |
 | G4-008 | OPEN | MEDIUM | decode에서 shared layer(15~34)는 **현재 token을 포함한** owner(13/14)의 K/V 상태를 같은 step 안에서 읽어야 함 | 실행 순서상 owner가 먼저 실행되므로 host가 owner 출력의 새 K/V를 같은 step에서 shared layer 입력으로 전달. cache append 자체는 step 말미 일괄 유지 |
 
@@ -282,3 +282,30 @@ official `modeling_gemma4.py` 추가 분석으로 확정:
    저장(4.7GB)하고, 실행 시에는 token row lookup만 한다. 테이블 생성 수식은
    표본 token에 대해 실제 source C-model program과 bit-exact 대조로 증명한다.
    (multimodal은 token id가 없어 이 방식이 불가하지만 text-only 범위에서는 유효)
+
+### 2026-08-19 — Stage G4.2 완료 및 G4.3/G4.4 착수
+
+- `npu_compiler/gemma4_model.py` — `Gemma4Assets`: 단일 safetensors에서
+  `model.language_model.*` slice 로딩, spec 기반 layer별 shape, 540개 필수 key
+  검증(shared layer의 미사용 k/v tensor는 official과 동일하게 무시), embedding
+  FP16 scale, PLE row slice, panel LM packing, PLE 테이블 memmap. tokenizer
+  golden id 일치 확인. revision `d29ff6b4` 고정.
+- PLE 사전계산 pipeline:
+  - `make_gemma4_ple_table.py`가 **C-model의 정확한 누산 순서**(64-K tile 내부
+    순차합→tile간 MAC, row reduce 순차합)를 elementwise 연산 loop로 재현 —
+    elementwise는 SIMD/thread에 무관하게 순서가 보존되므로 결정적.
+  - `tests/test_gemma4_ple.py`: 표본 11 token × 8960 값 전체가 실제 source
+    C-model PLE program(`build_gemma4_ple_module`)과 **bit-exact** 일치.
+  - 전체 262144 token 테이블(4.7GB)은 detached 프로세스로 생성 중 (resume 지원).
+- `npu_compiler/gemma4_graph.py` — `build_gemma4_prefill_layer_module`:
+  4가지 layer 형태(sliding/full × owner/shared)를 spec에서 읽어 생성.
+  QK-Norm, weight-less V-norm(`legalize.rms_norm`의 `w=None` 지원 추가),
+  scale-1 attention, banded sliding mask, proportional RoPE(zero-freq
+  passthrough), tanh-GELU gated MLP(double-wide 폭 포함), PLE 주입,
+  layer_scalar까지 전부 NPU program 산술. shared layer는 owner의 Kt/V를
+  입력으로 받음.
+- `tests/test_gemma4_layer.py` (proxy, checkpoint 불필요): 4개 layer 형태 모두
+  - source C-model vs 고정-buffer streaming oracle ≤ 1e-2 (K-tile 경계 FP16
+    반올림 증폭에 대한 문서화된 허용치)
+  - float64 official 수식 reference 대비 max rel ≤ 1.1%
+  - owner의 K/V cache 출력도 reference와 일치
