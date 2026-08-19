@@ -178,6 +178,25 @@ def test_gemma4_layers():
                   output, expected)
 
 
+def test_vendor_streaming_layer():
+    """Vendor closure: the richest Gemma layer shape (sliding owner — QK/V
+    norms, RoPE, tanh-GELU MLP, PLE, layer scalar) executes on the unmodified
+    vendor a.out via the fixed-buffer streaming plan and agrees with the
+    single-program source run."""
+    inputs = make_inputs(0)
+    module = build_gemma4_prefill_layer_module(SPEC, 0, S)
+    compiled = driver.compile_module(module, backend="source-0818")
+    source = np.asarray(driver.run_compiled(*compiled, inputs), dtype=np.float16)
+    plan = compile_streaming(module)
+    with VendorSession() as session:
+        vendor = np.asarray(plan.run(inputs, vendor=session), dtype=np.float16)
+    gap = float(np.max(np.abs(
+        source.astype(np.float32) - vendor.astype(np.float32))))
+    assert gap <= 1e-2, f"vendor gap {gap}"
+    print(f"  [PASS] vendor a.out streaming agrees with source (max abs {gap:.2e})")
+
+
 if __name__ == "__main__":
     test_gemma4_layers()
+    test_vendor_streaming_layer()
     print("ALL GEMMA4 LAYER TESTS PASSED")

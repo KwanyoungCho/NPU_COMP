@@ -309,3 +309,59 @@ official `modeling_gemma4.py` 추가 분석으로 확정:
     반올림 증폭에 대한 문서화된 허용치)
   - float64 official 수식 reference 대비 max rel ≤ 1.1%
   - owner의 K/V cache 출력도 reference와 일치
+
+### 2026-08-19 — Stage G4.4: official 실제 layer HF 대조 (PASS)
+
+`make_gemma4_layer_reference.py`로 HF FP16 eager의 layer별 중간값(embedding,
+`per_layer_inputs`, hidden 36개, final norm, logits)을 확보하고,
+`tests/test_gemma4_real_layer.py`에서 official weight로 우리 program을 실행해
+같은 입력 hidden에서 다음 hidden과 비교했다:
+
+~~~text
+PLE per_layer_inputs:        cosine 0.99999983, mean abs 1.5e-4
+layer  0 (sliding owner):    cosine 0.99999973, max abs 0.031
+layer  4 (full owner):       cosine 0.99999967, max abs 0.031   ← proportional RoPE 검증
+layer 13 (sliding owner):    cosine 0.99999927
+layer 15 (sliding shared):   cosine 0.99999930                  ← double-wide + KV alias 검증
+~~~
+
+### 2026-08-19 — Stage G4.5/G4.6: official 3-token prefill+decode 완료 (PASS)
+
+`Gemma4SourceCompiler` + `run_gemma4_source_generate.py`의 첫 실행에서:
+
+~~~text
+prompt: Hello, NPU compiler!
+input ids: [2, 9259, 236764, 646, 11152, 47133, 236888]
+generated ids: [108, 236777, 236789]
+decoded text: "\n\nI'"
+HF greedy golden과 완전 일치 (match: true)
+
+최종 decode logits vs HF (softcap은 비교 시에만 적용):
+  max abs 0.0452, mean abs 0.0091, RMSE 0.0113, cosine 0.9999975
+
+invocations: 111 = prefill (35 layer + norm + LM)
+                 + 2 decode steps × (35 layer + norm + LM)
+source 실행 누적: 530.7초 (8.8분)
+ple_source: computed (테이블 생성 완료 전 fallback; 값은 bit-exact 동등)
+~~~
+
+프로그램 규모 (shape class별 재사용):
+
+| Program | words |
+|---|---:|
+| prefill sliding/full owner (F=6144) | 182,753 / 217,533 |
+| prefill sliding/full shared (F=12288) | 311,689 / 342,665 |
+| decode 4 class × context 8/9 | 184,701 ~ 336,453 |
+| panel LM head (vocab 262144) | 1,904,641 |
+
+decode 실행 구조: owner layer(13/14 이전)는 fused program이 현재 token K/V를
+in-program append하고 host가 slot cache를 즉시 연장 → 같은 step의 shared
+layer(15~34)가 연장된 cache를 읽는다 (G4-008 설계 그대로).
+
+### 2026-08-19 — vendor 마무리 확인 (사용자 지시 이행)
+
+- tanh-GELU lowering은 이미 vendor a.out에서 bit-exact 검증됨 (`test_gelu_tanh`).
+- 추가로 `test_gemma4_layer.py`에 vendor closure를 넣었다: 가장 연산이 많은
+  Gemma layer 형태(sliding owner — QK/V norm, RoPE, tanh-GELU MLP, PLE,
+  layer scalar)를 **무수정 vendor a.out**의 fixed-buffer streaming plan으로
+  실행 → source 단일 program과 **max abs 0.0 완전 일치**.
