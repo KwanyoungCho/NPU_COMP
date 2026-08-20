@@ -476,6 +476,18 @@ full 실행이다.
 ver.08 프로그램으로 수행되었고, host는 gather/layout/argmax만 담당했다.
 따라서 아래 명령어 평가는 "LLM inference 전 범위를 실제로 돌려본" 결과다.
 
+실행체 구분을 명확히 하면:
+
+- **명령어 semantics·오류·계약(§7.2, §7.3)은 전부 제공 vendor `a.out`에서
+  직접 확정**한 것이다. source C-model은 그 parity 재현본(64개 프로그램 +
+  targeted 프로그램 snapshot 일치)이며, capacity 외의 실행 의미는 동일하다.
+- 위 표의 full-model 3종 실행은 G-buffer 8192 한계 때문에 capacity 확장
+  source C-model에서 수행했다(§1 주석의 합의). 단 **Llama full prefill은
+  Stage V3.6에서 vendor `a.out`만으로도 완주**했고(517,557 invocations,
+  token 일치), tanh-GELU lowering과 Gemma/Qwen layer는 vendor에서
+  kernel/layer 규모로 완전 일치를 확인했다.
+- §7.2의 word 통계는 ver.08 인코딩 자체의 통계로, 실행체와 무관하다.
+
 ### 7.2 명령어 전수 조사
 
 프로그램 word 사용 통계는 세 model family의 대표 layer/decode 프로그램 6개
