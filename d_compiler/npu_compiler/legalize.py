@@ -39,17 +39,21 @@ def rms_norm(bb, x, w, seq, d, eps=0.0):
     reduce via ones-matmul, broadcast via ones-matmul, 1/rms via ones-divide.
     eps (e.g. 1e-5) added as a constant tensor (immediate can't encode it).
     """
-    sq = bb.emit(relax.op.multiply(x, x))                       # [seq,d]
-    # scale by 1/d BEFORE reducing so the running sum stays near mean(x^2): sum(x^2)
-    # over large d (e.g. 3072) otherwise overflows FP16 (max 65504) -> inf -> 0 output.
-    sq = bb.emit(relax.op.multiply(sq, _c(np.full((seq, d), 1.0 / d))))
-    mean = reduce_sum_lastdim(bb, sq, seq, d)                   # = mean(x^2), overflow-safe
+    # Scale x BEFORE squaring.  Scaling x^2 afterwards is too late: a residual
+    # outlier above sqrt(65504) has already become FP16 inf.  The power remains
+    # near one and the reduction directly computes sum((x/sqrt(d))^2).
+    scaled = bb.emit(relax.op.multiply(
+        x, _c(np.full((seq, d), 1.0 / np.sqrt(float(d))))))
+    sq = bb.emit(relax.op.multiply(scaled, scaled))              # [seq,d]
+    mean = reduce_sum_lastdim(bb, sq, seq, d)                   # ~= mean(x^2), overflow-safe
     if eps:
         mean = bb.emit(relax.op.add(mean, _c(np.full((seq, 1), eps))))       # + eps
     rms = bb.emit(relax.op.sqrt(mean))                         # [seq,1]
     inv = bb.emit(relax.op.divide(_c(np.ones((seq, 1))), rms))  # 1/rms  [seq,1]
     scale = broadcast_col(bb, inv, seq, d)                      # [seq,d]
     xn = bb.emit(relax.op.multiply(x, scale))                  # x/rms
+    if w is None:                                              # weight-less norm (Gemma V-norm)
+        return xn
     wb = bb.emit(relax.op.broadcast_to(w, relax.ShapeExpr([seq, d])))  # w[1,d] -> [seq,d]
     return bb.emit(relax.op.multiply(xn, wb))                  # * weight
 
@@ -171,6 +175,28 @@ def silu(bb, z, rows, cols):
     activation bit — codegen lowers relax.nn.silu to a single m_add(+0, act=SiLU)
     per chunk, replacing the old 5-op exp/add/div/mul decomposition."""
     return bb.emit(relax.op.nn.silu(z))
+
+
+def gelu_tanh(bb, x, rows, cols):
+    """Standard ``gelu_pytorch_tanh`` from NPU primitives (Gemma correctness path).
+
+    The native GELU opcode computes the vendor approximation x*sigmoid(2x)
+    (V3-004), so it cannot be used here.  Algebraically
+    0.5*x*(1+tanh(c*(x+0.044715*x^3))) == x*sigmoid(2c*(x+0.044715*x^3)),
+    and the polynomial is factored as x*(2c + 2c*0.044715*x^2) so the largest
+    intermediate is x^2, not x^3.  Saturation is exact at both ends: a large
+    positive argument makes exp(-t) zero (gelu -> x); a large negative one
+    overflows exp to FP16 inf whose reciprocal is zero (gelu -> 0).
+    """
+    c2 = float(2.0 * np.sqrt(2.0 / np.pi))
+    xx = bb.emit(relax.op.multiply(x, x))                                    # x^2
+    poly = bb.emit(relax.op.multiply(xx, _c(np.full((rows, cols), c2 * 0.044715))))
+    poly = bb.emit(relax.op.add(poly, _c(np.full((rows, cols), c2))))
+    t2 = bb.emit(relax.op.multiply(x, poly))                                 # 2c(x+0.044715x^3)
+    e = bb.emit(relax.op.exp(bb.emit(relax.op.negative(t2))))
+    den = bb.emit(relax.op.add(e, _c(np.ones((rows, cols)))))
+    sig = bb.emit(relax.op.divide(_c(np.ones((rows, cols))), den))
+    return bb.emit(relax.op.multiply(x, sig))
 
 
 def swiglu(bb, x, Wg, Wu, Wd, seq, d, f):

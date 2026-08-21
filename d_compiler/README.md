@@ -68,6 +68,21 @@ cd ~/tvm-src && pip install -e python
 g++ -O2 -std=c++17 ../_poc/mysim.cpp -o mysim   # runtime.py 픽스처가 자동 수행 예정
 ```
 
+## 0818 / instruction format ver.08 backend
+
+새 제공 실행기(`0818_npu_update/a_npu/a.out`)를 직접 대상으로 하는 backend는
+`backend="0818"`로 선택한다.
+
+```python
+asm, mp = driver.compile_module(mod, backend="0818")
+output = driver.run_compiled(asm, mp, inputs)
+```
+
+이 경로는 전역 tensor를 row-major로 유지하고 MAIN/PARTIAL descriptor로 최대 64x64
+sub-tile을 직접 load/save한다. 기존 0710 backend와 분석용 소스 모델은 아직 제거하지
+않았다. ISA 조사, vendor quirk, 검증 범위와 제거 조건은
+**[RETARGET_0818.md](./RETARGET_0818.md)**를 참고한다.
+
 ---
 
 ## 디렉토리 (예정)

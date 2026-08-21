@@ -26,6 +26,17 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
     kernel reads weights contiguously (no gather); run_compiled packs the fed data.
     layouts=True enables the A4 tile-blocked layout propagation (matmul-chain
     gather/scatter elimination); layouts=False = pre-A4 row-major, for A/B comparison."""
+    if backend in ("0818", "vendor-0818", "source-0818", "0818-source"):
+        # ver.08 has native MAIN/PARTIAL sub-tile addressing.  Its backend owns a
+        # row-major plan and deliberately does not inherit the 0710 packed layouts.
+        from . import backend_0818
+        source_target = backend in ("source-0818", "0818-source")
+        asm, mp = backend_0818.compile_module(
+            mod, func_name, tile=64 if tile is None else tile, reuse=reuse,
+            validate=not source_target)
+        if source_target:
+            asm.execution_target = "source-0818"
+        return asm, mp
     if backend == "tir":                      # matmul-only modules via pure TIR path
         from . import tir_backend
         return tir_backend.compile_func(mod, func_name)
@@ -54,7 +65,8 @@ def run_compiled(asm, mp, inputs, maxrun=None):
     """Run an already-compiled (asm, mp). Rebuilds the G-buffer from `inputs` each
     call (cheap) and runs mysim — NO recompilation. inputs: dict {name->array} or
     positional list. Returns the output (float32, FP16-rounded)."""
-    gbuf = np.zeros(mp.top, dtype=np.float32)
+    source_target = getattr(asm, "execution_target", None) == "source-0818"
+    gbuf = np.zeros(mp.top, dtype=np.float16 if source_target else np.float32)
     for c in mp.constants:                         # bake constant data into initial G-buffer
         data = mp.const_data[c].astype(np.float32).reshape(-1)
         gbuf[mp.offset[c]:mp.offset[c] + data.size] = data
@@ -78,8 +90,17 @@ def run_compiled(asm, mp, inputs, maxrun=None):
         gbuf[off:off + arr.size] = arr
     out_var = mp.output
     out_off = mp.offset[out_var]; n_out = _numel(mp.shape[out_var])
-    full = _runtime.run(asm, gbuf, gn=mp.top, maxrun=maxrun)
-    return full[out_off:out_off + n_out].reshape(mp.shape[out_var])
+    if source_target:
+        from . import source_runtime_0818
+        return source_runtime_0818.run(
+            asm, gbuf, output_dtype=np.float16,
+            output_range=(out_off, n_out)).reshape(mp.shape[out_var]).astype(np.float32)
+    elif getattr(asm, "format_version", None) == "0818":
+        from . import runtime_0818
+        full = runtime_0818.run(asm, gbuf)
+    else:
+        full = _runtime.run(asm, gbuf, gn=mp.top, maxrun=maxrun)
+    return full[out_off:out_off + n_out].reshape(mp.shape[out_var]).astype(np.float32)
 
 
 def run_module(mod, inputs, func_name="main", maxrun=None, tile=None, backend="direct",

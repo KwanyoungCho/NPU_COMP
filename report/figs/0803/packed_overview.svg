@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="'Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#52606D"/>
+    </marker>
+    <style>
+      .code{font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;}
+      .t{fill:#1F2933;}
+      .mut{fill:#52606D;}
+      .h{font-weight:700;}
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="720" fill="#FFFFFF"/>
+
+  <!-- title -->
+  <text x="640" y="42" text-anchor="middle" class="t h" font-size="27">NPU 컴파일러 v2 — 현재 구조 (packed, 기본 경로)</text>
+  <text x="640" y="70" text-anchor="middle" class="mut" font-size="14.5">고수준 Relax 그래프를 tile-blocked 4D로 rewrite하는 IR→IR 파이프라인 · 레이아웃을 명시적 pass로 분리</text>
+
+  <!-- ============ LEFT: pipeline ============ -->
+  <!-- Box1 input -->
+  <rect x="80" y="96" width="540" height="52" rx="9" fill="#EEF1F4" stroke="#B8C2CC" stroke-width="1.5"/>
+  <text x="350" y="118" text-anchor="middle" class="t h" font-size="15">입력 &#160;<tspan class="code" font-weight="400">build_layer_module</tspan></text>
+  <text x="350" y="138" text-anchor="middle" class="mut" font-size="12.5">고수준 Relax 그래프 (RMSNorm · Attention+RoPE · SwiGLU)</text>
+  <line x1="350" y1="148" x2="350" y2="167" stroke="#52606D" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box2 build_packed (accent, the key step) -->
+  <rect x="80" y="169" width="540" height="158" rx="10" fill="#FDF0D5" stroke="#E0A23C" stroke-width="2.4"/>
+  <text x="104" y="194" class="t h" font-size="16"><tspan fill="#B9770E">[F4]</tspan> &#160;<tspan class="code">packed._build_packed</tspan> &#160;<tspan class="mut" font-weight="400" font-size="13">— Relax IR→IR</tspan></text>
+  <text x="104" y="214" class="mut" font-size="12.5" font-style="italic">레이아웃(tile/row)을 4D shape [Rt,Ct,64,64] + layout_transform op 에 구워넣음</text>
+  <text x="112" y="240" class="t" font-size="12.5">• &#160;matmul &#8594; tile einsum (64×64 MAC)</text>
+  <text x="112" y="262" class="t" font-size="12.5">• &#160;RoPE slice / concat / transpose &#8594; tile-native (hd=128)</text>
+  <text x="112" y="284" class="t" font-size="12.5">• &#160;weight · const &#8594; host-pack (미리 tile로 공급)</text>
+  <text x="112" y="306" class="t" font-size="12.5">• &#160;모르는 op &#8594; row island &#160;<tspan fill="#B9770E" class="h">(model-agnostic)</tspan></text>
+  <line x1="350" y1="327" x2="350" y2="346" stroke="#52606D" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box3 legalize -->
+  <rect x="80" y="348" width="540" height="44" rx="9" fill="#EEF1F4" stroke="#B8C2CC" stroke-width="1.5"/>
+  <text x="350" y="375" text-anchor="middle" class="t" font-size="13.5"><tspan class="code">relax.transform.LegalizeOps()</tspan> &#160;— Relax op &#8594; TIR <tspan class="code">call_tir</tspan></text>
+  <line x1="350" y1="392" x2="350" y2="411" stroke="#52606D" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box4 parse -->
+  <rect x="80" y="413" width="540" height="42" rx="9" fill="#E3F0FB" stroke="#7FB2E0" stroke-width="1.6"/>
+  <text x="350" y="439" text-anchor="middle" class="t" font-size="13.5"><tspan class="h" fill="#1B5E9C">[F5]</tspan> &#160;<tspan class="code">_parse</tspan> &#160;— op 리스트 + shape + 상수(위치 키잉)</text>
+  <line x1="350" y1="455" x2="350" y2="474" stroke="#52606D" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box5 plan_memory -->
+  <rect x="80" y="476" width="540" height="42" rx="9" fill="#E3F0FB" stroke="#7FB2E0" stroke-width="1.6"/>
+  <text x="350" y="502" text-anchor="middle" class="t" font-size="13.5"><tspan class="h" fill="#1B5E9C">[M1]</tspan> &#160;<tspan class="code">_plan_memory_packed</tspan> &#160;— G-buffer offset (A1 liveness 재사용)</text>
+  <line x1="350" y1="518" x2="350" y2="537" stroke="#52606D" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box6 emit -->
+  <rect x="80" y="539" width="540" height="58" rx="9" fill="#E3F0FB" stroke="#7FB2E0" stroke-width="1.6"/>
+  <text x="350" y="562" text-anchor="middle" class="t" font-size="13.5"><tspan class="h" fill="#1B5E9C">[C1]</tspan> &#160;<tspan class="code">_emit_packed</tspan> &#160;— shape rank로 tile(4D)/row(2D) 디스패치</text>
+  <text x="350" y="583" text-anchor="middle" class="mut" font-size="12">einsum&#8594;gemm(gather=0) · ew/reduce/broadcast 마커 · tile slice/concat/transpose</text>
+  <line x1="350" y1="597" x2="350" y2="616" stroke="#52606D" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Box7 output -->
+  <rect x="80" y="618" width="540" height="54" rx="9" fill="#EEF1F4" stroke="#B8C2CC" stroke-width="1.5"/>
+  <text x="350" y="641" text-anchor="middle" class="t h" font-size="14.5">출력 &#160;<tspan class="code" font-weight="400">Asm.words</tspan> (NPU ISA)</text>
+  <text x="350" y="661" text-anchor="middle" class="mut" font-size="12.5"><tspan class="code">runtime.run</tspan> (mysim c-model) 실행 &#8594; 결과</text>
+
+  <!-- ============ RIGHT: annotations ============ -->
+  <!-- Panel A: key properties -->
+  <rect x="680" y="169" width="520" height="172" rx="10" fill="#E9F6EC" stroke="#7BC488" stroke-width="1.8"/>
+  <text x="700" y="194" class="t h" font-size="15.5" fill="#217a3e">핵심 특성</text>
+  <text x="700" y="218" class="t" font-size="13">✔ &#160;<tspan class="h">model-agnostic</tspan> — Llama 전용 아님, 임의 모델 흐름</text>
+  <text x="700" y="240" class="t" font-size="13">✔ &#160;<tspan class="h">gather = 0 / scatter = 0</tspan> &#160;(전 config)</text>
+  <text x="700" y="262" class="t" font-size="13">✔ &#160;residual stream <tspan class="h">tile end-to-end</tspan></text>
+  <text x="700" y="284" class="t" font-size="13">✔ &#160;실 Llama <tspan class="h">hd=128: 명령 수 op-list의 0.55×</tspan></text>
+  <text x="718" y="303" class="mut" font-size="12">95,013 &#8594; 52,453 (더 적음), gather 없이</text>
+  <text x="700" y="326" class="t" font-size="13">✔ &#160;레이아웃 = 명시적 IR 변환 (side-channel dict 제거)</text>
+
+  <!-- Panel B: oracle / fallback -->
+  <rect x="680" y="357" width="520" height="104" rx="10" fill="#EEF1F4" stroke="#9AA5B1" stroke-width="1.8"/>
+  <text x="700" y="382" class="t h" font-size="15.5" fill="#3E4C59">검증 · 안전망 (공존)</text>
+  <text x="700" y="406" class="t" font-size="13"><tspan class="code h">compile_module</tspan> (op-list 경로) = <tspan class="h">byte-exact 수치 오라클</tspan></text>
+  <text x="700" y="428" class="t" font-size="13">+ sub-tile head-dim · decode 의 <tspan class="h">fallback</tspan></text>
+  <text x="700" y="450" class="mut" font-size="12.5">은퇴 아님 — packed 결과를 항상 op-list와 대조해 검증</text>
+
+  <!-- Panel C: why (ties to problem statement) -->
+  <rect x="680" y="477" width="520" height="195" rx="10" fill="#FBF6EA" stroke="#D9B26A" stroke-width="1.8"/>
+  <text x="700" y="502" class="t h" font-size="15.5" fill="#8a6d1f">왜 이 구조인가 (기존 문제 해결)</text>
+  <text x="700" y="527" class="mut" font-size="12.5">기존: 하나의 pass에 최적화가 뒤엉키고 Layer마다 하드코딩</text>
+  <text x="700" y="551" class="t" font-size="13">→ 레이아웃 · 메모리 · fusion 을 각각 <tspan class="h">명시적 IR pass</tspan>로 분리</text>
+  <text x="700" y="573" class="t" font-size="13">→ 최적화가 그래프 변환(IR→IR)이라 <tspan class="h">모델과 무관</tspan></text>
+  <text x="700" y="600" class="t" font-size="13">→ 이후 <tspan class="h">cost model(cycle 예측)</tspan>이 오면</text>
+  <text x="718" y="621" class="t" font-size="13"><tspan class="h">auto-scheduling 탐색</tspan>을 얹을 수 있는 표준 구조</text>
+  <text x="700" y="650" class="mut" font-size="12" font-style="italic">= 발표 (i) 기존 구조의 문제점을 직접 겨냥</text>
+
+  <!-- footer -->
+  <text x="1200" y="706" text-anchor="end" class="mut" font-size="11">compiler-v2 · report/figs/0803/packed_overview.svg</text>
+</svg>

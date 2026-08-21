@@ -288,6 +288,239 @@ def build_prefill_layer_module(cfg, S):
     return bb.finalize()
 
 
+def build_v3_prefill_layer_module(cfg, S, return_cache=False):
+    """Fused-projection prefill graph used by the vendor-streaming V3 compiler.
+
+    Q/K/V/O match the official checkpoint tensors directly.  The graph keeps
+    head slicing explicit for GQA/RoPE/attention, then concatenates all contexts
+    before one official ``o_proj`` matmul.
+    """
+    D, H, KV, HD, F = cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
+    if H * HD != D:
+        raise ValueError(f"V3 fused Q/O require H*HD == D, got {H}*{HD} != {D}")
+    GPK = H // KV
+    op = relax.op
+    x = _P("x", (S, D))
+    Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
+    Wq = _P("Wq", (D, D)); Wk = _P("Wk", (D, KV * HD))
+    Wv = _P("Wv", (D, KV * HD)); Wo = _P("Wo", (D, D))
+    Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
+    params = [x, Wn1, Wn2, Wq, Wk, Wv, Wo, Wg, Wu, Wd]
+    pos_c = _pos_ramp_c(S); freqs_c = _rope_freqs_c(cfg)
+    scale_c = _const(np.full((S, S), 1.0 / float(np.sqrt(HD))))
+    mask_c = _const(legalize.causal_mask(S))
+
+    def head_slice(bb, tensor, index):
+        return bb.emit(op.strided_slice(
+            tensor, axes=[1], begin=[index * HD], end=[(index + 1) * HD]))
+
+    bb = relax.BlockBuilder()
+    with bb.function("main", params):
+        with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos_c, freqs_c, S, HD)
+            xn = rms_norm_(bb, x, Wn1, S, D, cfg.eps)
+            q_all = bb.emit(op.matmul(xn, Wq))
+            k_all = bb.emit(op.matmul(xn, Wk))
+            v_all = bb.emit(op.matmul(xn, Wv))
+            keys, kt, values = [], [], []
+            for kv in range(KV):
+                key = legalize.rope(bb, head_slice(bb, k_all, kv), cos, sin)
+                keys.append(key)
+                kt.append(bb.emit(op.permute_dims(key, axes=[1, 0])))
+                values.append(head_slice(bb, v_all, kv))
+            contexts = []
+            for head in range(H):
+                query = legalize.rope(bb, head_slice(bb, q_all, head), cos, sin)
+                score = bb.emit(op.matmul(query, kt[head // GPK]))
+                score = bb.emit(op.multiply(score, scale_c))
+                score = bb.emit(op.add(score, mask_c))
+                probability = legalize.softmax_lastdim(bb, score, S, S)
+                contexts.append(bb.emit(op.matmul(probability, values[head // GPK])))
+            context = bb.emit(op.concat(contexts, axis=1))
+            attention = bb.emit(op.matmul(context, Wo))
+            y = _residual_ffn(bb, x, attention, Wn2, Wg, Wu, Wd, S, D, F, cfg.eps)
+            if return_cache:
+                outputs = [y]
+                for kv in range(KV):
+                    outputs.extend((keys[kv], values[kv]))
+                y = bb.emit(op.concat(outputs, axis=1))
+            gv = bb.emit_output(y)
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
+def build_v3_decode_kv_module(cfg):
+    """Official fused K/V projection for one token, including RoPE on K."""
+    D, KV, HD = cfg.D, cfg.KV, cfg.HD
+    op = relax.op
+    x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D))
+    Wk = _P("Wk", (D, KV * HD)); Wv = _P("Wv", (D, KV * HD))
+    pos = _P("pos", (1, 1))
+    freqs_c = _rope_freqs_c(cfg)
+
+    def head_slice(bb, tensor, index):
+        return bb.emit(op.strided_slice(
+            tensor, axes=[1], begin=[index * HD], end=[(index + 1) * HD]))
+
+    bb = relax.BlockBuilder()
+    with bb.function("main", [x, Wn1, Wk, Wv, pos]):
+        with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
+            xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
+            k_all = bb.emit(op.matmul(xn, Wk))
+            v_all = bb.emit(op.matmul(xn, Wv))
+            outputs = []
+            for kv in range(KV):
+                key = legalize.rope(bb, head_slice(bb, k_all, kv), cos, sin)
+                outputs.extend((key, head_slice(bb, v_all, kv)))
+            gv = bb.emit_output(bb.emit(op.concat(outputs, axis=1)))
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
+def build_v3_decode_layer_module(cfg, context):
+    """One official fused decode layer over an exact-length populated KV cache.
+
+    K/V for the current token must already be appended by the host.  Using the
+    exact context length removes padded cache slots and the runtime mask while
+    keeping every address and loop bound static for the NPU program.
+    """
+    D, H, KV, HD, F = cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
+    context = int(context)
+    if context < 1:
+        raise ValueError("decode context must be positive")
+    if H * HD != D:
+        raise ValueError(f"V3 fused Q/O require H*HD == D, got {H}*{HD} != {D}")
+    GPK = H // KV
+    op = relax.op
+    x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
+    Wq = _P("Wq", (D, D)); Wo = _P("Wo", (D, D))
+    kt = [_P(f"Kt{kv}", (HD, context)) for kv in range(KV)]
+    values = [_P(f"Vc{kv}", (context, HD)) for kv in range(KV)]
+    pos = _P("pos", (1, 1))
+    Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
+    params = [x, Wn1, Wn2, Wq, Wo] + kt + values + [pos, Wg, Wu, Wd]
+    freqs_c = _rope_freqs_c(cfg)
+    scale_c = _const(np.full((1, context), 1.0 / float(np.sqrt(HD))))
+
+    def head_slice(bb, tensor, index):
+        return bb.emit(op.strided_slice(
+            tensor, axes=[1], begin=[index * HD], end=[(index + 1) * HD]))
+
+    bb = relax.BlockBuilder()
+    with bb.function("main", params):
+        with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
+            xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
+            q_all = bb.emit(op.matmul(xn, Wq))
+            contexts = []
+            for head in range(H):
+                query = legalize.rope(bb, head_slice(bb, q_all, head), cos, sin)
+                score = bb.emit(op.matmul(query, kt[head // GPK]))
+                score = bb.emit(op.multiply(score, scale_c))
+                probability = legalize.softmax_lastdim(bb, score, 1, context)
+                contexts.append(bb.emit(op.matmul(probability, values[head // GPK])))
+            context_row = bb.emit(op.concat(contexts, axis=1))
+            attention = bb.emit(op.matmul(context_row, Wo))
+            output = _residual_ffn(
+                bb, x, attention, Wn2, Wg, Wu, Wd, 1, D, F, cfg.eps)
+            gv = bb.emit_output(output)
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
+def build_v3_decode_fused_layer_module(cfg, context):
+    """One decode layer as a single program: K/V projection + cache append +
+    attention/FFN, so no host work is needed inside a layer.
+
+    The ``Kt{kv}``/``Vc{kv}`` inputs hold the previous ``context-1`` positions.
+    The program computes the current token's roped K/V, concatenates it into
+    each head's cache on-device (the append target is a static address because
+    ``context`` is compile-time constant), runs attention over the full
+    ``context``, and returns ``[y, K0,V0,...]`` so the host can extend every
+    layer's cache once per decode step.
+    """
+    D, H, KV, HD, F = cfg.D, cfg.H, cfg.KV, cfg.HD, cfg.F
+    context = int(context)
+    if context < 2:
+        raise ValueError("fused decode needs at least one cached position")
+    if H * HD != D:
+        raise ValueError(f"V3 fused Q/O require H*HD == D, got {H}*{HD} != {D}")
+    GPK = H // KV
+    op = relax.op
+    x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
+    Wq = _P("Wq", (D, D)); Wk = _P("Wk", (D, KV * HD))
+    Wv = _P("Wv", (D, KV * HD)); Wo = _P("Wo", (D, D))
+    kt = [_P(f"Kt{kv}", (HD, context - 1)) for kv in range(KV)]
+    values = [_P(f"Vc{kv}", (context - 1, HD)) for kv in range(KV)]
+    pos = _P("pos", (1, 1))
+    Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
+    params = [x, Wn1, Wn2, Wq, Wk, Wv, Wo] + kt + values + [pos, Wg, Wu, Wd]
+    freqs_c = _rope_freqs_c(cfg)
+    scale_c = _const(np.full((1, context), 1.0 / float(np.sqrt(HD))))
+
+    def head_slice(bb, tensor, index):
+        return bb.emit(op.strided_slice(
+            tensor, axes=[1], begin=[index * HD], end=[(index + 1) * HD]))
+
+    bb = relax.BlockBuilder()
+    with bb.function("main", params):
+        with bb.dataflow():
+            cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
+            xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
+            q_all = bb.emit(op.matmul(xn, Wq))
+            k_all = bb.emit(op.matmul(xn, Wk))
+            v_all = bb.emit(op.matmul(xn, Wv))
+            new_kv, kt_full, v_full = [], [], []
+            for kv in range(KV):
+                key = legalize.rope(bb, head_slice(bb, k_all, kv), cos, sin)     # [1,HD]
+                value = head_slice(bb, v_all, kv)                                # [1,HD]
+                key_col = bb.emit(op.permute_dims(key, axes=[1, 0]))             # [HD,1]
+                kt_full.append(bb.emit(op.concat([kt[kv], key_col], axis=1)))    # [HD,context]
+                # concat is last-axis only: append V through its transpose.
+                vt_old = bb.emit(op.permute_dims(values[kv], axes=[1, 0]))       # [HD,context-1]
+                value_col = bb.emit(op.permute_dims(value, axes=[1, 0]))         # [HD,1]
+                vt_full = bb.emit(op.concat([vt_old, value_col], axis=1))        # [HD,context]
+                v_full.append(bb.emit(op.permute_dims(vt_full, axes=[1, 0])))    # [context,HD]
+                new_kv.extend((key, value))
+            contexts = []
+            for head in range(H):
+                query = legalize.rope(bb, head_slice(bb, q_all, head), cos, sin)
+                score = bb.emit(op.matmul(query, kt_full[head // GPK]))
+                score = bb.emit(op.multiply(score, scale_c))
+                probability = legalize.softmax_lastdim(bb, score, 1, context)
+                contexts.append(bb.emit(op.matmul(probability, v_full[head // GPK])))
+            context_row = bb.emit(op.concat(contexts, axis=1))
+            attention = bb.emit(op.matmul(context_row, Wo))
+            y = _residual_ffn(bb, x, attention, Wn2, Wg, Wu, Wd, 1, D, F, cfg.eps)
+            gv = bb.emit_output(bb.emit(op.concat([y] + new_kv, axis=1)))
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
+def build_v3_final_norm_module(cfg, S):
+    """Final model RMSNorm over all prefill positions."""
+    x = _P("x", (S, cfg.D)); weight = _P("weight", (1, cfg.D))
+    bb = relax.BlockBuilder()
+    with bb.function("main", [x, weight]):
+        with bb.dataflow():
+            output = rms_norm_(bb, x, weight, S, cfg.D, cfg.eps)
+            gv = bb.emit_output(output)
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
+def build_v3_lm_head_module(cfg):
+    """Last-position hidden state -> tied vocabulary logits."""
+    x = _P("x", (1, cfg.D)); weight = _P("weight", (cfg.D, 128256))
+    bb = relax.BlockBuilder()
+    with bb.function("main", [x, weight]):
+        with bb.dataflow():
+            gv = bb.emit_output(bb.emit(relax.op.matmul(x, weight)))
+        bb.emit_func_output(gv)
+    return bb.finalize()
+
+
 def build_attn_ffn_module(cfg, MAX):
     """Decode kernel 2: x_new[1,D] + Kt[HD,MAX]/Vc[MAX,HD] (+ runtime mask) -> y[1,D].
     Attention runs over the whole MAX cache; `mask` zeros slots j>pos."""
