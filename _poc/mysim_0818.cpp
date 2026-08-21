@@ -323,7 +323,12 @@ private:
         if (mode == 1) {
             return read_g(immediate);
         }
-        return static_cast<float>(static_cast<std::int16_t>(immediate));
+        // Vendor quirk: the sign-extended immediate is reinterpreted as uint32,
+        // so a negative immediate becomes ~4.29e9 (0xFFFD -> 4294967293.0f).
+        // Only 0..32767 behave as written.  (Verified against a.out; the shift
+        // amount path is NOT affected and stays signed.)
+        return static_cast<float>(static_cast<std::uint32_t>(
+            static_cast<std::int16_t>(immediate)));
     }
 
     void matmul(std::uint32_t instruction, unsigned activation) {
@@ -480,7 +485,10 @@ private:
                 broadcast_address_ = replace_half(broadcast_address_, value, high);
                 scalar = read_g(broadcast_address_);
             } else {
-                scalar = static_cast<float>(static_cast<std::int16_t>(value));
+                // Same uint32 reinterpretation quirk as the elementwise
+                // immediate path (negative broadcast immediates become huge).
+                scalar = static_cast<float>(static_cast<std::uint32_t>(
+                    static_cast<std::int16_t>(value)));
             }
             output_.assign(vector_length_, scalar);
             output_rows_ = 1;

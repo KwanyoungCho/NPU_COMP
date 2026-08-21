@@ -91,6 +91,7 @@
 | V3-027 | RESOLVED | BLOCKER | LM head 논리 stride 128256이 matrix descriptor의 16-bit `main_cols`를 넘어 source logits 오염 | ISA/C-model field는 바꾸지 않고 RHS를 연속 `[K,64]` column panel로 pack하는 단일-program GEMM lowering 구현 |
 | V3-028 | RESOLVED | HIGH | 첫 expanded full prefill에서 transformer hidden은 정상이지만 잘못 lowering된 LM head가 token 7272 출력 | panel LM 재실행 token 358, HF logits cosine 0.999993. 잘못된 state token/logits만 교체 후 cache는 그대로 decode에 사용 |
 | V3-029 | RESOLVED | BLOCKER | official 3B KV-cache autoregressive decode가 V3에 연결되지 않음 | prompt cache seed 후 position 7/8 exact-context decode, cache append, final norm/LM head 수행. HF와 `[358,2846,4560]` 일치 |
+| V3-030 | RESOLVED | MEDIUM | (2026-08-21 발견) vendor의 elementwise/broadcast **immediate 음수 처리 버그**: 부호확장된 int16이 uint32로 재해석되어 0xFFFD(-3)가 ~4.29e9가 됨 (add→inf, ×0→0, ÷→0). shift(0x09) amount 경로는 정상(signed). 우리 source C-model은 올바르게 부호확장하고 있어 parity가 어긋나 있었음 | source C-model을 vendor 버그와 동일하게 수정하고 음수 immediate parity 테스트 추가(`test_negative_immediate_parity`). compiler는 arithmetic immediate를 `m_add(IMM, 0)` 두 곳(값 0)에서만 사용하고 모든 실수 상수는 FP16 memory 상수로 공급하므로 모델 결과 무영향 |
 
 ---
 
@@ -608,6 +609,22 @@ ver.08 프로그램으로 수행되었고, host는 gather/layout/argmax만 담�
 
 **⑦ activation field 예약값 `01`이 GELU로 동작**
 - 예약값의 동작을 정의하거나 거부해야 함. (실행기 관찰로 발견)
+
+**⑨ (2026-08-21 발견) elementwise/broadcast immediate의 음수 처리 버그 [V3-030]**
+- 현상: 부호확장된 int16 immediate가 **uint32로 재해석**됨.
+  `0xFFFD`(-3 의도) → 4,294,967,293.0f. 실측(vendor a.out):
+  `10 + (-3)` → inf, `0.5 × (-3)` → inf, `0 × (-3)` → 0, `10 ÷ (-3)` → 0,
+  `1000 - (-3)` → -inf. broadcast(0x15) IMM mode도 동일 버그.
+  **shift(0x09)의 amount는 정상적으로 signed 처리됨** (64, amount 0xFFFF → 32).
+- 결과: immediate로 표현 가능한 유효 범위는 사실상 **0..32767뿐**.
+- 우리 대응: compiler는 arithmetic immediate를 identity용 `0` 하나만 사용하고
+  모든 실수 상수(eps, scale, mask)는 FP16 memory 상수로 공급하므로 무영향.
+  source C-model은 부호확장으로 "올바르게" 구현되어 있던 것을 vendor 버그와
+  동일하게 재수정하고 음수 immediate parity 회귀를 추가함.
+- 권고: immediate를 **signed int16으로 정의하고 변환을 수정**하거나, 음수를
+  거부(오류)하도록. 어느 쪽이든 스펙에 유효 범위를 명시할 것. (부동소수점
+  상수가 어차피 immediate로 표현 불가한 정수 값 semantics이므로, LLM 용도만
+  보면 "unsigned 0..32767 + 문서화"로도 충분함)
 
 **⑧ FP16 저장 경계로 인한 overflow class [V3-020 실사고, G4-005]**
 - PE 내부는 float32이나 모든 중간 tensor가 FP16으로 저장되므로,

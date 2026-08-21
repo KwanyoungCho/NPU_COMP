@@ -142,6 +142,44 @@ def test_targeted_vendor_quirks():
         tmp.cleanup()
 
 
+def test_negative_immediate_parity():
+    """Vendor quirk: sign-extended immediates are reinterpreted as uint32, so
+    negative elementwise/broadcast immediates become ~4.29e9 (add -> inf, x0 ->
+    0, div -> 0).  The shift amount path is NOT affected and stays signed."""
+    tmp, source = _source_binary()
+    gbuf = np.zeros(GBUF_CAPACITY, dtype=np.float32)
+    gbuf[0:4] = [10.0, -1000.0, 0.5, 0.0]
+
+    def program(build):
+        asm = Asm()
+        asm.addr(SRC1, 0)
+        asm.vlen(4)
+        asm.load(0, SRC1)
+        build(asm)
+        asm.addr(DST, 10)
+        asm.save(0)
+        asm.finish()
+        return asm
+
+    cases = [
+        ("add", lambda a: a.v_add(IMM, 0xFFFD)),
+        ("sub", lambda a: a.v_sub(IMM, 0xFFFD)),
+        ("mul", lambda a: a.v_mul(IMM, 0xFFFD)),
+        ("div", lambda a: a.v_div(IMM, 0xFFFD)),
+        ("add_pos", lambda a: a.v_add(IMM, 3)),
+        ("broadcast_imm", lambda a: a.v_broadcast(IMM, 0xFFFD)),
+        ("shift_neg", lambda a: a.v_shift(0xFFFF, IMM)),
+    ]
+    for name, build in cases:
+        vendor = _assert_parity(program(build), gbuf, source)
+        assert vendor.shape[0] >= 14, name
+    # Spot-check the quirk itself on the parity result: add(-3 as 0xFFFD) on
+    # 10.0 must overflow to inf, while the signed interpretation would give 7.
+    quirk = _assert_parity(program(lambda a: a.v_add(IMM, 0xFFFD)), gbuf, source)
+    assert np.isinf(quirk[10])
+    tmp.cleanup()
+
+
 def test_all_supplied_program_snapshots():
     tmp, source = _source_binary()
     try:
@@ -190,6 +228,7 @@ def test_process_exit_does_not_implicitly_save():
 
 if __name__ == "__main__":
     test_targeted_vendor_quirks()
+    test_negative_immediate_parity()
     test_all_supplied_program_snapshots()
     test_program_file_is_not_limited_to_32768_words()
     test_process_exit_does_not_implicitly_save()
