@@ -254,5 +254,12 @@ class RelaxVendorPlan:
 
 
 def compile_module(mod, func_name="main"):
-    """Compile a Relax function into a fixed-buffer vendor execution plan."""
+    """Compile a Relax function into a fixed-buffer vendor execution plan.
+
+    High-level nn ops are lowered to the primitive mix first (a no-op for
+    already-primitive graphs); the full optimization pipeline is deliberately
+    not applied so this oracle keeps the historical streaming semantics.
+    """
+    from .passes import LowerToNPUPrimitives
+    mod = LowerToNPUPrimitives()(mod)
     return RelaxVendorPlan(mod[func_name])

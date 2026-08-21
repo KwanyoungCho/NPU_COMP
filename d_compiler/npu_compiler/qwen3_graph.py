@@ -13,7 +13,7 @@ import numpy as np
 from tvm import relax
 
 from . import legalize
-from .gemma4_graph import banded_causal_mask, gemma_freqs_row
+from .gemma4_graph import _rms, _softmax, banded_causal_mask, gemma_freqs_row
 
 
 def _c(value):
@@ -37,12 +37,12 @@ def _common_params(spec, layer_index, S):
     HD = attention.head_dim
     return layer, attention, D, HD, {
         "x": _P("x", (S, D)),
-        "Wn1": _P("Wn1", (1, D)),
-        "Wn2": _P("Wn2", (1, D)),
+        "Wn1": _P("Wn1", (D,)),
+        "Wn2": _P("Wn2", (D,)),
         "Wq": _P("Wq", (D, attention.num_query_heads * HD)),
-        "Wqn": _P("Wqn", (1, HD)),
+        "Wqn": _P("Wqn", (HD,)),
         "Wk": _P("Wk", (D, attention.num_kv_heads * HD)),
-        "Wkn": _P("Wkn", (1, HD)),
+        "Wkn": _P("Wkn", (HD,)),
         "Wv": _P("Wv", (D, attention.num_kv_heads * HD)),
         "Wo": _P("Wo", (attention.num_query_heads * HD, D)),
         "Wg": _P("Wg", (D, layer.ffn_hidden)),
@@ -77,14 +77,14 @@ def build_qwen3_prefill_layer_module(spec, layer_index, S, return_cache=True):
     with bb.function("main", params):
         with bb.dataflow():
             cos, sin = legalize.rope_cos_sin(bb, pos_c, freqs_c, S, HD)
-            xn = legalize.rms_norm(bb, p["x"], p["Wn1"], S, D, eps=eps)
+            xn = _rms(bb, p["x"], p["Wn1"], eps)
             q_all = bb.emit(op.matmul(xn, p["Wq"]))
             k_all = bb.emit(op.matmul(xn, p["Wk"]))
             v_all = bb.emit(op.matmul(xn, p["Wv"]))
             keys, kt, values = [], [], []
             for kv in range(KV):
                 key = head_slice(bb, k_all, kv)
-                key = legalize.rms_norm(bb, key, p["Wkn"], S, HD, eps=eps)
+                key = _rms(bb, key, p["Wkn"], eps)
                 key = legalize.rope(bb, key, cos, sin)
                 keys.append(key)
                 kt.append(bb.emit(op.permute_dims(key, axes=[1, 0])))
@@ -92,17 +92,17 @@ def build_qwen3_prefill_layer_module(spec, layer_index, S, return_cache=True):
             contexts = []
             for head in range(H):
                 query = head_slice(bb, q_all, head)
-                query = legalize.rms_norm(bb, query, p["Wqn"], S, HD, eps=eps)
+                query = _rms(bb, query, p["Wqn"], eps)
                 query = legalize.rope(bb, query, cos, sin)
                 score = bb.emit(op.matmul(query, kt[head // GPK]))
                 score = bb.emit(op.multiply(score, scale_c))
                 score = bb.emit(op.add(score, mask_c))
-                probability = legalize.softmax_lastdim(bb, score, S, S)
+                probability = _softmax(bb, score)
                 contexts.append(bb.emit(op.matmul(probability, values[head // GPK])))
             attention_out = bb.emit(op.matmul(
                 bb.emit(op.concat(contexts, axis=1)), p["Wo"]))
             h1 = bb.emit(op.add(p["x"], attention_out))
-            hn = legalize.rms_norm(bb, h1, p["Wn2"], S, D, eps=eps)
+            hn = _rms(bb, h1, p["Wn2"], eps)
             ffn = legalize.swiglu(bb, hn, p["Wg"], p["Wu"], p["Wd"], S, D, F)
             y = bb.emit(op.add(h1, ffn))
             if return_cache:
@@ -146,14 +146,14 @@ def build_qwen3_decode_layer_module(spec, layer_index, context):
     with bb.function("main", params):
         with bb.dataflow():
             cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
-            xn = legalize.rms_norm(bb, p["x"], p["Wn1"], 1, D, eps=eps)
+            xn = _rms(bb, p["x"], p["Wn1"], eps)
             q_all = bb.emit(op.matmul(xn, p["Wq"]))
             k_all = bb.emit(op.matmul(xn, p["Wk"]))
             v_all = bb.emit(op.matmul(xn, p["Wv"]))
             new_kv, kt_full, v_full = [], [], []
             for kv in range(KV):
                 key = head_slice(bb, k_all, kv)
-                key = legalize.rms_norm(bb, key, p["Wkn"], 1, HD, eps=eps)
+                key = _rms(bb, key, p["Wkn"], eps)
                 key = legalize.rope(bb, key, cos, sin)                  # [1,HD]
                 value = head_slice(bb, v_all, kv)                        # [1,HD]
                 key_col = bb.emit(op.permute_dims(key, axes=[1, 0]))
@@ -166,16 +166,16 @@ def build_qwen3_decode_layer_module(spec, layer_index, context):
             contexts = []
             for head in range(H):
                 query = head_slice(bb, q_all, head)
-                query = legalize.rms_norm(bb, query, p["Wqn"], 1, HD, eps=eps)
+                query = _rms(bb, query, p["Wqn"], eps)
                 query = legalize.rope(bb, query, cos, sin)
                 score = bb.emit(op.matmul(query, kt_full[head // GPK]))
                 score = bb.emit(op.multiply(score, scale_c))
-                probability = legalize.softmax_lastdim(bb, score, 1, context)
+                probability = _softmax(bb, score)
                 contexts.append(bb.emit(op.matmul(probability, v_full[head // GPK])))
             attention_out = bb.emit(op.matmul(
                 bb.emit(op.concat(contexts, axis=1)), p["Wo"]))
             h1 = bb.emit(op.add(p["x"], attention_out))
-            hn = legalize.rms_norm(bb, h1, p["Wn2"], 1, D, eps=eps)
+            hn = _rms(bb, h1, p["Wn2"], eps)
             ffn = legalize.swiglu(bb, hn, p["Wg"], p["Wu"], p["Wd"], 1, D, F)
             y = bb.emit(op.add(h1, ffn))
             gv = bb.emit_output(bb.emit(op.concat([y] + new_kv, axis=1)))
@@ -186,11 +186,10 @@ def build_qwen3_decode_layer_module(spec, layer_index, context):
 def build_qwen3_final_norm_module(spec, S):
     """Final model RMSNorm over S positions."""
     x = _P("x", (S, spec.hidden_size))
-    weight = _P("weight", (1, spec.hidden_size))
+    weight = _P("weight", (spec.hidden_size,))
     bb = relax.BlockBuilder()
     with bb.function("main", [x, weight]):
         with bb.dataflow():
-            gv = bb.emit_output(legalize.rms_norm(
-                bb, x, weight, S, spec.hidden_size, eps=spec.rms_norm_eps))
+            gv = bb.emit_output(_rms(bb, x, weight, spec.rms_norm_eps))
         bb.emit_func_output(gv)
     return bb.finalize()

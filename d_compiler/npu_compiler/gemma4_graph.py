@@ -21,6 +21,20 @@ def _P(name, shape):
     return relax.Var(name, relax.TensorStructInfo(list(shape), "float16"))
 
 
+def _rms(bb, x, w, eps):
+    """High-level RMSNorm; passes.LowerToNPUPrimitives expands it (an all-ones
+    constant weight lowers to the weight-less V-norm form)."""
+    return bb.emit(relax.op.nn.rms_norm(x, w, axes=[-1], epsilon=eps))
+
+
+def _softmax(bb, s):
+    return bb.emit(relax.op.nn.softmax(s, axis=-1))
+
+
+def _gelu(bb, x):
+    return bb.emit(relax.op.nn.gelu_tanh(x))
+
+
 def gemma_freqs_row(attention):
     """Half-duplicated RoPE frequency row [1,HD] for one attention spec.
 
@@ -51,19 +65,16 @@ def _layer_tail(bb, x, attention_out, p, S, D, F, Pd, eps):
     """Shared post-attention chain: post-attn norm/residual, gated tanh-GELU
     MLP with post-FFN norm/residual, PLE injection, and layer scalar."""
     op = relax.op
-    h1 = bb.emit(op.add(
-        x, legalize.rms_norm(bb, attention_out, p["Wn2"], S, D, eps=eps)))
-    f = legalize.rms_norm(bb, h1, p["Wn3"], S, D, eps=eps)
-    gate = legalize.gelu_tanh(bb, bb.emit(op.matmul(f, p["Wg"])), S, F)
+    h1 = bb.emit(op.add(x, _rms(bb, attention_out, p["Wn2"], eps)))
+    f = _rms(bb, h1, p["Wn3"], eps)
+    gate = _gelu(bb, bb.emit(op.matmul(f, p["Wg"])))
     up = bb.emit(op.matmul(f, p["Wu"]))
     ffn = bb.emit(op.matmul(bb.emit(op.multiply(gate, up)), p["Wd"]))
-    h2 = bb.emit(op.add(
-        h1, legalize.rms_norm(bb, ffn, p["Wn4"], S, D, eps=eps)))
-    gate2 = legalize.gelu_tanh(bb, bb.emit(op.matmul(h2, p["Wpg"])), S, Pd)
+    h2 = bb.emit(op.add(h1, _rms(bb, ffn, p["Wn4"], eps)))
+    gate2 = _gelu(bb, bb.emit(op.matmul(h2, p["Wpg"])))
     gated = bb.emit(op.multiply(gate2, p["pli"]))
     projected = bb.emit(op.matmul(gated, p["Wpp"]))
-    h3 = bb.emit(op.add(
-        h2, legalize.rms_norm(bb, projected, p["Wn5"], S, D, eps=eps)))
+    h3 = bb.emit(op.add(h2, _rms(bb, projected, p["Wn5"], eps)))
     scale = bb.emit(op.broadcast_to(p["ls"], relax.ShapeExpr([S, D])))
     return bb.emit(op.multiply(h3, scale))
 
@@ -93,16 +104,16 @@ def build_gemma4_prefill_layer_module(spec, layer_index, S, return_cache=True):
 
     x = _P("x", (S, D))
     pli = _P("pli", (S, Pd))
-    Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D)); Wn3 = _P("Wn3", (1, D))
-    Wn4 = _P("Wn4", (1, D)); Wn5 = _P("Wn5", (1, D))
-    Wq = _P("Wq", (D, H * HD)); Wqn = _P("Wqn", (1, HD))
+    Wn1 = _P("Wn1", (D,)); Wn2 = _P("Wn2", (D,)); Wn3 = _P("Wn3", (D,))
+    Wn4 = _P("Wn4", (D,)); Wn5 = _P("Wn5", (D,))
+    Wq = _P("Wq", (D, H * HD)); Wqn = _P("Wqn", (HD,))
     Wo = _P("Wo", (H * HD, D))
     Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
     Wpg = _P("Wpg", (D, Pd)); Wpp = _P("Wpp", (Pd, D))
     ls = _P("ls", (1, 1))
     params = [x, pli, Wn1, Wn2, Wn3, Wn4, Wn5, Wq, Wqn]
     if owner:
-        Wk = _P("Wk", (D, HD)); Wkn = _P("Wkn", (1, HD)); Wv = _P("Wv", (D, HD))
+        Wk = _P("Wk", (D, HD)); Wkn = _P("Wkn", (HD,)); Wv = _P("Wv", (D, HD))
         params += [Wk, Wkn, Wv]
     else:
         Kt = _P("Kt", (HD, S)); Vc = _P("Vc", (S, HD))
@@ -122,25 +133,25 @@ def build_gemma4_prefill_layer_module(spec, layer_index, S, return_cache=True):
     with bb.function("main", params):
         with bb.dataflow():
             cos, sin = legalize.rope_cos_sin(bb, pos_c, freqs_c, S, HD)
-            xn = legalize.rms_norm(bb, x, Wn1, S, D, eps=eps)
+            xn = _rms(bb, x, Wn1, eps)
             q_all = bb.emit(op.matmul(xn, Wq))
             if owner:
                 key = bb.emit(op.matmul(xn, Wk))
-                key = legalize.rms_norm(bb, key, Wkn, S, HD, eps=eps)
+                key = _rms(bb, key, Wkn, eps)
                 key = legalize.rope(bb, key, cos, sin)
                 value = bb.emit(op.matmul(xn, Wv))
-                value = legalize.rms_norm(bb, value, None, S, HD, eps=eps)
+                value = _rms(bb, value, _c(np.ones(HD)), eps)
                 kt = bb.emit(op.permute_dims(key, axes=[1, 0]))
             else:
                 kt, value = Kt, Vc
             contexts = []
             for head in range(H):
                 query = head_slice(bb, q_all, head)
-                query = legalize.rms_norm(bb, query, Wqn, S, HD, eps=eps)
+                query = _rms(bb, query, Wqn, eps)
                 query = legalize.rope(bb, query, cos, sin)
                 score = bb.emit(op.matmul(query, kt))          # scale is 1.0
                 score = bb.emit(op.add(score, mask_c))
-                probability = legalize.softmax_lastdim(bb, score, S, S)
+                probability = _softmax(bb, score)
                 contexts.append(bb.emit(op.matmul(probability, value)))
             attention_out = bb.emit(op.matmul(
                 bb.emit(op.concat(contexts, axis=1)), Wo))
@@ -186,9 +197,9 @@ def build_gemma4_decode_layer_module(spec, layer_index, context):
 
     x = _P("x", (1, D))
     pli = _P("pli", (1, Pd))
-    Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D)); Wn3 = _P("Wn3", (1, D))
-    Wn4 = _P("Wn4", (1, D)); Wn5 = _P("Wn5", (1, D))
-    Wq = _P("Wq", (D, H * HD)); Wqn = _P("Wqn", (1, HD))
+    Wn1 = _P("Wn1", (D,)); Wn2 = _P("Wn2", (D,)); Wn3 = _P("Wn3", (D,))
+    Wn4 = _P("Wn4", (D,)); Wn5 = _P("Wn5", (D,))
+    Wq = _P("Wq", (D, H * HD)); Wqn = _P("Wqn", (HD,))
     Wo = _P("Wo", (H * HD, D))
     Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
     Wpg = _P("Wpg", (D, Pd)); Wpp = _P("Wpp", (Pd, D))
@@ -196,7 +207,7 @@ def build_gemma4_decode_layer_module(spec, layer_index, context):
     pos = _P("pos", (1, 1))
     params = [x, pli, Wn1, Wn2, Wn3, Wn4, Wn5, Wq, Wqn]
     if owner:
-        Wk = _P("Wk", (D, HD)); Wkn = _P("Wkn", (1, HD)); Wv = _P("Wv", (D, HD))
+        Wk = _P("Wk", (D, HD)); Wkn = _P("Wkn", (HD,)); Wv = _P("Wv", (D, HD))
         Kt = _P("Kt", (HD, context - 1)); Vc = _P("Vc", (context - 1, HD))
         params += [Wk, Wkn, Wv, Kt, Vc]
     else:
@@ -213,14 +224,14 @@ def build_gemma4_decode_layer_module(spec, layer_index, context):
     with bb.function("main", params):
         with bb.dataflow():
             cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
-            xn = legalize.rms_norm(bb, x, Wn1, 1, D, eps=eps)
+            xn = _rms(bb, x, Wn1, eps)
             q_all = bb.emit(op.matmul(xn, Wq))
             if owner:
                 key = bb.emit(op.matmul(xn, Wk))
-                key = legalize.rms_norm(bb, key, Wkn, 1, HD, eps=eps)
+                key = _rms(bb, key, Wkn, eps)
                 key = legalize.rope(bb, key, cos, sin)                  # [1,HD]
                 value = bb.emit(op.matmul(xn, Wv))
-                value = legalize.rms_norm(bb, value, None, 1, HD, eps=eps)
+                value = _rms(bb, value, _c(np.ones(HD)), eps)
                 key_col = bb.emit(op.permute_dims(key, axes=[1, 0]))    # [HD,1]
                 kt_full = bb.emit(op.concat([Kt, key_col], axis=1))     # [HD,ctx]
                 vt_old = bb.emit(op.permute_dims(Vc, axes=[1, 0]))
@@ -232,10 +243,10 @@ def build_gemma4_decode_layer_module(spec, layer_index, context):
             contexts = []
             for head in range(H):
                 query = head_slice(bb, q_all, head)
-                query = legalize.rms_norm(bb, query, Wqn, 1, HD, eps=eps)
+                query = _rms(bb, query, Wqn, eps)
                 query = legalize.rope(bb, query, cos, sin)
                 score = bb.emit(op.matmul(query, kt_full))              # scale 1.0
-                probability = legalize.softmax_lastdim(bb, score, 1, context)
+                probability = _softmax(bb, score)
                 contexts.append(bb.emit(op.matmul(probability, v_full)))
             attention_out = bb.emit(op.matmul(
                 bb.emit(op.concat(contexts, axis=1)), Wo))
@@ -253,12 +264,11 @@ def build_gemma4_decode_layer_module(spec, layer_index, context):
 def build_gemma4_final_norm_module(spec, S):
     """Final model RMSNorm over S positions."""
     x = _P("x", (S, spec.hidden_size))
-    weight = _P("weight", (1, spec.hidden_size))
+    weight = _P("weight", (spec.hidden_size,))
     bb = relax.BlockBuilder()
     with bb.function("main", [x, weight]):
         with bb.dataflow():
-            gv = bb.emit_output(legalize.rms_norm(
-                bb, x, weight, S, spec.hidden_size, eps=spec.rms_norm_eps))
+            gv = bb.emit_output(_rms(bb, x, weight, spec.rms_norm_eps))
         bb.emit_func_output(gv)
     return bb.finalize()
 
@@ -279,7 +289,7 @@ def build_gemma4_ple_module(spec, S):
     se = _P("se", (S, D))
     tok = _P("tok", (S, width))
     Wproj = _P("Wproj", (D, width))
-    Wn = _P("Wn", (1, Pd))
+    Wn = _P("Wn", (Pd,))
     bb = relax.BlockBuilder()
     with bb.function("main", [se, tok, Wproj, Wn]):
         with bb.dataflow():
@@ -293,8 +303,7 @@ def build_gemma4_ple_module(spec, S):
                 begin, end = index * Pd, (index + 1) * Pd
                 part = bb.emit(op.strided_slice(
                     proj, axes=[1], begin=[begin], end=[end]))
-                normed = legalize.rms_norm(
-                    bb, part, Wn, S, Pd, eps=spec.rms_norm_eps)
+                normed = _rms(bb, part, Wn, spec.rms_norm_eps)
                 token_part = bb.emit(op.strided_slice(
                     tok_scaled, axes=[1], begin=[begin], end=[end]))
                 combined = bb.emit(op.add(normed, token_part))

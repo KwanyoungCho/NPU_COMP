@@ -69,6 +69,25 @@ def rms_norm_(bb, x, w, seq, d, eps):      # thin alias to keep call sites short
     return legalize.rms_norm(bb, x, w, seq, d, eps=eps)
 
 
+def _rms_hl(bb, x, w, eps):
+    """High-level RMSNorm emission; passes.LowerToNPUPrimitives expands it."""
+    return bb.emit(relax.op.nn.rms_norm(x, w, axes=[-1], epsilon=eps))
+
+
+def _softmax_hl(bb, s):
+    """High-level softmax emission; lowered to the stable primitive mix."""
+    return bb.emit(relax.op.nn.softmax(s, axis=-1))
+
+
+def _residual_ffn_hl(bb, x, attn, Wn2, Wg, Wu, Wd, seq, d, f, eps):
+    """V3 shared tail using high-level norm emission (legacy tail unchanged)."""
+    op = relax.op
+    hres = bb.emit(op.add(x, attn))
+    hn = _rms_hl(bb, hres, Wn2, eps)
+    ffn = legalize.swiglu(bb, hn, Wg, Wu, Wd, seq, d, f)
+    return bb.emit(op.add(hres, ffn))
+
+
 def rope_tables(cfg):
     return legalize.rope_tables(cfg.SEQ, cfg.HD, base=cfg.rope_base,
                                 llama3_scaling=cfg.rope_scale)
@@ -301,7 +320,7 @@ def build_v3_prefill_layer_module(cfg, S, return_cache=False):
     GPK = H // KV
     op = relax.op
     x = _P("x", (S, D))
-    Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
+    Wn1 = _P("Wn1", (D,)); Wn2 = _P("Wn2", (D,))
     Wq = _P("Wq", (D, D)); Wk = _P("Wk", (D, KV * HD))
     Wv = _P("Wv", (D, KV * HD)); Wo = _P("Wo", (D, D))
     Wg = _P("Wg", (D, F)); Wu = _P("Wu", (D, F)); Wd = _P("Wd", (F, D))
@@ -318,7 +337,7 @@ def build_v3_prefill_layer_module(cfg, S, return_cache=False):
     with bb.function("main", params):
         with bb.dataflow():
             cos, sin = legalize.rope_cos_sin(bb, pos_c, freqs_c, S, HD)
-            xn = rms_norm_(bb, x, Wn1, S, D, cfg.eps)
+            xn = _rms_hl(bb, x, Wn1, cfg.eps)
             q_all = bb.emit(op.matmul(xn, Wq))
             k_all = bb.emit(op.matmul(xn, Wk))
             v_all = bb.emit(op.matmul(xn, Wv))
@@ -334,11 +353,11 @@ def build_v3_prefill_layer_module(cfg, S, return_cache=False):
                 score = bb.emit(op.matmul(query, kt[head // GPK]))
                 score = bb.emit(op.multiply(score, scale_c))
                 score = bb.emit(op.add(score, mask_c))
-                probability = legalize.softmax_lastdim(bb, score, S, S)
+                probability = _softmax_hl(bb, score)
                 contexts.append(bb.emit(op.matmul(probability, values[head // GPK])))
             context = bb.emit(op.concat(contexts, axis=1))
             attention = bb.emit(op.matmul(context, Wo))
-            y = _residual_ffn(bb, x, attention, Wn2, Wg, Wu, Wd, S, D, F, cfg.eps)
+            y = _residual_ffn_hl(bb, x, attention, Wn2, Wg, Wu, Wd, S, D, F, cfg.eps)
             if return_cache:
                 outputs = [y]
                 for kv in range(KV):
@@ -353,7 +372,7 @@ def build_v3_decode_kv_module(cfg):
     """Official fused K/V projection for one token, including RoPE on K."""
     D, KV, HD = cfg.D, cfg.KV, cfg.HD
     op = relax.op
-    x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D))
+    x = _P("x", (1, D)); Wn1 = _P("Wn1", (D,))
     Wk = _P("Wk", (D, KV * HD)); Wv = _P("Wv", (D, KV * HD))
     pos = _P("pos", (1, 1))
     freqs_c = _rope_freqs_c(cfg)
@@ -366,7 +385,7 @@ def build_v3_decode_kv_module(cfg):
     with bb.function("main", [x, Wn1, Wk, Wv, pos]):
         with bb.dataflow():
             cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
-            xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
+            xn = _rms_hl(bb, x, Wn1, cfg.eps)
             k_all = bb.emit(op.matmul(xn, Wk))
             v_all = bb.emit(op.matmul(xn, Wv))
             outputs = []
@@ -393,7 +412,7 @@ def build_v3_decode_layer_module(cfg, context):
         raise ValueError(f"V3 fused Q/O require H*HD == D, got {H}*{HD} != {D}")
     GPK = H // KV
     op = relax.op
-    x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
+    x = _P("x", (1, D)); Wn1 = _P("Wn1", (D,)); Wn2 = _P("Wn2", (D,))
     Wq = _P("Wq", (D, D)); Wo = _P("Wo", (D, D))
     kt = [_P(f"Kt{kv}", (HD, context)) for kv in range(KV)]
     values = [_P(f"Vc{kv}", (context, HD)) for kv in range(KV)]
@@ -411,18 +430,18 @@ def build_v3_decode_layer_module(cfg, context):
     with bb.function("main", params):
         with bb.dataflow():
             cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
-            xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
+            xn = _rms_hl(bb, x, Wn1, cfg.eps)
             q_all = bb.emit(op.matmul(xn, Wq))
             contexts = []
             for head in range(H):
                 query = legalize.rope(bb, head_slice(bb, q_all, head), cos, sin)
                 score = bb.emit(op.matmul(query, kt[head // GPK]))
                 score = bb.emit(op.multiply(score, scale_c))
-                probability = legalize.softmax_lastdim(bb, score, 1, context)
+                probability = _softmax_hl(bb, score)
                 contexts.append(bb.emit(op.matmul(probability, values[head // GPK])))
             context_row = bb.emit(op.concat(contexts, axis=1))
             attention = bb.emit(op.matmul(context_row, Wo))
-            output = _residual_ffn(
+            output = _residual_ffn_hl(
                 bb, x, attention, Wn2, Wg, Wu, Wd, 1, D, F, cfg.eps)
             gv = bb.emit_output(output)
         bb.emit_func_output(gv)
@@ -448,7 +467,7 @@ def build_v3_decode_fused_layer_module(cfg, context):
         raise ValueError(f"V3 fused Q/O require H*HD == D, got {H}*{HD} != {D}")
     GPK = H // KV
     op = relax.op
-    x = _P("x", (1, D)); Wn1 = _P("Wn1", (1, D)); Wn2 = _P("Wn2", (1, D))
+    x = _P("x", (1, D)); Wn1 = _P("Wn1", (D,)); Wn2 = _P("Wn2", (D,))
     Wq = _P("Wq", (D, D)); Wk = _P("Wk", (D, KV * HD))
     Wv = _P("Wv", (D, KV * HD)); Wo = _P("Wo", (D, D))
     kt = [_P(f"Kt{kv}", (HD, context - 1)) for kv in range(KV)]
@@ -467,7 +486,7 @@ def build_v3_decode_fused_layer_module(cfg, context):
     with bb.function("main", params):
         with bb.dataflow():
             cos, sin = legalize.rope_cos_sin(bb, pos, freqs_c, 1, HD)
-            xn = rms_norm_(bb, x, Wn1, 1, D, cfg.eps)
+            xn = _rms_hl(bb, x, Wn1, cfg.eps)
             q_all = bb.emit(op.matmul(xn, Wq))
             k_all = bb.emit(op.matmul(xn, Wk))
             v_all = bb.emit(op.matmul(xn, Wv))
@@ -488,11 +507,11 @@ def build_v3_decode_fused_layer_module(cfg, context):
                 query = legalize.rope(bb, head_slice(bb, q_all, head), cos, sin)
                 score = bb.emit(op.matmul(query, kt_full[head // GPK]))
                 score = bb.emit(op.multiply(score, scale_c))
-                probability = legalize.softmax_lastdim(bb, score, 1, context)
+                probability = _softmax_hl(bb, score)
                 contexts.append(bb.emit(op.matmul(probability, v_full[head // GPK])))
             context_row = bb.emit(op.concat(contexts, axis=1))
             attention = bb.emit(op.matmul(context_row, Wo))
-            y = _residual_ffn(bb, x, attention, Wn2, Wg, Wu, Wd, 1, D, F, cfg.eps)
+            y = _residual_ffn_hl(bb, x, attention, Wn2, Wg, Wu, Wd, 1, D, F, cfg.eps)
             gv = bb.emit_output(bb.emit(op.concat([y] + new_kv, axis=1)))
         bb.emit_func_output(gv)
     return bb.finalize()
@@ -500,11 +519,11 @@ def build_v3_decode_fused_layer_module(cfg, context):
 
 def build_v3_final_norm_module(cfg, S):
     """Final model RMSNorm over all prefill positions."""
-    x = _P("x", (S, cfg.D)); weight = _P("weight", (1, cfg.D))
+    x = _P("x", (S, cfg.D)); weight = _P("weight", (cfg.D,))
     bb = relax.BlockBuilder()
     with bb.function("main", [x, weight]):
         with bb.dataflow():
-            output = rms_norm_(bb, x, weight, S, cfg.D, cfg.eps)
+            output = _rms_hl(bb, x, weight, cfg.eps)
             gv = bb.emit_output(output)
         bb.emit_func_output(gv)
     return bb.finalize()

@@ -309,7 +309,10 @@ def compile_func(func, mp, *, tile=64, validate=True, emit_log=None):
             elif name == "relax.nn.silu":
                 with a.role("activation"):
                     emit_activation(dst, call.args[0], ACT_SILU)
-            elif name in ("relax.nn.gelu", "relax.nn.gelu_tanh"):
+            elif name == "relax.nn.gelu":
+                # Native ACT_GELU is the vendor formula x*sigmoid(2x) (V3-004).
+                # nn.gelu_tanh must be lowered by LowerToNPUPrimitives instead
+                # of silently mapping to the wrong native formula.
                 with a.role("activation"):
                     emit_activation(dst, call.args[0], ACT_GELU)
             else:
