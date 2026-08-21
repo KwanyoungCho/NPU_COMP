@@ -29,7 +29,8 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
     if backend in ("0818", "vendor-0818", "source-0818", "0818-source"):
         # ver.08 has native MAIN/PARTIAL sub-tile addressing.  Its backend owns a
         # row-major plan and deliberately does not inherit the 0710 packed layouts.
-        from . import backend_0818
+        from . import backend_0818, passes
+        mod = passes.npu_pipeline()(mod)
         source_target = backend in ("source-0818", "0818-source")
         asm, mp = backend_0818.compile_module(
             mod, func_name, tile=64 if tile is None else tile, reuse=reuse,
