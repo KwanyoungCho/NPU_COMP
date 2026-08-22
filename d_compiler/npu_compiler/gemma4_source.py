@@ -236,6 +236,9 @@ class Gemma4SourceCompiler(SourceGenerationSession):
             "invocations": self.invocations,
             "elapsed_seconds": self.elapsed_seconds,
             "cached_weight_tensors": len(self._weights),
-            "ple_source": "table" if self._ple_table not in (None, False) else "computed",
+            # identity checks: the loaded table is a numpy memmap, and `in`
+            # would compare it element-wise (ambiguous-truth ValueError).
+            "ple_source": "computed" if (self._ple_table is None or
+                                         self._ple_table is False) else "table",
             "compile": self.compile_stats(),
         }
