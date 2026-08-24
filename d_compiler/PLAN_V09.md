@@ -66,11 +66,12 @@ nibble 시작주소 + element 단위 shape의 함의:
         │  FP32/FP16/INT8/INT4 공존                    │     4-bit nibble 주소
         └─────────┬───────────────────┬───────────────┘     (32-bit field, 유효 24-bit)
    ┌──────────────▼─────────────┐ ┌───▼──────────────────┐
-   │ [Quant] act FP16→INT8      │ │ Vector Unit          │
-   │  Matrix Unit 64×64          │ │ 256 lanes, FP16/FP32 │
-   │  mode FP16: FP16×FP16→FP32 │ │ (norm·softmax·rope + │
-   │  mode INT8: INT8×INT8→INT32│ │  QUANT 보조: absmax→ │
-   │ [Requant] acc×scale→FP16   │ │  scale→round→pack)   │
+   │ feeder(무손실 변환)          │ │ Vector Unit          │
+   │  Matrix Unit 64×64          │ │ 256 lanes, FP 산술    │
+   │  FP16×FP16→FP32 누적        │ │ (norm·softmax·rope + │
+   │  INT8×INT8→INT32 누적       │ │  VQUANT/VDEQUANT:    │
+   │ drain: FP32 dequant-누적기   │ │  absmax→scale→pack)  │
+   │  ×scale → RNE → FP16       │ │                      │
    └────────────────────────────┘ └──────────────────────┘
 ```
 
@@ -79,8 +80,8 @@ nibble 시작주소 + element 단위 shape의 함의:
   vector 연산(norm/softmax/RoPE)은 FP16 유지 — CNN식 전면 정수화는
   LLM에서 정확도 불가
 - SRAM은 dtype 공존: activation FP16, weight는 **packed INT8 그대로 상주**
-  (SRAM 유효 용량 2×, DMA는 변환 없이 단순 이동). weight dequant는
-  matrix 입구 feeder에서 (W8A16 mode) 또는 불필요 (W8A8 mode — INT8 직결)
+  (SRAM 유효 용량 2×, DMA는 변환 없이 단순 이동). weight의 scale 복원은
+  전 mode 공통으로 **출구(drain)에서** — 입구는 무손실 형변환만
 - 주소는 nibble 단위, **ver.08의 2-half 주소 설정 기제 유지** (stale-high
   위험은 "두 half 항상 emit" 관례를 필수 규칙으로 명문화해 관리)
 - 공유 SRAM: allocator/DMA 엔진 1개. 유닛별 분리는 §2.3 후속 옵션
@@ -145,7 +146,7 @@ nibble 시작주소 + element 단위 shape의 함의:
 | Mode | weight | activation | matrix 연산 | 비고 |
 |---|---|---|---|---|
 | FP16 | FP16 | FP16 | FP16×FP16→FP32 | 기존 — **0818 bit-exact 불변식 유지** |
-| **W8A16** (N6a) | INT8 packed (SRAM 상주) | FP16 | feeder dequant → FP16×FP16→FP32 | LLM weight-only 표준 (GPTQ/AWQ류) |
+| **W8A16** (N6a) | INT8 packed (SRAM 상주) | FP16 | feeder 무손실 변환 → FP16×FP16→FP32 → drain ×w_scale | LLM weight-only 표준 (GPTQ/AWQ류) |
 | **W8A8** (N6b) | INT8 packed | INT8 (per-token 동적) | INT8×INT8→INT32 → 출구 dequant | quant/dequant sandwich가 여기서 발동 |
 
 - weight 형식: **INT8 per-output-channel(열) symmetric** packed
