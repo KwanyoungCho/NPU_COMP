@@ -87,8 +87,8 @@ v09는 **연산이 descriptor를 통해 SRAM을 직접 읽고, vector는 결과�
 | 0x01/02/0A/0B | VADD/VSUB/VMUL/VDIV | `[31:30] mode`(IMM/SCALAR/VECTOR), `[23:8] imm` — **imm은 signed int16** (V3-030 수정). SCALAR mode는 SRC2.addr의 값 사용 (ver.08 0x15 주소겸용 hazard 제거) |
 | 0x0E/0F | VSQRT/VEXP | 단항 |
 | 0x12 | VMINMAX | `[28]` min/max |
-| 0x14 | VREDSUM | FP32 순차 누적, 결과 1원소. `[27]=1`이면 **carry-in**: DST 기존값에 이어 누적 (256 초과 reduce의 chunk 간 in-order carry — bit-exact 불변식의 근거) |
-| 0x19 | VREDMAX | **seed = 첫 원소** (V3-003 수정). `[27]` carry-in 동일 |
+| 0x14 | VREDSUM | FP32 순차 누적. **vector 유닛 내부 FP32 누적 레지스터** 사용: `[27]` carry-in(레지스터에 이어 누적 / 0이면 초기화), `[26]` writeout(누적값을 FP16으로 DST에 기록). 256 초과 reduce는 chunk들을 carry로 잇고 마지막에만 writeout → FP32가 끝까지 유지되고 FP16 반올림 1회 = ver.08 flat 순차와 동일 (**2026-08-24 수정**: 초안의 "DST 경유 carry"는 chunk마다 FP16 반올림이 생겨 bit-exact 불변식 위반 — 워크스루 작성 중 발견) |
+| 0x19 | VREDMAX | **seed = 첫 원소** (V3-003 수정). `[27]`/`[26]` carry/writeout 동일 구조 |
 | 0x15 | VBROADCAST | scalar(SRC2.addr 또는 imm) → vlen개 |
 | 0x16/0x17/0x18 | VSIGNINV/VCOPY/VCOSSIN | 0x18 `[27]` cos/sin |
 | **0x1A** | **VQUANT** (신규) | SRC1(FP16, vlen) → absmax→scale 산출 → RNE 반올림 → **INT8 packed를 DST에**, **scale(FP16) 1원소를 SCALE.addr에** 기록. per-token 동적 양자화의 생산자 |
@@ -168,3 +168,47 @@ bytes + SRAM 점유)가 gate.
    구현하며 확정 제안
 3. INT4의 group-wise scale(g=64~128) 인코딩은 N6b 시점에 추가 (현재 spec은
    INT8 per-channel까지)
+
+
+## 7. 동작 워크스루 (검토용 예제)
+
+### 7.1 FP16 GEMM: C[2,128] = A[2,64] @ B[64,128] — 총 31 words
+
+global: A@0x1000, B@0x2000, C@0x8000 (host 배치).
+
+```
+GLOAD fp16 0x1000→sram0    stride64  2×64     ; A       (5w)
+GLOAD fp16 0x2000→sram128  stride128 64×128   ; B       (5w)
+SADDR SRC1,0    SSHAPE SRC1,2,64   SSTRIDE SRC1,64      (3w)
+SADDR SRC2,128  SSHAPE SRC2,64,64  SSTRIDE SRC2,128     (3w)
+SADDR DST,8320  SSHAPE DST,2,64    SSTRIDE DST,128      (3w)
+MMUL fp16 ; MSAVE fp16                                  ; 왼쪽 tile (2w)
+SADDR SRC2,192 ; SADDR DST,8384 ; MMUL ; MSAVE          ; 오른쪽 tile — 바뀐 것만 재설정 (4w)
+GSTORE sram8320→0x8000 stride128 2×128                  (5w)
+HALT                                                    (1w)
+```
+
+ver.08 동일 계산 ≈ 56 words (tile당 region 8w×3 + load×2 + op + save).
+K-tiling 시 MMUL(mac=1)로 누적기 FP32 유지, MSAVE에서 반올림 1회.
+
+### 7.2 vector: h = x + attn (길이 300 = 256 + 44 chunk)
+
+`VLEN 256; SADDR×3; VADD` → `VLEN 44; SADDR×3(+256); VADD` — load/save 없음.
+
+### 7.3 reduce: 3072개 합 (12 chunk) — 내부 FP32 누적 레지스터
+
+`VREDSUM start` → (`SADDR SRC1 전진; VREDSUM carry`)×10 →
+`VREDSUM carry,writeout` — FP16 기록은 마지막 1회 (§2.1 수정 근거).
+
+### 7.4 W8A16: packed B + scale
+
+`GLOAD int8`(packed 그대로, 원소 수 절반) + `GLOAD fp16`(scale) +
+`SADDR SCALE` + `MMUL mode=W8A16`(feeder가 §0.2 규약으로 unpack→부호확장→
+×scale[열]→FP16 공급) + `MSAVE fp16`.
+
+### 7.5 검토 개방 항목 (§6에 추가)
+
+4. compute의 descriptor 상태식 vs 완전 무상태식 (현재: compute=상태식,
+   DMA=무상태 혼합)
+5. GLOAD `dq` bit(적재 시 FP16 전개 — 디버그 경로) 존치 여부
+6. SADDR+SSHAPE 결합 명령 등 추가 압축 여지
