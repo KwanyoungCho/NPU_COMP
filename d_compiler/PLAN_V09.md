@@ -98,7 +98,9 @@
 - **index 기반 `sincos(pos:int32, freq:fp16)` op** (§7.3-⑨a 계측): 각도의
   FP16 운반 한계를 op 내부 FP32로 해소 — host 개입이 스텝마다 있는 현 실행
   모델에서는 host cos/sin row 전달로 충분하므로 **loop 도입과 한 묶음**
-- activation quantization / INT MAC datapath (weight-only가 우선)
+- activation quantization / INT MAC datapath — 이때 비로소 "연산 유닛
+  앞뒤 quant/requant 유닛" sandwich 구조가 필요해짐 (weight-only가 우선)
+- **dequant를 연산 유닛 입구로 이동** (SRAM에 packed INT 유지, §3의 B안)
 - 주소 확장(40-bit 등) — FP16 weight 상주 full-model이 필요해지는 시점 항목
 - cycle-accurate timing (counter 통계까지만; latency 표 수신 후)
 
@@ -112,6 +114,23 @@
   (dequant-on-load는 FP16 모드에서 비활성 → 경로 자체가 동일)
 
 ## 3. Quantization 설계 (weight-only, packed)
+
+**Dequant 배치 결정**: weight-only + FP16 연산에서는 "연산 유닛 앞뒤의
+quant/requant sandwich"(full-integer 설계의 구성)가 적용되지 않으며,
+존재하는 것은 weight dequant 한 방향뿐이다. 배치 선택지는 두 가지:
+
+| | A. DMA에서 (v09 채택) | B. 연산 유닛 입구에서 (진화 경로) |
+|---|---|---|
+| SRAM 내용 | FP16 (순수) | packed INT 유지 → 유효 용량 2~4× |
+| DRAM 대역폭 절감 | 2~4× | 동일 |
+| 복잡도 | 변환 1곳, 연산 유닛 무변경 | SRAM dtype 혼재, matrix op에 dtype/scale field |
+
+v09는 **A**를 채택한다 — 기능 검증이 1차 목표이고, SRAM/연산 의미론이
+FP16으로 유지되어 bit-exact 불변식(§2.4)이 그대로 성립하며, weight-only의
+지배 병목(DRAM 대역폭) 이득은 양쪽이 동일하다. B의 이득(SRAM 용량 2~4×)은
+weight 재적재 빈도에 비례하므로, **N7의 perf counter(DMA bytes/SRAM 점유)
+데이터로 전환 여부를 판단**하고 spec에는 B의 ISA 확장 형태(matrix operand
+dtype/scale field)를 후보로 기재한다.
 
 - 형식: **INT8 per-output-channel symmetric**, 16-bit 원소당 2개 packed
   (scale = FP16 벡터, 채널당 1개) → 2차로 INT4 group-wise(g=64~128), 원소당 4개
