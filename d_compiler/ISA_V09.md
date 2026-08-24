@@ -35,6 +35,21 @@ SRAM에 FP16/INT8/INT4가 공존하므로 nibble(4-bit) 단위 주소도 검토�
 field**를 정의한다 — v09에서는 0 고정(비0은 오류), 미래에 비정렬 시작이
 필요해지면 주소 체계 변경 없이 이 field만 활성화.
 
+## 0.2 Packing 규약 (정식 정의)
+
+- 16-bit 원소 내 배치는 **little-endian (낮은 비트부터 값0)**:
+  - INT8×2: `[7:0]`=값0, `[15:8]`=값1
+  - INT4×4: `[3:0]`=값0, `[7:4]`=값1, `[11:8]`=값2, `[15:12]`=값3
+- 값은 **2의 보수 signed** (INT8: −128..127, INT4: −8..7). 소비 시 부호 확장
+- 단위 규칙: **주소/stride = 원소 단위 (dtype 무관)**, **개수(cols) = 논리 값
+  단위**, dtype field가 원소당 값 수 k(1/2/4)를 결정.
+  논리 값 c의 위치 = 원소 `addr + c÷k` 의 비트 `[(c mod k)·w + w−1 : (c mod k)·w]`
+- 행은 항상 통째 원소로 구성 (cols가 k로 나눠떨어져야 함 — 64배수 차원에서
+  자동 충족, 위반 시 오류)
+- 해석 지점: W8A16은 matrix feeder에서 unpack+부호확장+scale(FP16화),
+  W8A8은 unpack+부호확장만 하고 INT 그대로 multiplier 투입(scale은 MSAVE
+  requant에서 일괄), VQUANT/VDEQUANT는 이 규약으로 pack/unpack
+
 ## 1. 상태(descriptor) 모델 — ver.08 대비 대폭 단순화
 
 operand 슬롯 4개: `SRC1(0) · SRC2(1) · DST(2) · SCALE(3)`. 슬롯별 상태는 3개뿐:
