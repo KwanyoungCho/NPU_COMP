@@ -14,7 +14,7 @@
 | # | 항목 | 결정 |
 |---|---|---|
 | 1 | Global 주소 | **32-bit, 주소 단위 = 16-bit 원소(FP16 1개)** — ver.08과 동일 체계, 공간 8 GiB |
-| 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad)** 먼저. 유닛별 분리는 후속 옵션(§2.3) |
+| 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad), 8 MiB** (2026-08-24 확정). 4M 원소 → **22-bit 주소가 단일 word에 수납**(op 2 + addr 22 + opcode 8 = 32). 유닛별 분리는 후속 옵션(§2.3) |
 | 3 | Quantization | **activation까지 포함해 스펙화** (2026-08-24 2차 결정). weight: packed INT8/INT4, per-channel. activation: **W8A8, matrix unit 전후 quant/requant sandwich, per-token 동적 scale**. 구현은 W8A16(N6a) → W8A8(N6b) 순 |
 | 4 | loop/repeat | v09 범위 밖 (별도 단계; index-sincos op도 이와 한 묶음) |
 
@@ -54,8 +54,8 @@
         └──────────────────┬──────────────────────────┘
                     DMA: GLOAD / GSTORE  (dtype 보존 — 변환 없음)
         ┌──────────────────▼──────────────────────────┐
-        │  Unified SRAM (공유 scratchpad)              │  ← SW 관리, 결정적
-        │  FP16 activation + packed INT8 weight 공존   │     기본 256KB (param)
+        │  Unified SRAM (공유 scratchpad, 8 MiB)       │  ← SW 관리, 결정적
+        │  FP16 activation + packed INT8 weight 공존   │     22-bit 원소 주소
         └─────────┬───────────────────┬───────────────┘
    ┌──────────────▼─────────────┐ ┌───▼──────────────────┐
    │ [Quant] act FP16→INT8      │ │ Vector Unit          │
@@ -170,7 +170,7 @@
 
 | 단계 | 내용 | Gate |
 |---|---|---|
-| **N0** | ISA v09 spec 문서(`d_compiler/ISA_V09.md`) — §1~3을 인코딩 수준까지 확정 | 사용자 리뷰·승인 |
+| **N0** | ISA v09 spec 문서(`d_compiler/ISA_V09.md`) — **초안 작성 완료(2026-08-24)**, 인코딩 수준 | 사용자 리뷰·승인 (§6 확인 3건 포함) |
 | **N1** | `mysim_v09.cpp` 골격: global/공유 SRAM 메모리 객체, decode 루프, HALT/SNAPSHOT, 경계 검사, perf counter | 단위 테스트 |
 | **N2** | 데이터 이동: GLOAD/GSTORE (FP16, 2-word 주소), descriptor | `isa_v09.py` round-trip + 이동 단위 테스트 |
 | **N3** | 연산: vector 256-lane 전 연산 + matrix 64×64 (§2.2 수정 반영) | op별 numpy FP16-step reference와 bit-exact |
