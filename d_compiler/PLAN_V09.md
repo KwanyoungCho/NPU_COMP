@@ -9,28 +9,32 @@
 > ③ vector 유닛 256-lane 고정, ④ 이에 맞는 ISA 확정 (ver.08 리뷰 §7.5 반영).
 > 산출물은 설계팀에 전달할 **spec 문서 + 동작 C-model + compiler backend + 평가표**다.
 
-## 확정된 결정사항 (2026-08-24, 사용자 · 3차 최종)
+## 확정된 결정사항 (2026-08-24, 사용자 · 4차)
 
 | # | 항목 | 결정 |
 |---|---|---|
-| 1 | Global 주소 | **32-bit 주소, 단위 = 16-bit** (8 GiB). global에는 원소/dtype 개념 없음 — "16-bit 칸이 나열된 저장소". dtype 해석은 연산 유닛에서만 |
-| 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad), 8 MiB**. 주소 단위 = **4-bit nibble** (FP32/FP16/INT8/INT4 공존을 dtype 독립 주소 산술로). 32-bit 주소 field에 유효 24-bit — **기존 ver.08 주소 기제 그대로 사용**, 여유 bit는 유지(부족 시 그때 축소). 유닛별 분리는 후속 옵션(§2.3) |
-| 3 | DMA | GLOAD/GSTORE는 **dtype 무관(blind)** — 16-bit 단위 원본 이동만. 환산 규칙: global 1칸 = SRAM 4 nibble |
-| 4 | 기존 ISA | 주소설정·load/save·연산 **ver.08 인코딩 유지, 주소/stride/cols만 nibble 재해석** (FP16 기준 ×4 환산 — compiler 기계적 변환) |
-| 5 | 작업 순서 | **memory 관련 이슈 먼저 확정, quant/dequant·matmul 설계는 보류** (3차 결정). W8A8 방향성(2차 결정)은 유지하되 세부는 compute 설계 단계로 이월 |
-| 6 | loop/repeat | v09 범위 밖 (별도 단계; index-sincos op도 이와 한 묶음) |
+| 1 | Global 주소 | **32-bit 주소, 단위 = 32-bit 칸** (**16 GiB**, 4차 결정). global에는 원소/dtype 개념 없음 — DMA 전용, 크기도 칸 개수로만 정의. dtype 해석은 연산 유닛에서만 |
+| 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad), 8 MiB**. **시작 주소 단위 = 4-bit nibble**, 32-bit 주소 field에 유효 24-bit — **기존 ver.08 주소 기제 그대로 사용**, 여유 bit는 유지(부족 시 그때 축소). 유닛별 분리는 후속 옵션(§2.3) |
+| 3 | rows/cols/stride | **element 단위** (4차 결정, 2안) — 16-bit field·값이 ver.08과 동일(FP16 시), dtype별 표현 낭비 없음. 주소 생성은 dtype 폭(nibble)을 곱해 물리화 |
+| 4 | dtype 설정 | **기존 명령 spare bit** (4차 결정): 0x88/0x89(matrix operand)·0x82(vector)에 2-bit, `00=FP16/01=FP32/10=INT8/11=INT4`. 신규 상태 레지스터 없음 → stale hazard 원천 차단, ver.08 프로그램 = dtype FP16인 유효 v09 프로그램 |
+| 5 | DMA | GLOAD(0xA0)/GSTORE(0xA8), **dtype 무관(blind)·동기(blocking)**, 5-word. 환산: global 1칸 = SRAM 8 nibble. SRAM 쪽 주소는 8-nibble(칸) 정렬 규칙 |
+| 6 | 기존 ISA | 주소설정·load/save·연산 **ver.08 인코딩 유지**: 0x80 주소만 nibble 재해석, rows/cols/stride/vlen은 값 그대로 |
+| 7 | 작업 순서 | **memory 관련 이슈 먼저 확정, quant/dequant·matmul 설계는 보류** (3차 결정). W8A8 방향성(2차 결정)은 유지하되 세부는 compute 설계 단계로 이월 |
+| 8 | loop/repeat | v09 범위 밖 (별도 단계; index-sincos op·async DMA+barrier도 이와 한 묶음) |
 
 > 3차 결정으로 **강등/폐기된 v1 초안 항목**: 단일-word SRAM 주소(op2+addr22),
 > 2-word GLOAD 주소 형식, descriptor 3요소 재정의(MAIN/PARTIAL 폐지) —
 > ver.08 구조 유지 원칙에 따라 "측정 후 후속 최적화 후보"로 이동 (ISA_V09.md §6).
 
-nibble 주소 + packed 저장의 함의:
+nibble 시작주소 + element 단위 shape의 함의:
 
-- 모든 dtype이 정수 개 nibble 칸(FP32=8, FP16=4, INT8=2, INT4=1)을 차지 →
-  주소 산술이 dtype 독립, packing straddle 미발생
-- 정렬 규칙: tensor 시작 nibble 주소는 자기 dtype 폭의 배수 — 64-배수
-  차원에서 자동 충족, 위반은 컴파일러 오류 (spec 명문화)
-- ver.08 주소 산술의 ×4 배율일 뿐이라 **bit-exact 불변식(§2.4)에 가장 유리**
+- 모든 dtype이 정수 개 nibble(FP32=8, FP16=4, INT8=2, INT4=1)을 차지 →
+  packing straddle 미발생. `addr(r,c) = base_nibble + (r×stride + c)×w`
+- 정렬 규칙: global은 32-bit 칸 경계(행 길이도 칸 배수), SRAM tensor 시작은
+  dtype 폭 배수, DMA의 SRAM 주소는 8-nibble 정렬 — 64-배수 차원에서 모두
+  자동 충족, 위반은 오류 (spec 명문화)
+- FP16 이관 시 rows/cols/stride/vlen **field 값이 ver.08과 동일**, 시작
+  주소만 SRAM nibble로 바뀜 — **bit-exact 불변식(§2.4)에 가장 유리**
 
 ---
 
@@ -52,10 +56,10 @@ nibble 주소 + packed 저장의 함의:
 ```
         ┌─────────────────────────────────────────────┐
         │  Global Memory (DRAM/HBM 모델)               │
-        │  32-bit 주소, 단위 16-bit (8 GiB)            │
-        │  내용물 해석 없음 — 그냥 16-bit 칸 나열       │
+        │  32-bit 주소, 단위 32-bit 칸 (16 GiB)        │
+        │  내용물 해석 없음 — DMA 전용                  │
         └──────────────────┬──────────────────────────┘
-                    DMA: GLOAD / GSTORE  (dtype 무관 — 원본 이동만)
+              DMA: GLOAD 0xA0 / GSTORE 0xA8  (dtype 무관·동기 — 원본 이동만)
         ┌──────────────────▼──────────────────────────┐
         │  Unified SRAM (공유 scratchpad, 8 MiB)       │  ← SW 관리, 결정적
         │  FP32/FP16/INT8/INT4 공존                    │     4-bit nibble 주소
@@ -84,11 +88,12 @@ nibble 주소 + packed 저장의 함의:
 ## 2. ISA v09 — ver.08 대비 변경 목록
 
 ### 2.1 신규 — memory 편 (이번 범위의 본체, ISA_V09.md 확정)
-- `GLOAD` (5 words): global→SRAM DMA. w0 opcode / w1 global 주소 32-bit /
+- `GLOAD` 0xA0 (5 words): global→SRAM DMA. w0 opcode / w1 global 주소 32-bit /
   w2 global 행 stride 32-bit (wide stride 직접 표현 — V3-027 해소) /
-  w3 SRAM nibble 주소 / w4 rows|cols(16-bit 단위 개수).
-  **dtype 무관 원본 이동** — packed blob도 그냥 "16-bit 칸들"
-- `GSTORE` (5 words): SRAM→global, 동일 형식 역방향
+  w3 SRAM nibble 주소(8-nibble 정렬) / w4 rows|cols(32-bit 칸 개수).
+  **dtype 무관 원본 이동·동기** — packed blob도 그냥 "칸들"
+- `GSTORE` 0xA8 (5 words): SRAM→global, 동일 형식 역방향
+- dtype 운반: 0x88/0x89·0x82 spare 2-bit (§확정 결정 4) — 신규 명령 없음
 - 종료/저장: `HALT` 신설(종료 + global 전체 기록 = 유일한 결과 회수 경로),
   `SNAPSHOT`(0xF0)은 중간 checkpoint 전용
 - 범위 초과 접근(global/SRAM 모두)은 **오류** (silent corruption 금지)
@@ -121,7 +126,7 @@ nibble 주소 + packed 저장의 함의:
 
 ### 2.4 수치 불변식의 설계 근거 (FP16 모드 ≡ 0818 bit-exact)
 - 저장 FP16 / 연산 FP32 / 저장 시 RNE — 0818 계약 유지 (실측 §7 검증됨)
-- 주소 체계 = ver.08 그대로에 nibble ×4 배율만 적용 → 주소 산술 동형
+- rows/cols/stride/vlen field 값이 ver.08과 동일, 시작 주소만 SRAM nibble → 주소 산술 동형
 - 256-lane chunking이 순서를 바꾸지 않도록: **reduce는 chunk 내부 순차 +
   chunk 간 FP32 carry를 in-order 누적** = 기존 flat 순차와 동일 순서
 - matmul K 누적: tile 순서 유지, FP32 누적기 유지
@@ -174,8 +179,8 @@ nibble 주소 + packed 저장의 함의:
 | 단계 | 내용 | Gate |
 |---|---|---|
 | **N0** | ISA v09 spec — **memory 편 v2 작성 완료(2026-08-24, 3차 결정 반영)**. compute 편은 memory 승인 후 별도 N0' | 사용자 리뷰·승인 |
-| **N1** | `mysim_v09.cpp` 골격: global(16-bit 단위)/공유 SRAM(nibble 단위) 메모리 객체, decode 루프, HALT/SNAPSHOT, 경계 검사, perf counter | 단위 테스트 |
-| **N2** | 데이터 이동: GLOAD/GSTORE (5-word 형식) + ver.08 load/save·주소설정의 nibble 재해석 | `isa_v09.py` round-trip + 이동 단위 테스트 |
+| **N1** | `mysim_v09.cpp` 골격: global(32-bit 칸 단위)/공유 SRAM(nibble 단위) 메모리 객체, decode 루프, HALT/SNAPSHOT, 경계 검사, perf counter | 단위 테스트 |
+| **N2** | 데이터 이동: GLOAD 0xA0/GSTORE 0xA8 (5-word) + ver.08 주소설정 nibble 재해석·dtype spare bit | `isa_v09.py` round-trip + 이동 단위 테스트 |
 | **N0'** | compute 편 spec (dtype mode·QUANT·requant·reduce carry·버그수정 3건) | 사용자 리뷰·승인 |
 | **N3** | 연산: vector 256-lane 전 연산 + matrix 64×64 (N0' 반영) | op별 numpy FP16-step reference와 bit-exact |
 | **N4** | `backend_v09.py` + SRAM staging codegen | **proxy layer가 0818 결과와 bit-exact** (불변식 1차 증명) |
