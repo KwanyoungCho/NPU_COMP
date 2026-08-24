@@ -610,6 +610,22 @@ ver.08 프로그램으로 수행되었고, host는 gather/layout/argmax만 담�
 **⑦ activation field 예약값 `01`이 GELU로 동작**
 - 예약값의 동작을 정의하거나 거부해야 함. (실행기 관찰로 발견)
 
+**⑨-a (2026-08-24 계측) on-device RoPE 각도 경로의 FP16 한계 — long-context 제약**
+- cos/sin 명령(0x18) 자체는 정확함 (float32 계산 + FP16 저장, 실측 bit 일치).
+  문제는 **입력 각도가 FP16 경로를 지나는 것**: decode는 `pos`(FP16 param) ×
+  freq → 각도(FP16 저장) → 0x18 순서라,
+  - `pos`는 2048까지만 정수 정확 표현 (2049→2048), 65504 초과 시 inf
+  - 각도의 FP16 반올림으로 인한 cos 오차(실 Llama 주파수 최악값):
+    pos 9 → 0.002, pos 512 → 0.06, pos 1024 → 0.17, pos 4096 → 0.32,
+    pos 65504+ → NaN
+- 현재 검증 범위(짧은 context)는 안전. **long-context decode에서는 on-device
+  각도 계산이 구조적으로 불가** — host가 계산한 cos/sin row를 입력으로
+  전달하는 방식으로 우회 가능 (prefill은 이미 pass 파이프라인의 FoldConstant가
+  cos/sin을 컴파일 타임 상수로 굽고 있음).
+- 권고: 차기 ISA에서 각도 파이프라인을 FP32로 (position을 정수/FP32로 받아
+  곱을 FP32로 유지한 채 cos/sin). FP32면 131K position에서 각도 오차
+  ~0.008 rad로 충분.
+
 **⑨ (2026-08-21 발견) elementwise/broadcast immediate의 음수 처리 버그 [V3-030]**
 - 현상: 부호확장된 int16 immediate가 **uint32로 재해석**됨.
   `0xFFFD`(-3 의도) → 4,294,967,293.0f. 실측(vendor a.out):
