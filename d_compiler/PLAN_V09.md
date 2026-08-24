@@ -4,7 +4,8 @@
 >
 > 목표: vendor 재현이 아닌 **우리가 설계하는 차기 C-model/ISA**를 만든다.
 > 범위: ① SRAM scratchpad 메모리 계층 (**1차: matrix/vector 공유 단일 SRAM**),
-> ② quantization (weight-only INT8, packed 저장, dequant-on-load),
+> ② quantization — **weight(INT8/INT4 packed) + activation(W8A8, matrix unit
+> sandwich)** 을 ISA에 모두 스펙화, 구현은 W8A16 → W8A8 순,
 > ③ vector 유닛 256-lane 고정, ④ 이에 맞는 ISA 확정 (ver.08 리뷰 §7.5 반영).
 > 산출물은 설계팀에 전달할 **spec 문서 + 동작 C-model + compiler backend + 평가표**다.
 
@@ -14,7 +15,7 @@
 |---|---|---|
 | 1 | Global 주소 | **32-bit, 주소 단위 = 16-bit 원소(FP16 1개)** — ver.08과 동일 체계, 공간 8 GiB |
 | 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad)** 먼저. 유닛별 분리는 후속 옵션(§2.3) |
-| 3 | Quantization | **weight-only**, **packed 저장** (16-bit 원소당 INT8×2 / INT4×4), INT8 per-output-channel symmetric 먼저 |
+| 3 | Quantization | **activation까지 포함해 스펙화** (2026-08-24 2차 결정). weight: packed INT8/INT4, per-channel. activation: **W8A8, matrix unit 전후 quant/requant sandwich, per-token 동적 scale**. 구현은 W8A16(N6a) → W8A8(N6b) 순 |
 | 4 | loop/repeat | v09 범위 밖 (별도 단계; index-sincos op도 이와 한 묶음) |
 
 주소 단위 16-bit + packed 저장의 함의:
@@ -51,34 +52,46 @@
         │  32-bit 주소, 단위 16-bit 원소 (8 GiB)        │
         │  FP16 tensor + packed INT8/INT4 weight blob  │
         └──────────────────┬──────────────────────────┘
-                    DMA: GLOAD / GSTORE
-                    (dequant-on-load: packed INT→FP16)
+                    DMA: GLOAD / GSTORE  (dtype 보존 — 변환 없음)
         ┌──────────────────▼──────────────────────────┐
         │  Unified SRAM (공유 scratchpad)              │  ← SW 관리, 결정적
-        │  16-bit 원소 주소, 기본 256KB (config param)  │     matrix/vector 공용
+        │  FP16 activation + packed INT8 weight 공존   │     기본 256KB (param)
         └─────────┬───────────────────┬───────────────┘
-        ┌─────────▼─────────┐ ┌───────▼──────────┐
-        │ Matrix Unit       │ │ Vector Unit      │
-        │ 64×64 PE, FP32누적 │ │ 256 lanes, FP32  │
-        └───────────────────┘ └──────────────────┘
+   ┌──────────────▼─────────────┐ ┌───▼──────────────────┐
+   │ [Quant] act FP16→INT8      │ │ Vector Unit          │
+   │  Matrix Unit 64×64          │ │ 256 lanes, FP16/FP32 │
+   │  mode FP16: FP16×FP16→FP32 │ │ (norm·softmax·rope + │
+   │  mode INT8: INT8×INT8→INT32│ │  QUANT 보조: absmax→ │
+   │ [Requant] acc×scale→FP16   │ │  scale→round→pack)   │
+   └────────────────────────────┘ └──────────────────────┘
 ```
 
 - **compute 유닛은 SRAM만 접근** (global은 DMA 전용) — 계층 명확화
-- SRAM 내부는 항상 FP16 (dequant 후) — 원소 단위 16-bit 주소,
-  **단일 word 주소 설정** (half 상태머신 hazard 제거)
-- 공유 SRAM: allocator/DMA 엔진 1개, matmul 결과를 vector 연산이 **복사 없이**
-  소비 가능. 유닛별 분리는 §2.3 후속 옵션 (분리 시 ISA는 SRAM id field 추가로 수용)
+- **quant/requant sandwich는 matrix unit에만** (LLM W8A8 표준형).
+  vector 연산(norm/softmax/RoPE)은 FP16 유지 — CNN식 전면 정수화는
+  LLM에서 정확도 불가
+- SRAM은 dtype 공존: activation FP16, weight는 **packed INT8 그대로 상주**
+  (SRAM 유효 용량 2×, DMA는 변환 없이 단순 이동). weight dequant는
+  matrix 입구 feeder에서 (W8A16 mode) 또는 불필요 (W8A8 mode — INT8 직결)
+- 주소는 원소 단위 16-bit, **단일 word 설정** (half 상태머신 hazard 제거)
+- 공유 SRAM: allocator/DMA 엔진 1개. 유닛별 분리는 §2.3 후속 옵션
 - vector 길이: vlen ∈ [1, 256] (초과는 backend가 chunk)
 
 ## 2. ISA v09 — ver.08 대비 변경 목록
 
 ### 2.1 신규 (이번 범위의 본체)
-- `GLOAD  sram_dst, g_addr32, shape/stride, dtype` — global→SRAM DMA.
-  32-bit global 주소는 **2-word 명령 형식**(명령 word + 주소 word)으로 한 번에
-  지정 (half 분할 설정 폐지). **dtype ∈ {FP16, INT8, INT4}**: INT는
-  per-channel scale 벡터(global 주소 지정)로 **unpack + dequant하며 적재**
-  (원소당 2/4값 전개) → SRAM에는 항상 FP16
-- `GSTORE g_addr32, sram_src, shape/stride` — SRAM→global (FP16)
+- `GLOAD  sram_dst, g_addr32, shape/stride, dtype` — global→SRAM DMA,
+  **dtype 보존 이동** (INT8 packed는 packed 그대로). 32-bit global 주소는
+  **2-word 명령 형식**(명령 word + 주소 word) — half 분할 설정 폐지
+- `GSTORE g_addr32, sram_src, shape/stride` — SRAM→global
+- **matrix op의 dtype mode**: `FP16`(feeder에서 INT8 weight를 per-channel
+  scale로 dequant해 FP16×FP16→FP32 누적 = W8A16) / `INT8`(INT8×INT8→
+  **INT32 누적** = W8A8)
+- **Requant(출력단)**: 누적기 × (weight per-channel scale × act per-token
+  scale) → FP16 저장. scale은 SRAM의 벡터 operand로 지정 (행/열 인덱싱)
+- **`QUANT` (vector 명령)**: activation row의 absmax → scale 산출 →
+  round-to-nearest → INT8 pack. per-token 동적 scale의 생산자.
+  (absmax = max(x,−x)+reduce-max — **seeded reduce-max 수정(§2.2)이 전제**)
 - vector/matrix 연산의 operand 주소 = SRAM 16-bit 주소 (단일 word 설정)
 
 ### 2.2 ver.08 버그·불일치 수정 (리뷰 §7.3 반영, v09에서 확정)
@@ -98,9 +111,8 @@
 - **index 기반 `sincos(pos:int32, freq:fp16)` op** (§7.3-⑨a 계측): 각도의
   FP16 운반 한계를 op 내부 FP32로 해소 — host 개입이 스텝마다 있는 현 실행
   모델에서는 host cos/sin row 전달로 충분하므로 **loop 도입과 한 묶음**
-- activation quantization / INT MAC datapath — 이때 비로소 "연산 유닛
-  앞뒤 quant/requant 유닛" sandwich 구조가 필요해짐 (weight-only가 우선)
-- **dequant를 연산 유닛 입구로 이동** (SRAM에 packed INT 유지, §3의 B안)
+- activation의 **정적(static) scale calibration** 경로 — 동적 per-token이
+  기본, 정적은 후보로만
 - 주소 확장(40-bit 등) — FP16 weight 상주 full-model이 필요해지는 시점 항목
 - cycle-accurate timing (counter 통계까지만; latency 표 수신 후)
 
@@ -113,36 +125,32 @@
 - SRAM staging은 FP16 값의 이동일 뿐 반올림 지점을 추가하지 않음
   (dequant-on-load는 FP16 모드에서 비활성 → 경로 자체가 동일)
 
-## 3. Quantization 설계 (weight-only, packed)
+## 3. Quantization 설계 (weight + activation, 2026-08-24 2차 결정 반영)
 
-**Dequant 배치 결정**: weight-only + FP16 연산에서는 "연산 유닛 앞뒤의
-quant/requant sandwich"(full-integer 설계의 구성)가 적용되지 않으며,
-존재하는 것은 weight dequant 한 방향뿐이다. 배치 선택지는 두 가지:
+**동작 모드 3단** (spec은 전부, 구현은 순차):
 
-| | A. DMA에서 (v09 채택) | B. 연산 유닛 입구에서 (진화 경로) |
-|---|---|---|
-| SRAM 내용 | FP16 (순수) | packed INT 유지 → 유효 용량 2~4× |
-| DRAM 대역폭 절감 | 2~4× | 동일 |
-| 복잡도 | 변환 1곳, 연산 유닛 무변경 | SRAM dtype 혼재, matrix op에 dtype/scale field |
+| Mode | weight | activation | matrix 연산 | 비고 |
+|---|---|---|---|---|
+| FP16 | FP16 | FP16 | FP16×FP16→FP32 | 기존 — **0818 bit-exact 불변식 유지** |
+| **W8A16** (N6a) | INT8 packed (SRAM 상주) | FP16 | feeder dequant → FP16×FP16→FP32 | LLM weight-only 표준 (GPTQ/AWQ류) |
+| **W8A8** (N6b) | INT8 packed | INT8 (per-token 동적) | INT8×INT8→INT32 → requant | quant/requant sandwich가 여기서 발동 |
 
-v09는 **A**를 채택한다 — 기능 검증이 1차 목표이고, SRAM/연산 의미론이
-FP16으로 유지되어 bit-exact 불변식(§2.4)이 그대로 성립하며, weight-only의
-지배 병목(DRAM 대역폭) 이득은 양쪽이 동일하다. B의 이득(SRAM 용량 2~4×)은
-weight 재적재 빈도에 비례하므로, **N7의 perf counter(DMA bytes/SRAM 점유)
-데이터로 전환 여부를 판단**하고 spec에는 B의 ISA 확장 형태(matrix operand
-dtype/scale field)를 후보로 기재한다.
-
-- 형식: **INT8 per-output-channel symmetric**, 16-bit 원소당 2개 packed
-  (scale = FP16 벡터, 채널당 1개) → 2차로 INT4 group-wise(g=64~128), 원소당 4개
-- 흐름: checkpoint(BF16) → 호스트 quantizer(`make_quant_weights.py`)가
-  packed INT8 blob + scale 벡터 생성(global 배치) → `GLOAD(dtype=INT8,
-  scale)` 가 tile 적재 시 unpack+FP16 복원 → 이후 연산 경로는 FP16 모드와 동일
+- weight 형식: **INT8 per-output-channel symmetric**, 원소당 2개 packed
+  (2차: INT4 group-wise g=64~128, 원소당 4개). 호스트 quantizer
+  (`make_quant_weights.py`)가 packed blob + scale 벡터 생성
+- activation 형식: **per-token(행) 동적 symmetric** — 정적 per-tensor는
+  LLM activation outlier로 품질 저하가 알려져 있어 기본에서 제외.
+  scale 산출은 device의 `QUANT` 명령(absmax 경유) 또는 host(검증용 참조)
+- requant 산술: INT32 누적 × (w_scale[col] × a_scale[row]) → FP16 (RNE).
+  FP32 곱은 requant 유닛 내부에만 (기존 FP32 누적기와 동일한 위치)
 - 정렬 규칙: packed tensor의 행/타일 시작은 원소 경계 — 차원이 64 배수라
   자동 충족 (spec에 명문화)
-- 검증 사다리: ① unpack+dequant 단위 테스트(복원값 = 호스트 계산과 bit-exact)
-  ② layer별 FP16 대비 오차 계측 ③ 세 모델 3-token greedy — **수용 기준:
-  token 일치(기대) 또는 불일치 시 logits 지표와 함께 문서화** (양자화는
-  근사이므로 golden bit-일치를 요구하지 않는 유일한 모드)
+- 검증 사다리:
+  ① unpack/dequant/QUANT/requant 단위 테스트 (host 계산과 bit-exact)
+  ② layer별 FP16 대비 오차 계측 (W8A16, W8A8 각각)
+  ③ 세 모델 3-token greedy — **수용 기준: W8A16은 token 일치 기대,
+  W8A8은 token 일치 또는 불일치 시 logits 지표와 함께 문서화**
+  (양자화 모드는 golden bit-일치를 요구하지 않는 유일한 모드)
 
 ## 4. Compiler 변경 (전부 v09 신규 파일, 기존 경로 불변)
 
@@ -168,7 +176,8 @@ dtype/scale field)를 후보로 기재한다.
 | **N3** | 연산: vector 256-lane 전 연산 + matrix 64×64 (§2.2 수정 반영) | op별 numpy FP16-step reference와 bit-exact |
 | **N4** | `backend_v09.py` + SRAM staging codegen | **proxy layer가 0818 결과와 bit-exact** (불변식 1차 증명) |
 | **N5** | 세 모델 golden을 v09 FP16 모드로 실행 | **token+logits가 기존 golden과 bit-exact** |
-| **N6** | quantization: quantizer(pack) + unpack/dequant GLOAD + INT8 weight 실행 | §3 사다리 |
+| **N6a** | W8A16: quantizer(pack) + feeder dequant + INT8 weight 상주 실행 | §3 사다리 ①②③ |
+| **N6b** | W8A8: `QUANT` 명령 + INT8 MAC(INT32 누적) + requant | §3 사다리 ①②③ |
 | **N7** | 통계·문서화: v09 vs 0818 비교표(word/DMA/SRAM) + 공유 SRAM 접근 통계(분리 필요성 판단 자료), spec 최종판 | `report/report_v09.md` |
 
 예상 규모: N1~N3 = C-model 신작(~1,000줄), N4 = compiler 최대 작업(staging
@@ -183,3 +192,4 @@ codegen). N5까지가 "동작 동일 증명", N6부터가 신기능.
 | 256-lane chunking이 수치 변경 | §2.4 순서 보존 규칙 spec 명문화 + N3 bit-exact 검증 |
 | packed 접근의 경계 오류 | 정렬 규칙 spec 명문화 (64-배수 차원에서 자동 충족) + GLOAD 경계 검사 + unpack 단위 테스트 |
 | INT8에서 greedy token 변화 | 수용 기준 사전 정의(§3), per-channel → group-wise 세분화 여지 |
+| W8A8의 LLM activation outlier | per-token 동적 scale을 기본으로 채택. 부족 시 smoothing(가중치-활성 스케일 재배분)류 기법을 host 전처리로 후보화 |
