@@ -9,25 +9,28 @@
 > ③ vector 유닛 256-lane 고정, ④ 이에 맞는 ISA 확정 (ver.08 리뷰 §7.5 반영).
 > 산출물은 설계팀에 전달할 **spec 문서 + 동작 C-model + compiler backend + 평가표**다.
 
-## 확정된 결정사항 (2026-08-24, 사용자)
+## 확정된 결정사항 (2026-08-24, 사용자 · 3차 최종)
 
 | # | 항목 | 결정 |
 |---|---|---|
-| 1 | Global 주소 | **32-bit, 주소 단위 = 16-bit 원소(FP16 1개)** — ver.08과 동일 체계, 공간 8 GiB |
-| 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad), 8 MiB** (2026-08-24 확정). 4M 원소 → **22-bit 주소가 단일 word에 수납**(op 2 + addr 22 + opcode 8 = 32). 유닛별 분리는 후속 옵션(§2.3) |
-| 3 | Quantization | **activation까지 포함해 스펙화** (2026-08-24 2차 결정). weight: packed INT8/INT4, per-channel. activation: **W8A8, matrix unit 전후 quant/requant sandwich, per-token 동적 scale**. 구현은 W8A16(N6a) → W8A8(N6b) 순 |
-| 4 | loop/repeat | v09 범위 밖 (별도 단계; index-sincos op도 이와 한 묶음) |
+| 1 | Global 주소 | **32-bit 주소, 단위 = 16-bit** (8 GiB). global에는 원소/dtype 개념 없음 — "16-bit 칸이 나열된 저장소". dtype 해석은 연산 유닛에서만 |
+| 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad), 8 MiB**. 주소 단위 = **4-bit nibble** (FP32/FP16/INT8/INT4 공존을 dtype 독립 주소 산술로). 32-bit 주소 field에 유효 24-bit — **기존 ver.08 주소 기제 그대로 사용**, 여유 bit는 유지(부족 시 그때 축소). 유닛별 분리는 후속 옵션(§2.3) |
+| 3 | DMA | GLOAD/GSTORE는 **dtype 무관(blind)** — 16-bit 단위 원본 이동만. 환산 규칙: global 1칸 = SRAM 4 nibble |
+| 4 | 기존 ISA | 주소설정·load/save·연산 **ver.08 인코딩 유지, 주소/stride/cols만 nibble 재해석** (FP16 기준 ×4 환산 — compiler 기계적 변환) |
+| 5 | 작업 순서 | **memory 관련 이슈 먼저 확정, quant/dequant·matmul 설계는 보류** (3차 결정). W8A8 방향성(2차 결정)은 유지하되 세부는 compute 설계 단계로 이월 |
+| 6 | loop/repeat | v09 범위 밖 (별도 단계; index-sincos op도 이와 한 묶음) |
 
-주소 단위 16-bit + packed 저장의 함의:
+> 3차 결정으로 **강등/폐기된 v1 초안 항목**: 단일-word SRAM 주소(op2+addr22),
+> 2-word GLOAD 주소 형식, descriptor 3요소 재정의(MAIN/PARTIAL 폐지) —
+> ver.08 구조 유지 원칙에 따라 "측정 후 후속 최적화 후보"로 이동 (ISA_V09.md §6).
 
-- packing은 이 주소 체계에서 **필수** (원소당 INT8 1개면 절반 낭비 → 용량 절감 소멸)
-- **정렬 문제 없음**: 모든 tensor 차원이 64 배수이고 packing 계수(2, 4)가 64를
-  나누므로, 행·tile 경계가 항상 원소 경계에 정렬 — straddle 미발생.
-  spec에 정렬 규칙("packed tensor의 행 시작은 원소 경계", 우리 shape에서 자동
-  충족)을 명문화
-- 추가 복잡도는 국소적 3곳: host quantizer의 pack(numpy view), GLOAD의
-  unpack 루프(원소당 2~4값 + scale 곱), memplan의 논리 shape/저장 원소 수 구분
-- ver.08과 같은 주소 산술이라 **bit-exact 불변식(§2.4)에 가장 유리**
+nibble 주소 + packed 저장의 함의:
+
+- 모든 dtype이 정수 개 nibble 칸(FP32=8, FP16=4, INT8=2, INT4=1)을 차지 →
+  주소 산술이 dtype 독립, packing straddle 미발생
+- 정렬 규칙: tensor 시작 nibble 주소는 자기 dtype 폭의 배수 — 64-배수
+  차원에서 자동 충족, 위반은 컴파일러 오류 (spec 명문화)
+- ver.08 주소 산술의 ×4 배율일 뿐이라 **bit-exact 불변식(§2.4)에 가장 유리**
 
 ---
 
@@ -49,14 +52,14 @@
 ```
         ┌─────────────────────────────────────────────┐
         │  Global Memory (DRAM/HBM 모델)               │
-        │  32-bit 주소, 단위 16-bit 원소 (8 GiB)        │
-        │  FP16 tensor + packed INT8/INT4 weight blob  │
+        │  32-bit 주소, 단위 16-bit (8 GiB)            │
+        │  내용물 해석 없음 — 그냥 16-bit 칸 나열       │
         └──────────────────┬──────────────────────────┘
-                    DMA: GLOAD / GSTORE  (dtype 보존 — 변환 없음)
+                    DMA: GLOAD / GSTORE  (dtype 무관 — 원본 이동만)
         ┌──────────────────▼──────────────────────────┐
         │  Unified SRAM (공유 scratchpad, 8 MiB)       │  ← SW 관리, 결정적
-        │  FP16 activation + packed INT8 weight 공존   │     22-bit 원소 주소
-        └─────────┬───────────────────┬───────────────┘
+        │  FP32/FP16/INT8/INT4 공존                    │     4-bit nibble 주소
+        └─────────┬───────────────────┬───────────────┘     (32-bit field, 유효 24-bit)
    ┌──────────────▼─────────────┐ ┌───▼──────────────────┐
    │ [Quant] act FP16→INT8      │ │ Vector Unit          │
    │  Matrix Unit 64×64          │ │ 256 lanes, FP16/FP32 │
@@ -73,36 +76,36 @@
 - SRAM은 dtype 공존: activation FP16, weight는 **packed INT8 그대로 상주**
   (SRAM 유효 용량 2×, DMA는 변환 없이 단순 이동). weight dequant는
   matrix 입구 feeder에서 (W8A16 mode) 또는 불필요 (W8A8 mode — INT8 직결)
-- 주소는 원소 단위 16-bit, **단일 word 설정** (half 상태머신 hazard 제거)
+- 주소는 nibble 단위, **ver.08의 2-half 주소 설정 기제 유지** (stale-high
+  위험은 "두 half 항상 emit" 관례를 필수 규칙으로 명문화해 관리)
 - 공유 SRAM: allocator/DMA 엔진 1개. 유닛별 분리는 §2.3 후속 옵션
 - vector 길이: vlen ∈ [1, 256] (초과는 backend가 chunk)
 
 ## 2. ISA v09 — ver.08 대비 변경 목록
 
-### 2.1 신규 (이번 범위의 본체)
-- `GLOAD  sram_dst, g_addr32, shape/stride, dtype` — global→SRAM DMA,
-  **dtype 보존 이동** (INT8 packed는 packed 그대로). 32-bit global 주소는
-  **2-word 명령 형식**(명령 word + 주소 word) — half 분할 설정 폐지
-- `GSTORE g_addr32, sram_src, shape/stride` — SRAM→global
-- **matrix op의 dtype mode**: `FP16`(feeder에서 INT8 weight를 per-channel
-  scale로 dequant해 FP16×FP16→FP32 누적 = W8A16) / `INT8`(INT8×INT8→
-  **INT32 누적** = W8A8)
-- **Requant(출력단)**: 누적기 × (weight per-channel scale × act per-token
-  scale) → FP16 저장. scale은 SRAM의 벡터 operand로 지정 (행/열 인덱싱)
-- **`QUANT` (vector 명령)**: activation row의 absmax → scale 산출 →
-  round-to-nearest → INT8 pack. per-token 동적 scale의 생산자.
-  (absmax = max(x,−x)+reduce-max — **seeded reduce-max 수정(§2.2)이 전제**)
-- vector/matrix 연산의 operand 주소 = SRAM 16-bit 주소 (단일 word 설정)
-
-### 2.2 ver.08 버그·불일치 수정 (리뷰 §7.3 반영, v09에서 확정)
-- reduce-max: **첫 원소 seed** (V3-003 수정) → softmax column-fold 우회 제거
-- 표준 tanh-GELU activation mode 추가 (vendor식은 legacy mode로 병존, V3-004)
-- immediate: **signed int16 정의** (V3-030 수정)
-- save lane 수 = 직전 연산 결과 길이 (V3-006 수정)
-- descriptor: **start + stride + shape** 3요소로 재정의 (MAIN/PARTIAL 폐지,
-  죽은 main_addr/main_rows 제거, vector에는 비적용 명문화)
-- 종료/저장 분리: `HALT` 신설, `SNAPSHOT`은 저장 전용 (0xF0 정리)
+### 2.1 신규 — memory 편 (이번 범위의 본체, ISA_V09.md 확정)
+- `GLOAD` (5 words): global→SRAM DMA. w0 opcode / w1 global 주소 32-bit /
+  w2 global 행 stride 32-bit (wide stride 직접 표현 — V3-027 해소) /
+  w3 SRAM nibble 주소 / w4 rows|cols(16-bit 단위 개수).
+  **dtype 무관 원본 이동** — packed blob도 그냥 "16-bit 칸들"
+- `GSTORE` (5 words): SRAM→global, 동일 형식 역방향
+- 종료/저장: `HALT` 신설(종료 + global 전체 기록 = 유일한 결과 회수 경로),
+  `SNAPSHOT`(0xF0)은 중간 checkpoint 전용
 - 범위 초과 접근(global/SRAM 모두)은 **오류** (silent corruption 금지)
+- 기존 주소설정/load/save/연산: **ver.08 인코딩 그대로, SRAM nibble 재해석**
+
+### 2.2 compute 편 — **보류** (3차 결정: memory 확정 후 별도 설계)
+
+아래는 방향성 합의만 있고 세부(인코딩·mode bit 위치)는 이월:
+
+- matrix dtype mode (FP16 / W8A16 feeder-dequant / W8A8 INT8×INT8→INT32),
+  requant 출력단, `QUANT` vector 명령
+- 256-lane reduce의 FP32 내부 누적 + carry-in/writeout 기제
+- ver.08 버그 수정: reduce-max 첫 원소 seed(V3-003), 표준 tanh-GELU
+  mode(V3-004), signed int16 immediate(V3-030), save lane 수 =
+  직전 결과 길이(V3-006)
+- descriptor 3요소 재정의(MAIN/PARTIAL 폐지)와 단일-word 주소는
+  **후속 최적화 후보로 강등** (ver.08 구조 유지 원칙)
 
 ### 2.3 명시적으로 미룸 (v09 범위 밖, spec에 후보로만 기재)
 - **유닛별 SRAM 분리** (mSRAM/vSRAM + 유닛 간 전송) — 공유로 시작,
@@ -118,7 +121,7 @@
 
 ### 2.4 수치 불변식의 설계 근거 (FP16 모드 ≡ 0818 bit-exact)
 - 저장 FP16 / 연산 FP32 / 저장 시 RNE — 0818 계약 유지 (실측 §7 검증됨)
-- 주소 체계(32-bit, 16-bit 원소)가 ver.08과 동일 → 주소 산술 동일
+- 주소 체계 = ver.08 그대로에 nibble ×4 배율만 적용 → 주소 산술 동형
 - 256-lane chunking이 순서를 바꾸지 않도록: **reduce는 chunk 내부 순차 +
   chunk 간 FP32 carry를 in-order 누적** = 기존 flat 순차와 동일 순서
 - matmul K 누적: tile 순서 유지, FP32 누적기 유지
@@ -170,10 +173,11 @@
 
 | 단계 | 내용 | Gate |
 |---|---|---|
-| **N0** | ISA v09 spec 문서(`d_compiler/ISA_V09.md`) — **초안 작성 완료(2026-08-24)**, 인코딩 수준 | 사용자 리뷰·승인 (§6 확인 3건 포함) |
-| **N1** | `mysim_v09.cpp` 골격: global/공유 SRAM 메모리 객체, decode 루프, HALT/SNAPSHOT, 경계 검사, perf counter | 단위 테스트 |
-| **N2** | 데이터 이동: GLOAD/GSTORE (FP16, 2-word 주소), descriptor | `isa_v09.py` round-trip + 이동 단위 테스트 |
-| **N3** | 연산: vector 256-lane 전 연산 + matrix 64×64 (§2.2 수정 반영) | op별 numpy FP16-step reference와 bit-exact |
+| **N0** | ISA v09 spec — **memory 편 v2 작성 완료(2026-08-24, 3차 결정 반영)**. compute 편은 memory 승인 후 별도 N0' | 사용자 리뷰·승인 |
+| **N1** | `mysim_v09.cpp` 골격: global(16-bit 단위)/공유 SRAM(nibble 단위) 메모리 객체, decode 루프, HALT/SNAPSHOT, 경계 검사, perf counter | 단위 테스트 |
+| **N2** | 데이터 이동: GLOAD/GSTORE (5-word 형식) + ver.08 load/save·주소설정의 nibble 재해석 | `isa_v09.py` round-trip + 이동 단위 테스트 |
+| **N0'** | compute 편 spec (dtype mode·QUANT·requant·reduce carry·버그수정 3건) | 사용자 리뷰·승인 |
+| **N3** | 연산: vector 256-lane 전 연산 + matrix 64×64 (N0' 반영) | op별 numpy FP16-step reference와 bit-exact |
 | **N4** | `backend_v09.py` + SRAM staging codegen | **proxy layer가 0818 결과와 bit-exact** (불변식 1차 증명) |
 | **N5** | 세 모델 golden을 v09 FP16 모드로 실행 | **token+logits가 기존 golden과 bit-exact** |
 | **N6a** | W8A16: quantizer(pack) + feeder dequant + INT8 weight 상주 실행 | §3 사다리 ①②③ |
@@ -187,7 +191,7 @@ codegen). N5까지가 "동작 동일 증명", N6부터가 신기능.
 
 | 리스크 | 완화 |
 |---|---|
-| SRAM staging으로 프로그램 word 증가 (DMA 명령 추가) | 단일-word SRAM 주소 + 2-word global 주소 + 결과길이 save로 상쇄. N4에서 `analyze_isa_stats` 전·후 비교로 정량 관리 (DMA는 bytes 축 별도 계상) |
+| SRAM staging으로 프로그램 word 증가 (DMA 명령 추가) | GLOAD 5-word가 ver.08의 strided load 대비 크지 않음(주소 4-word + rows/cols 2-word + load 1-word = 7-word 상당). N4에서 `analyze_isa_stats` 전·후 비교로 정량 관리 (DMA는 bytes 축 별도 계상). 단일-word 주소 등 인코딩 압축은 측정 후 후보 |
 | 공유 SRAM의 유닛 간 경합 | 1차 모델은 기능 검증이라 무관. N7 접근 통계로 분리 필요성을 **데이터로** 판단 (§2.3 옵션) |
 | 256-lane chunking이 수치 변경 | §2.4 순서 보존 규칙 spec 명문화 + N3 bit-exact 검증 |
 | packed 접근의 경계 오류 | 정렬 규칙 spec 명문화 (64-배수 차원에서 자동 충족) + GLOAD 경계 검사 + unpack 단위 테스트 |
