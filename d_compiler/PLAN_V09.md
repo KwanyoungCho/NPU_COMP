@@ -73,11 +73,14 @@
   (죽은 main_addr/main_rows 제거, vector에는 비적용 명문화)
 - 종료/저장 분리: `HALT` 신설, `SNAPSHOT`은 저장 전용 (0xF0 semantics 정리)
 - 범위 초과 접근은 **오류** (silent corruption 금지, V3-023/027)
-- **RoPE 각도 파이프라인 FP32화** (2026-08-24 계측, §7.3-⑨a): ver.08은
-  pos·각도가 FP16 경로라 pos 1024에서 cos 오차 0.17, 65504+에서 NaN —
-  v09는 position을 정수/FP32 스칼라 레지스터로 받아 `pos×freq`를 FP32로
-  유지한 채 cos/sin (FP32면 131K position에서 오차 ~0.008 rad).
-  vSRAM에 FP32 스칼라/보조 레지스터 소수를 두는 형태로 수용
+- **index 기반 `sincos` op** (2026-08-24 계측, §7.3-⑨a): ver.08은 각도가
+  FP16 경로라 pos 1024에서 cos 오차 0.17, 65504+에서 NaN. v09의 해법은
+  datapath FP32화가 아니라 **op 입력 의미 변경** — `sincos(pos: int32,
+  freq: fp16)` 가 내부에서만 FP32로 `pos×freq` 및 mod 2π를 계산하고
+  cos/sin 결과([-1,1], FP16으로 충분)를 출력. FP32는 matmul 누적기처럼
+  op 내부에만 존재하므로 FP16 저장 구조 불변. 131K position에서 오차
+  ~0.008 rad. (host 개입이 스텝마다 있는 실행 모델에서는 host cos/sin
+  row 전달로 충분하므로, 이 op는 **loop/repeat 도입과 한 묶음**의 항목)
 
 ### 2.3 명시적으로 미룸 (v09 범위 밖, spec에 후보로만 기재)
 - loop/repeat 명령 (제어 word 93% 문제의 근본 해법이나 실행 모델 변경이 큼)
