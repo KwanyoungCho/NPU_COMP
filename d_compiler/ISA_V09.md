@@ -17,6 +17,24 @@
 | 실행 종료 | `HALT` 명령으로만 종료. **HALT 시 global memory 전체를 출력 파일로 기록** (ver.08의 "결과 유실" 함정 제거). `SNAPSHOT`은 중간 checkpoint 덤프(선택) |
 | 오류 | global/SRAM 범위 초과, vlen>256, 미정의 opcode/mode → **즉시 오류 종료** (silent corruption 금지) |
 
+## 0.1 주소 granularity 결정 (2026-08-24 검토)
+
+SRAM에 FP16/INT8/INT4가 공존하므로 nibble(4-bit) 단위 주소도 검토했으나
+**16-bit 원소 단위를 유지**한다. 근거:
+
+1. 인코딩 예산: 8 MiB 기준 원소 주소 22-bit만이 단일 word에 수납
+   (nibble은 24-bit → 주소 설정이 2-word로 회귀 — ver.08 실측 최대 비용
+   항목(주소 설정 48%)의 재발). stride도 동일하게 팽창
+2. 주소 단위를 바꿔도 개수/stride의 단위 문제로 dtype 인식은 사라지지
+   않음 — dtype field는 어차피 필요하며, 그렇다면 정보량이 동일
+3. HW 비용: nibble 단위 쓰기는 read-modify-write 유발
+4. 실사용: 모든 차원이 64 배수 + packing 계수(2,4)가 64를 나눠
+   **비정렬 시작이 발생하는 경우가 전 workload에서 0회**
+
+절충: dtype을 가진 명령(GLOAD/MMUL 등)에 **2-bit 시작 nibble offset 예약
+field**를 정의한다 — v09에서는 0 고정(비0은 오류), 미래에 비정렬 시작이
+필요해지면 주소 체계 변경 없이 이 field만 활성화.
+
 ## 1. 상태(descriptor) 모델 — ver.08 대비 대폭 단순화
 
 operand 슬롯 4개: `SRC1(0) · SRC2(1) · DST(2) · SCALE(3)`. 슬롯별 상태는 3개뿐:
@@ -88,7 +106,7 @@ v09는 **연산이 descriptor를 통해 SRAM을 직접 읽고, vector는 결과�
 w0: [7:0]=0x90  [9:8] dtype(00 FP16 / 01 INT8 / 10 INT4)  [10] dq(scale 첨부)
 w1: global 시작 주소 (32-bit 원소 단위)
 w2: global 행 stride (32-bit)         ← V3-027 해결: vocab 262144 stride 직접 표현
-w3: [31:10] SRAM 목적 주소(22)  [9:0] 예약
+w3: [31:10] SRAM 목적 주소(22)  [9:2] 예약  [1:0] 시작 nibble offset(§0.1, v09에서 0 고정)
 w4: [31:16] rows  [15:0] cols   (논리 원소 수 기준)
 w5: (dq=1일 때) per-channel scale 벡터의 global 주소 (32-bit)
 ```
