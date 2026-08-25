@@ -151,10 +151,24 @@ def test_scalar_broadcast_path():
     _assert_match(mod, {"x": np.asarray([[2.0]], np.float16)})
 
 
+def test_packed_rhs_gemm_matches_0818():
+    """The v09 wide-vocab panel GEMM is bit-exact with the ver.08 lowering."""
+    from npu_compiler.source_gemm_0818 import PackedRhsGemm
+    from npu_compiler.source_gemm_v09 import V09PackedRhsGemm
+    inner, columns = 96, 192          # 3 panels, 2 K-tiles with MAC
+    rng = np.random.default_rng(77)
+    lhs = rng.normal(0, 0.3, inner).astype(np.float16)
+    packed = rng.normal(0, 0.3, inner * columns).astype(np.float16)
+    oracle = PackedRhsGemm(inner, columns).run(lhs, packed)
+    ours = V09PackedRhsGemm(inner, columns).run(lhs, packed)
+    np.testing.assert_array_equal(oracle.view(np.uint16), ours.view(np.uint16))
+
+
 if __name__ == "__main__":
     test_proxy_layer_bit_exact()
     test_long_row_reduce_chunking()
     test_long_elementwise_chunking()
     test_streaming_matmul_paths()
     test_scalar_broadcast_path()
+    test_packed_rhs_gemm_matches_0818()
     print("ALL V09 BACKEND N4 TESTS PASSED")

@@ -23,6 +23,8 @@ def parse_args():
     parser.add_argument("--reference", type=Path,
                         default=BUILD / "qwen3_reference_generate_hello_3.npz")
     parser.add_argument("--no-cache-weights", action="store_true")
+    parser.add_argument("--backend", default="source-0818",
+                        choices=["source-0818", "v09"])
     return parser.parse_args()
 
 
@@ -62,7 +64,8 @@ def main():
         dtype=np.int64,
     )
     compiler = Qwen3SourceCompiler(
-        input_ids.size, assets=assets, cache_weights=not args.no_cache_weights)
+        input_ids.size, assets=assets, cache_weights=not args.no_cache_weights,
+        backend=args.backend)
     state_path = args.output / "state.npz"
     progress_path = args.output / "progress.jsonl"
 

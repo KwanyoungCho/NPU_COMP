@@ -21,26 +21,26 @@ from .qwen3_graph import (
     build_qwen3_prefill_layer_module,
 )
 from .qwen3_model import Qwen3Assets
-from .source_gemm_0818 import PackedRhsGemm
 
 
 class Qwen3SourceCompiler(SourceGenerationSession):
     """Compile static-shape layer programs and run official Qwen3-4B."""
 
-    def __init__(self, sequence, assets=None, *, cache_weights=True):
+    def __init__(self, sequence, assets=None, *, cache_weights=True,
+                 backend="source-0818"):
         self.assets = assets or Qwen3Assets()
-        super().__init__(self.assets.spec, sequence)
+        super().__init__(self.assets.spec, sequence, backend=backend)
         self.cache_plan = build_cache_plan(self.spec)
         self.cache_weights = bool(cache_weights)
         self._weights = {}
         self._lm_weight = None
         self.prefill_program = driver.compile_module(
             build_qwen3_prefill_layer_module(self.spec, 0, self.sequence),
-            backend="source-0818", reuse=True)
+            backend=self.backend, reuse=True)
         self.norm_program = driver.compile_module(
             build_qwen3_final_norm_module(self.spec, 1),
-            backend="source-0818", reuse=True)
-        self.lm_gemm = PackedRhsGemm(self.spec.hidden_size, self.spec.vocab_size)
+            backend=self.backend, reuse=True)
+        self.lm_gemm = self.make_lm_gemm(self.spec.hidden_size, self.spec.vocab_size)
         self.decode_programs = {}
 
     def compile_stats(self):
@@ -63,7 +63,7 @@ class Qwen3SourceCompiler(SourceGenerationSession):
         if context not in self.decode_programs:
             self.decode_programs[context] = driver.compile_module(
                 build_qwen3_decode_layer_module(self.spec, 0, context),
-                backend="source-0818", reuse=True)
+                backend=self.backend, reuse=True)
         return self.decode_programs[context]
 
     def _cached(self, key, loader):

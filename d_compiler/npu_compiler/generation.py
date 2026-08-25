@@ -42,13 +42,27 @@ class SourceGenerationResult:
 class SourceGenerationSession:
     """Spec-driven execution bookkeeping shared by all model families."""
 
-    def __init__(self, spec, sequence):
+    BACKENDS = ("source-0818", "v09")
+
+    def __init__(self, spec, sequence, backend="source-0818"):
         self.spec = spec
         self.sequence = int(sequence)
         if self.sequence < 1:
             raise ValueError("prefill sequence must be positive")
+        if backend not in self.BACKENDS:
+            raise ValueError(f"unsupported generation backend {backend!r}")
+        self.backend = backend
         self.invocations = 0
         self.elapsed_seconds = 0.0
+
+    def make_lm_gemm(self, inner, columns):
+        """Wide-vocab panel GEMM for the session's backend (bit-identical
+        K-tile accumulation order on both targets)."""
+        if self.backend == "v09":
+            from .source_gemm_v09 import V09PackedRhsGemm
+            return V09PackedRhsGemm(inner, columns)
+        from .source_gemm_0818 import PackedRhsGemm
+        return PackedRhsGemm(inner, columns)
 
     @staticmethod
     def _program_stats(compiled):

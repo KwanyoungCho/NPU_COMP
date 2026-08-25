@@ -25,15 +25,15 @@ from .gemma4_graph import (
 from .gemma4_model import Gemma4Assets, ModelAssetError
 from .gemma4_ple import compute_rows
 from .model_spec import build_cache_plan
-from .source_gemm_0818 import PackedRhsGemm
 
 
 class Gemma4SourceCompiler(SourceGenerationSession):
     """Compile per-class layer programs and run official Gemma 4 E2B text."""
 
-    def __init__(self, sequence, assets=None, *, cache_weights=True):
+    def __init__(self, sequence, assets=None, *, cache_weights=True,
+                 backend="source-0818"):
         self.assets = assets or Gemma4Assets()
-        super().__init__(self.assets.spec, sequence)
+        super().__init__(self.assets.spec, sequence, backend=backend)
         self.cache_plan = build_cache_plan(self.spec)
         self.cache_weights = bool(cache_weights)
         self._weights = {}
@@ -44,8 +44,8 @@ class Gemma4SourceCompiler(SourceGenerationSession):
         self.decode_programs = {}
         self.norm_program = driver.compile_module(
             build_gemma4_final_norm_module(self.spec, 1),
-            backend="source-0818", reuse=True)
-        self.lm_gemm = PackedRhsGemm(self.spec.hidden_size, self.spec.vocab_size)
+            backend=self.backend, reuse=True)
+        self.lm_gemm = self.make_lm_gemm(self.spec.hidden_size, self.spec.vocab_size)
 
     def _layer_class(self, layer_index):
         layer = self.spec.layers[layer_index]
@@ -57,7 +57,7 @@ class Gemma4SourceCompiler(SourceGenerationSession):
             self.prefill_programs[key] = driver.compile_module(
                 build_gemma4_prefill_layer_module(
                     self.spec, layer_index, self.sequence),
-                backend="source-0818", reuse=True)
+                backend=self.backend, reuse=True)
         return self.prefill_programs[key]
 
     def _decode_program(self, layer_index, context):
@@ -66,7 +66,7 @@ class Gemma4SourceCompiler(SourceGenerationSession):
             self.decode_programs[key] = driver.compile_module(
                 build_gemma4_decode_layer_module(
                     self.spec, layer_index, context),
-                backend="source-0818", reuse=True)
+                backend=self.backend, reuse=True)
         return self.decode_programs[key]
 
     def compile_stats(self):
