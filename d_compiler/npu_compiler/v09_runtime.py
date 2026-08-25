@@ -10,6 +10,7 @@ Contract (see d_compiler/ISA_V09.md):
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import threading
@@ -69,7 +70,10 @@ def run(program_words, global_cells):
     program = np.asarray(list(program_words), dtype="<u4")
     cells = np.ascontiguousarray(np.asarray(global_cells, dtype=np.uint32),
                                  dtype="<u4").reshape(-1)
-    with tempfile.TemporaryDirectory(prefix="npu-v09-") as name:
+    # Full-model invocations write multi-100MB images; NPU_V09_TMPDIR points
+    # them at a volume with room (e.g. /data2) when the system tmp is tight.
+    tmp_root = os.environ.get("NPU_V09_TMPDIR") or None
+    with tempfile.TemporaryDirectory(prefix="npu-v09-", dir=tmp_root) as name:
         directory = Path(name)
         (directory / "program_memory.bin").write_bytes(program.tobytes())
         (directory / "global_memory.bin").write_bytes(cells.tobytes())
