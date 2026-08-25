@@ -26,6 +26,13 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
     kernel reads weights contiguously (no gather); run_compiled packs the fed data.
     layouts=True enables the A4 tile-blocked layout propagation (matmul-chain
     gather/scatter elimination); layouts=False = pre-A4 row-major, for A/B comparison."""
+    if backend == "v09":
+        # v09 target: ver.08 kernels staged through the 8 MiB SRAM (backend_v09)
+        from . import backend_v09, passes
+        mod = passes.npu_pipeline()(mod)
+        return backend_v09.compile_module(mod, func_name,
+                                          tile=64 if tile is None else tile,
+                                          reuse=reuse)
     if backend in ("0818", "vendor-0818", "source-0818", "0818-source"):
         # ver.08 has native MAIN/PARTIAL sub-tile addressing.  Its backend owns a
         # row-major plan and deliberately does not inherit the 0710 packed layouts.
@@ -67,7 +74,9 @@ def run_compiled(asm, mp, inputs, maxrun=None):
     call (cheap) and runs mysim — NO recompilation. inputs: dict {name->array} or
     positional list. Returns the output (float32, FP16-rounded)."""
     source_target = getattr(asm, "execution_target", None) == "source-0818"
-    gbuf = np.zeros(mp.top, dtype=np.float16 if source_target else np.float32)
+    v09_target = getattr(asm, "execution_target", None) == "v09"
+    gbuf = np.zeros(mp.top, dtype=np.float16 if source_target or v09_target
+                    else np.float32)
     for c in mp.constants:                         # bake constant data into initial G-buffer
         data = mp.const_data[c].astype(np.float32).reshape(-1)
         gbuf[mp.offset[c]:mp.offset[c] + data.size] = data
@@ -91,6 +100,15 @@ def run_compiled(asm, mp, inputs, maxrun=None):
         gbuf[off:off + arr.size] = arr
     out_var = mp.output
     out_off = mp.offset[out_var]; n_out = _numel(mp.shape[out_var])
+    if v09_target:
+        from . import v09_runtime
+        values = np.asarray(gbuf, dtype="<f2").reshape(-1)
+        if values.size % 2:                        # pad to a whole 32-bit cell
+            values = np.concatenate([values, np.zeros(1, dtype="<f2")])
+        images, _ = v09_runtime.run(asm.words, values.view("<u4"))
+        full = np.ascontiguousarray(images[-1]).view("<f2")
+        return full[out_off:out_off + n_out].reshape(
+            mp.shape[out_var]).astype(np.float32)
     if source_target:
         from . import source_runtime_0818
         return source_runtime_0818.run(
