@@ -164,8 +164,13 @@ SRAM --> [ feeder ] --> [ 64x64 array ] --> [ x scale ] --> [ FP32 MAC acc ] -->
 - 대칭(symmetric) 양자화만 지원 — zero-point 없음 (LLM 관행, 하드웨어 단순화)
 - 반올림 모드: round-to-nearest-even (RNE)
 - scale은 **FP32**로 저장·전달 (FP16의 표현 하한 6×10⁻⁵ 문제 회피)
-- normalization/softmax/RoPE 등 vector 연산은 FP16 유지 —
-  LLM에서 해당 연산의 정수화는 정확도 손실로 부적합하다는 것이 일반적 결론
+- normalization/softmax/RoPE 등 vector 연산 경로는 **양자화하지 않고
+  부동소수점으로 유지** — LLM에서 해당 연산의 정수화는 정확도 손실로
+  부적합하다는 것이 일반적 결론
+- 산술 정밀도 계약은 ver.08 그대로: **저장 FP16 / 내부 연산 FP32 / 저장 시
+  RNE 반올림**. 내부 FP32는 긴 합산(normalization의 제곱합, softmax 분모,
+  리덕션)의 정확도에 결정적이며, v09가 새로 더한 것은 연산이 아니라
+  scale 저장용 FP32 저장 형식 하나뿐이다
 
 ## 3. ISA 변경 및 추가
 
