@@ -55,17 +55,17 @@ def test_missing_halt_is_error():
 
 
 def test_unknown_opcode_is_error():
-    _expect_error([0x00000042, HALT], cells(7), "unknown opcode")
+    _expect_error([0x00000047, HALT], cells(7), "unknown opcode")
 
 
 def test_words_after_halt_do_not_execute():
-    images, counters = run([HALT, 0x00000042], cells(5))
+    images, counters = run([HALT, 0x00000047], cells(5))
     assert len(images) == 1
     assert counters["words_executed"] == 1
 
 
 def test_counters_reported_on_error_path():
-    error = _expect_error([NOP, 0x00000041], cells(1), "unknown opcode")
+    error = _expect_error([NOP, 0x00000047], cells(1), "unknown opcode")
     assert error.counters.get("nop") == 1
 
 

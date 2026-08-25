@@ -1,16 +1,33 @@
-"""ISA ver.09 word encoders (memory layer: DMA + control).
+"""ISA ver.09 word encoders (memory layer DMA/control + v09 compute deltas).
 
 Units follow d_compiler/ISA_V09.md: global addresses/strides/cols are 32-bit
 cells; SRAM addresses are 4-bit nibbles (24 effective bits) and must sit on an
-8-nibble (cell) boundary for DMA.  Compute-side encodings arrive with N3.
+8-nibble (cell) boundary for DMA.  ver.08 compute encodings are reused
+verbatim (import them from :mod:`npu_compiler.isa_0818`); this module adds only
+the v09 deltas: per-descriptor dtype bits, scale-address setup, drain/reduce
+carry flags, FP32 vector save, and VQUANT/VDEQUANT.
 """
 from __future__ import annotations
+
+from .isa_0818 import (  # noqa: F401  (re-exported ver.08 encodings)
+    DST, IMM, MAIN, PARTIAL, SCALAR, SRC1, SRC2, VECTOR,
+    enc_addr_hi, enc_addr_lo, enc_load, enc_save, enc_vlen,
+)
+from .isa_0818 import enc_mcols as _enc_mcols_0818
+from .isa_0818 import enc_mrows as _enc_mrows_0818
 
 OP_NOP = 0x00
 OP_SNAPSHOT = 0xF0
 OP_HALT = 0xFF
 OP_GLOAD = 0xA0
 OP_GSTORE = 0xA8
+OP_ASCALE = 0x8A
+OP_WSCALE = 0x8B
+OP_VQUANT = 0x1A
+OP_VDEQUANT = 0x1B
+
+DT_FP16, DT_FP32, DT_INT8, DT_INT4 = 0, 1, 2, 3
+ACT_OFF, ACT_GELU_STD, ACT_SILU, ACT_GELU_LEGACY = 0, 1, 2, 3
 
 SRAM_NIBBLES = 8 * 1024 * 1024 * 2  # 8 MiB, 2^24 nibbles
 DMA_WORDS = 5
@@ -62,6 +79,65 @@ def enc_gload(g_addr, g_stride, sram_addr, rows, cols):
 def enc_gstore(g_addr, g_stride, sram_addr, rows, cols):
     """SRAM[sram_addr..] nibbles -> global[g_addr + r*g_stride ..+cols) cells."""
     return _enc_dma(OP_GSTORE, g_addr, g_stride, sram_addr, rows, cols)
+
+
+# ---------------------------------------------------------------- compute
+
+def enc_mrows(operand, rows, partial=PARTIAL, dtype=DT_FP16):
+    """ver.08 rows word plus the v09 dtype in spare bits [26:25]."""
+    return _enc_mrows_0818(operand, rows, partial) | ((dtype & 3) << 25)
+
+
+def enc_mcols(operand, cols, partial=PARTIAL, dtype=DT_FP16):
+    return _enc_mcols_0818(operand, cols, partial) | ((dtype & 3) << 25)
+
+
+def enc_scale_addr(which, value, high=False):
+    """0x8A (a_scale) / 0x8B (w_scale): FP32 scale-vector SRAM nibble address,
+    two-half form like 0x80."""
+    if which not in (OP_ASCALE, OP_WSCALE):
+        raise V09EncodeError(f"scale opcode must be 0x8A/0x8B, got {which:#x}")
+    half = (int(value) >> 16 if high else int(value)) & 0xFFFF
+    return ((1 if high else 0) << 29) | (half << 8) | which
+
+
+def enc_ascale(address):
+    return [enc_scale_addr(OP_ASCALE, address, False),
+            enc_scale_addr(OP_ASCALE, address, True)]
+
+
+def enc_wscale(address):
+    return [enc_scale_addr(OP_WSCALE, address, False),
+            enc_scale_addr(OP_WSCALE, address, True)]
+
+
+def enc_reduce_sum(carry_in=False):
+    return ((1 if carry_in else 0) << 27) | 0x14
+
+
+def enc_reduce_max(carry_in=False):
+    """v09 semantics: seeded from the first element (V3-003 fix)."""
+    return ((1 if carry_in else 0) << 27) | 0x19
+
+
+def enc_vector_save_fp32():
+    """Vector save writing raw FP32 (flag [25]); lane count = result length."""
+    return (1 << 25) | 0x98
+
+
+def enc_matrix_save(carry_in=False, hold=False, strided=0, ncols=0, start=0):
+    """Matrix drain save; [27]=carry-in / [26]=hold chain group-wise dequant
+    through the FP32 drain accumulator (00 = plain ver.08 behavior)."""
+    return (enc_save(1, strided, ncols, start)
+            | ((1 if carry_in else 0) << 27) | ((1 if hold else 0) << 26))
+
+
+def enc_vquant(int4=False):
+    return ((1 if int4 else 0) << 27) | OP_VQUANT
+
+
+def enc_vdequant(int4=False):
+    return ((1 if int4 else 0) << 27) | OP_VDEQUANT
 
 
 def decode_dma(words):
