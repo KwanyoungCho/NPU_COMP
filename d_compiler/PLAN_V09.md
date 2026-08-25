@@ -16,7 +16,7 @@
 | 1 | Global 주소 | **32-bit 주소, 단위 = 32-bit 칸** (**16 GiB**, 4차 결정). global에는 원소/dtype 개념 없음 — DMA 전용, 크기도 칸 개수로만 정의. dtype 해석은 연산 유닛에서만 |
 | 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad), 8 MiB**. **시작 주소 단위 = 4-bit nibble**, 32-bit 주소 field에 유효 24-bit — **기존 ver.08 주소 기제 그대로 사용**, 여유 bit는 유지(부족 시 그때 축소). 유닛별 분리는 후속 옵션(§2.3) |
 | 3 | rows/cols/stride | **element 단위** (4차 결정, 2안) — 16-bit field·값이 ver.08과 동일(FP16 시), dtype별 표현 낭비 없음. 주소 생성은 dtype 폭(nibble)을 곱해 물리화 |
-| 4 | dtype 설정 | **기존 명령 spare bit** (4차 결정): 0x88/0x89(matrix operand)·0x82(vector)에 2-bit, `00=FP16/01=FP32/10=INT8/11=INT4`. 신규 상태 레지스터 없음 → stale hazard 원천 차단, ver.08 프로그램 = dtype FP16인 유효 v09 프로그램 |
+| 4 | dtype 설정 | **기존 명령 spare bit** (4차 결정): 0x88/0x89의 [26:25] 2-bit (vector 피연산자도 동일 descriptor 경유), `00=FP16/01=FP32/10=INT8/11=INT4`. 신규 상태 레지스터 없음 → stale hazard 원천 차단, ver.08 프로그램 = dtype FP16인 유효 v09 프로그램 |
 | 5 | DMA | GLOAD(0xA0)/GSTORE(0xA8), **dtype 무관(blind)·동기(blocking)**, **4-word** (SRAM 주소 24-bit를 opcode word [31:8]에 수납 — 6차 결정). 환산: global 1칸 = SRAM 8 nibble. SRAM 쪽 주소는 8-nibble(칸) 정렬 규칙 |
 | 6 | 기존 ISA | 주소설정·load/save·연산 **ver.08 인코딩 유지**: 0x80 주소만 nibble 재해석, rows/cols/stride/vlen은 값 그대로 |
 | 7 | 작업 순서 | memory 먼저 확정(3차) → **compute/양자화 5차 결정으로 확정 완료** (2026-08-24) |
@@ -95,7 +95,7 @@ nibble 시작주소 + element 단위 shape의 함의:
   표현 — V3-027 해소) / w3 rows|cols(32-bit 칸 개수).
   **dtype 무관 원본 이동·동기** — packed blob도 그냥 "칸들"
 - `GSTORE` 0xA8 (4 words): SRAM→global, 동일 형식 역방향
-- dtype 운반: 0x88/0x89·0x82 spare 2-bit (§확정 결정 4) — 신규 명령 없음
+- dtype 운반: 0x88/0x89의 spare 2-bit [26:25] (§확정 결정 4) — 신규 명령 없음
 - 종료/저장: `HALT` 신설(종료 + global 전체 기록 = 유일한 결과 회수 경로),
   `SNAPSHOT`(0xF0)은 중간 checkpoint 전용
 - 범위 초과 접근(global/SRAM 모두)은 **오류** (silent corruption 금지)

@@ -13,7 +13,7 @@
 | M1 | Global | 32-bit 주소, **단위 = 32-bit 칸** → 16 GiB. DMA 전용, dtype 개념 없음 |
 | M2 | SRAM | 8 MiB, **nibble 단위** (유효 24-bit, ver.08 32-bit field 재사용). compute는 SRAM만 접근 |
 | M3 | rows/cols/stride | **element 단위** — 16-bit field·값 ver.08과 동일 |
-| M4 | dtype | 0x88/0x89·0x82 **spare 2-bit**: `00=FP16 01=FP32 10=INT8 11=INT4` |
+| M4 | dtype | **0x88/0x89의 spare 2-bit [26:25]**: `00=FP16 01=FP32 10=INT8 11=INT4` (vector 피연산자도 동일 descriptor 사용) |
 | M5 | DMA | GLOAD 0xA0 / GSTORE 0xA8, dtype 무관·동기, 4-word (SRAM 주소 24-bit는 opcode word에 수납) |
 
 **5차 (compute/양자화)**
@@ -78,9 +78,10 @@ b가 `[S+4,S+8)`. INT4 8개는 값0이 bit[3:0]부터. host numpy(little-endian)
 ## 2. dtype 운반 — spare bit (신규 명령 없음)
 
 dtype은 **operand 단위** 속성. 자기 descriptor와 같은 word에 원자적으로 싣는다:
-`0x88/0x89`의 spare 2-bit(가안 [26:25], N1 확정) = 해당 matrix operand,
-`0x82`의 spare 2-bit = vector operand. **FP16=00** 이므로 ver.08 프로그램은
-그대로 "dtype FP16인 유효한 v09 프로그램".
+`0x88`/`0x89`(rows/cols)의 spare 2-bit **[26:25]** 가 해당 operand의 dtype이다.
+vector 연산의 피연산자도 같은 descriptor(`desc_[operand]`)를 거치므로 별도 통로가
+필요 없다 — `0x82`(vlen)는 길이만 나르고 dtype을 싣지 않는다 (단일 기제 원칙).
+**FP16=00** 이므로 ver.08 프로그램은 그대로 "dtype FP16인 유효한 v09 프로그램".
 
 ## 3. DMA — GLOAD 0xA0 / GSTORE 0xA8 (4 words, 동기)
 
@@ -107,7 +108,7 @@ w3: [31:16] rows  [15:0] cols (칸 개수)
 |---|---|
 | `0x80` 주소 (2-half) | **SRAM nibble 주소** — 두 half 모두 emit 필수 (V3-025 관례를 규칙으로) |
 | `0x88/0x89` rows/cols | element 개수 — 값 그대로 + spare bit dtype |
-| `0x82` vlen | 그대로 + spare bit dtype |
+| `0x82` vlen | 그대로 (상한 256 lane) |
 | `0x90/0x98` load/save | SRAM↔유닛 (인코딩·strided bit 그대로) |
 | 연산 전체 | 그대로 — dtype mode는 Part II |
 | MAIN/PARTIAL | 그대로 (접근=PARTIAL, MAIN=stride) |
