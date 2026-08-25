@@ -190,7 +190,7 @@ nibble 시작주소 + element 단위 shape의 함의:
 | **N2** | 데이터 이동: GLOAD 0xA0/GSTORE 0xA8 (5-word) + ver.08 주소설정 nibble 재해석·dtype spare bit | ✅ DMA+`isa_v09.py` round-trip 테스트 (2026-08-25); 주소설정/dtype 재해석은 N3 연산과 함께 |
 | **N3** | 연산: vector 256-lane 전 연산(reduce carry 포함) + matrix 3단 파이프라인 + VQUANT/VDEQUANT + 버그수정 3건 | ✅ (2026-08-25) FP16 배터리는 0818 oracle과 byte-exact, v09 신규 기능은 산술 재현 numpy reference와 bit-exact; 음수 imm 전수 확인은 N4 codegen에서 |
 | **N4** | `backend_v09.py` + SRAM staging codegen | ✅ (2026-08-25) proxy layer(홀수 차원 attention 전체) + 스트리밍 matmul + chunked reduce 모두 **0818 결과와 bit-exact** |
-| **N5** | 세 모델 golden을 v09 FP16 모드로 실행 | **token+logits가 기존 golden과 bit-exact** |
+| **N5** | 세 모델 golden을 v09 FP16 모드로 실행 | ✅ (2026-08-25) **세 모델 모두 token·hidden·KV cache·step별 logits까지 golden과 bit-exact** — Llama [358,2846,4560] / Gemma [108,236777,236789] (173s, table PLE) / Qwen [358,1184,311]. 불변식 최종 증명 완료 |
 | **N6a** | W8A16: quantizer(pack) + feeder dequant + INT8 weight 상주 실행 | §3 사다리 ①②③ |
 | **N6b** | W8A8: VQUANT 시퀀스 + INT8 MAC(INT32 누적) + 출구 dequant | §3 사다리 ①②③ |
 | **N7** | 통계·문서화: v09 vs 0818 비교표(word/DMA/SRAM) + 공유 SRAM 접근 통계(분리 필요성 판단 자료), spec 최종판 | `report/report_v09.md` |
