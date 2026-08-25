@@ -14,7 +14,9 @@
 //     ver.08 program runs as dtype FP16).
 //   * Arithmetic contract: FP16 storage / FP32 compute / RNE on FP16 store.
 //     Feeders do lossless format conversion only; scale restoration (dequant)
-//     happens once at the matrix drain.  ver.08 fixes: seeded reduce-max,
+//     happens inside matmul as each K-tile product enters the FP32 MAC
+//     accumulator, so the existing MAC bit chains group-quantized tiles and
+//     save keeps plain ver.08 semantics.  ver.08 fixes: seeded reduce-max,
 //     signed int16 immediates, standard tanh-GELU on activation code 1.
 //   * Out-of-range or misaligned access is a hard error (no silent corruption).
 //   * HALT (0xFF) is the only normal termination and appends the global image
@@ -38,7 +40,6 @@ namespace {
 
 constexpr std::size_t kSramBytes = 8u << 20;            // 8 MiB
 constexpr std::size_t kSramNibbles = kSramBytes * 2;    // 2^24
-constexpr std::uint32_t kMaxVlen = 256;                 // vector unit lanes
 
 enum Dtype : unsigned { FP16 = 0, FP32 = 1, INT8 = 2, INT4 = 3 };
 
@@ -215,16 +216,9 @@ private:
     std::vector<float> input1_;
     std::vector<float> input2_;
     unsigned in_dtype_[2] = {FP16, FP16};
-    std::vector<float> output_;
-    std::vector<long long> iacc_;           // INT32-model matmul accumulator
-    bool int_result_ = false;               // last matmul used integer path
-    bool result_src0_int_ = false;          // apply a_scale at drain
-    bool result_src1_int_ = false;          // apply w_scale at drain
-    unsigned pending_activation_ = 0;       // int path: activation after dequant
+    std::vector<float> output_;             // FP32 MAC accumulator (as ver.08)
     std::uint32_t output_rows_ = 0;
     std::uint32_t output_cols_ = 0;
-    std::vector<float> drain_acc_;          // FP32 dequant accumulator
-    float reduce_carry_ = 0.0f;             // FP32 chunk carry for reduces
 
     int finish(int code) {
         counters_.dump("perf_counters.txt");
@@ -426,8 +420,8 @@ private:
     }
 
     void check_vlen(const char* who) {
-        if (vector_length_ == 0 || vector_length_ > kMaxVlen) {
-            fail(std::string(who) + ": vlen must be in [1, 256]");
+        if (vector_length_ == 0) {
+            fail(std::string(who) + ": vlen must be nonzero");
         }
     }
 
@@ -477,11 +471,10 @@ private:
         }
     }
 
-    // Save: vector form writes the previous result's length (V3-006 fix) as
-    // FP16, or raw FP32 with flag [25] (scale production; inert in FP16 mode).
-    // Matrix form is the drain: dequant by the scale vectors when the matmul
-    // consumed INT operands, with [27]=carry-in / [26]=hold chaining partial
-    // results through the FP32 drain accumulator (00 = plain ver.08 store).
+    // Save keeps the plain ver.08 semantics (dequant happens in matmul).  The
+    // vector form writes the previous result's length (V3-006 fix); its store
+    // format follows the destination descriptor's dtype (FP16 default, FP32
+    // for rounding-free scale storage).  The matrix form stores FP16.
     void save(std::uint32_t instruction) {
         ++counters_.saves;
         const bool matrix = (instruction >> 31) & 1u;
@@ -490,14 +483,15 @@ private:
         const unsigned start = (instruction >> 8) & 0xffu;
         const Descriptor& d = desc_[2];
         if (!matrix) {
-            const bool fp32_store = (instruction >> 25) & 1u;
-            const unsigned dtype = fp32_store ? FP32 : FP16;
+            const unsigned dtype = d.dtype;
+            require(dtype == FP16 || dtype == FP32,
+                    "vector save destination dtype must be FP16 or FP32");
             const unsigned width = dtype_width_nibbles(dtype);
             check_alignment(d.partial_address, dtype, "save");
             for (std::size_t i = 0; i < output_.size(); ++i) {
                 const std::uint64_t nibble =
                     std::uint64_t(d.partial_address) + std::uint64_t(i) * width;
-                if (fp32_store) {
+                if (dtype == FP32) {
                     write_fp32(nibble, output_[i]);
                 } else {
                     write_fp16(nibble, output_[i]);
@@ -505,13 +499,9 @@ private:
             }
             return;
         }
-        const bool carry_in = (instruction >> 27) & 1u;
-        const bool hold = (instruction >> 26) & 1u;
-        const bool dequant = int_result_ || result_src0_int_ || result_src1_int_;
+        require(d.dtype == FP16, "matrix save destination dtype must be FP16");
         check_alignment(d.partial_address, FP16, "save");
         if (strided) {
-            require(!dequant && !carry_in && !hold,
-                    "strided matrix save does not support dequant/carry");
             const std::uint32_t rows =
                 output_rows_ ? output_rows_ : desc_[0].partial_rows;
             for (unsigned col = 0; col < ncols; ++col) {
@@ -531,41 +521,13 @@ private:
         const std::uint32_t rows = output_rows_ ? output_rows_ : d.partial_rows;
         const std::uint32_t cols = output_cols_ ? output_cols_ : d.partial_cols;
         const std::uint32_t stride = d.main_cols ? d.main_cols : cols;
-        const std::size_t total = static_cast<std::size_t>(rows) * cols;
-        if (!carry_in) {
-            drain_acc_.assign(total, 0.0f);
-        } else {
-            require(drain_acc_.size() == total,
-                    "drain carry-in with mismatched tile shape");
-        }
         for (std::uint32_t row = 0; row < rows; ++row) {
             for (std::uint32_t col = 0; col < cols; ++col) {
                 const std::size_t source = static_cast<std::size_t>(row) * cols + col;
-                if (source >= (int_result_ ? iacc_.size() : output_.size())) {
-                    continue;
-                }
-                float value = int_result_
-                                  ? static_cast<float>(iacc_[source])
-                                  : output_[source];
-                if (result_src1_int_) {
-                    value *= read_scale(w_scale_address_, col, "w_scale");
-                }
-                if (result_src0_int_) {
-                    value *= read_scale(a_scale_address_, row, "a_scale");
-                }
-                if (dequant && pending_activation_) {
-                    value = activate(value, pending_activation_);
-                }
-                if (carry_in) {
-                    // adding an unconditional 0.0f would turn -0.0 into +0.0
-                    // and break FP16-mode bit-exactness
-                    value += drain_acc_[source];
-                }
-                if (hold) {
-                    drain_acc_[source] = value;
-                } else {
+                if (source < output_.size()) {
                     const std::uint64_t index = std::uint64_t(row) * stride + col;
-                    write_fp16(std::uint64_t(d.partial_address) + index * 4, value);
+                    write_fp16(std::uint64_t(d.partial_address) + index * 4,
+                               output_[source]);
                 }
             }
         }
@@ -585,6 +547,14 @@ private:
         return static_cast<float>(static_cast<std::int16_t>(immediate));
     }
 
+    // Matmul with dequant at the array->accumulator boundary: the 64x64 array
+    // produces one K-tile's raw product (FP32, or exact INT32 for INT8xINT8 --
+    // a tile sum is < 2^24 so its FP32 conversion is exact); the current
+    // scales are multiplied in as the tile enters the FP32 MAC accumulator.
+    // Because scale distributes over the sum, the EXISTING MAC bit chains
+    // both same-scale K tiles and different-scale groups (the compiler simply
+    // re-points 0x8B between groups) -- no extra accumulator or flags.
+    // With FP16 operands no scale is applied and this is exactly ver.08 MAC.
     void matmul(std::uint32_t instruction, unsigned activation) {
         const std::uint32_t rows = desc_[0].partial_rows;
         const std::uint32_t inner = desc_[0].partial_cols;
@@ -599,22 +569,13 @@ private:
         require(!(a_dtype == INT4), "matmul src0 (activation) cannot be INT4");
         require(!(a_int && !w_int), "matmul INT activation requires INT weight");
         const std::size_t total = static_cast<std::size_t>(rows) * cols;
-        if (int_path) {
-            if (!mac || iacc_.size() != total || !int_result_) {
-                require(!mac || iacc_.size() == total,
-                        "MAC chain switched arithmetic path or tile shape");
-                iacc_.assign(total, 0);
-            }
-        } else {
-            require(!mac || (!int_result_ && output_.size() == total),
-                    "MAC chain switched arithmetic path or tile shape");
-            if (!mac || output_.size() != total) {
-                output_.assign(total, 0.0f);
-            }
+        if (!mac || output_.size() != total) {
+            output_.assign(total, 0.0f);
         }
         for (std::uint32_t row = 0; row < rows; ++row) {
             for (std::uint32_t col = 0; col < cols; ++col) {
                 const std::size_t out = static_cast<std::size_t>(row) * cols + col;
+                float partial;
                 if (int_path) {
                     long long sum = 0;
                     for (std::uint32_t k = 0; k < inner; ++k) {
@@ -623,29 +584,27 @@ private:
                                static_cast<long long>(
                                    input2_[std::size_t(k) * cols + col]);
                     }
-                    iacc_[out] += sum;
+                    partial = static_cast<float>(sum);
                 } else {
                     float sum = 0.0f;
                     for (std::uint32_t k = 0; k < inner; ++k) {
                         sum += input1_[std::size_t(row) * inner + k] *
                                input2_[std::size_t(k) * cols + col];
                     }
-                    output_[out] += sum;
+                    partial = sum;
                 }
+                if (w_int) {
+                    partial *= read_scale(w_scale_address_, col, "w_scale");
+                }
+                if (a_int) {
+                    partial *= read_scale(a_scale_address_, row, "a_scale");
+                }
+                output_[out] += partial;
             }
         }
-        int_result_ = int_path;
-        result_src0_int_ = a_int;
-        result_src1_int_ = w_int;
-        pending_activation_ = 0;
         if (activation) {
-            if (int_path || w_int) {
-                // dequant precedes activation: defer to the drain.
-                pending_activation_ = activation;
-            } else {
-                for (float& value : output_) {
-                    value = activate(value, activation);
-                }
+            for (float& value : output_) {
+                value = activate(value, activation);
             }
         }
         output_rows_ = rows;
@@ -719,9 +678,6 @@ private:
             }
             output_[i] = matrix ? activate(result, activation) : result;
         }
-        int_result_ = false;
-        result_src0_int_ = result_src1_int_ = false;
-        pending_activation_ = 0;
         if (matrix) {
             output_rows_ = desc_[0].partial_rows;
             output_cols_ = desc_[0].partial_cols;
@@ -731,50 +687,44 @@ private:
         }
     }
 
-    // Reduces (0x14 sum / 0x19 max) run the 256-lane chunk in flat order with
-    // an FP32 carry register; [27]=carry-in continues the previous chunk.
+    // Reduces (0x14 sum / 0x19 max), plain ver.08 form: one instruction
+    // covers the full vlen in flat FP32 order (the 256-lane datapath
+    // strip-mines internally; the running accumulator is instruction-internal
+    // microarchitecture, never architectural state).
     // reduce-max seeds from the first element (V3-003 fix), never from zero.
-    void reduce(bool is_max, bool carry_in) {
+    void reduce(bool is_max) {
         ++counters_.vector_ops;
         check_vlen("reduce");
         require(!input1_.empty(), "reduce over empty input");
-        float acc;
-        std::size_t first = 0;
-        if (carry_in) {
-            acc = reduce_carry_;
-        } else if (is_max) {
-            acc = input1_[0];
-            first = 1;
-        } else {
-            acc = 0.0f;
-        }
-        for (std::size_t i = first; i < input1_.size(); ++i) {
+        float acc = is_max ? input1_[0] : 0.0f;
+        for (std::size_t i = is_max ? 1 : 0; i < input1_.size(); ++i) {
             acc = is_max ? std::max(acc, input1_[i]) : acc + input1_[i];
         }
-        reduce_carry_ = acc;
         output_.assign(1, acc);
-        int_result_ = false;
-        result_src0_int_ = result_src1_int_ = false;
         output_rows_ = output_cols_ = 1;
     }
 
     // VQUANT (0x1A): FP16 vector at src0 -> symmetric round-to-nearest-even
     // integers packed at dst, divided by the FP32 scale a_scale[0].
     // VDEQUANT (0x1B): packed integers at src0 -> FP16-representable floats in
-    // the output register, multiplied by a_scale[0].  [27]=1 selects INT4.
-    void vquant(std::uint32_t instruction) {
+    // the output register, multiplied by a_scale[0].
+    // The integer format (INT8 or INT4) comes from the packed operand's
+    // descriptor dtype -- no mode bit in the instruction.
+    void vquant(std::uint32_t) {
         ++counters_.vquant;
         check_vlen("vquant");
-        const bool int4 = (instruction >> 27) & 1u;
-        const int limit = int4 ? 7 : 127;
-        const unsigned dtype = int4 ? INT4 : INT8;
-        const unsigned width = dtype_width_nibbles(dtype);
-        const float scale = read_scale(a_scale_address_, 0, "vquant scale");
-        require(scale != 0.0f, "vquant with zero scale");
         const Descriptor& src = desc_[0];
         const Descriptor& dst = desc_[2];
+        require(src.dtype == FP16, "vquant source dtype must be FP16");
+        require(dst.dtype == INT8 || dst.dtype == INT4,
+                "vquant destination dtype must be INT8 or INT4");
+        const bool int4 = dst.dtype == INT4;
+        const int limit = int4 ? 7 : 127;
+        const unsigned width = dtype_width_nibbles(dst.dtype);
+        const float scale = read_scale(a_scale_address_, 0, "vquant scale");
+        require(scale != 0.0f, "vquant with zero scale");
         check_alignment(src.partial_address, FP16, "vquant src");
-        check_alignment(dst.partial_address, dtype, "vquant dst");
+        check_alignment(dst.partial_address, dst.dtype, "vquant dst");
         for (std::uint32_t i = 0; i < vector_length_; ++i) {
             const float x =
                 read_elem(FP16, std::uint64_t(src.partial_address) + 4ull * i);
@@ -787,23 +737,22 @@ private:
         }
     }
 
-    void vdequant(std::uint32_t instruction) {
+    void vdequant(std::uint32_t) {
         ++counters_.vdequant;
         check_vlen("vdequant");
-        const bool int4 = (instruction >> 27) & 1u;
-        const unsigned dtype = int4 ? INT4 : INT8;
-        const unsigned width = dtype_width_nibbles(dtype);
-        const float scale = read_scale(a_scale_address_, 0, "vdequant scale");
         const Descriptor& src = desc_[0];
-        check_alignment(src.partial_address, dtype, "vdequant src");
+        require(src.dtype == INT8 || src.dtype == INT4,
+                "vdequant source dtype must be INT8 or INT4");
+        const unsigned width = dtype_width_nibbles(src.dtype);
+        const float scale = read_scale(a_scale_address_, 0, "vdequant scale");
+        check_alignment(src.partial_address, src.dtype, "vdequant src");
         output_.assign(vector_length_, 0.0f);
         for (std::uint32_t i = 0; i < vector_length_; ++i) {
             const float q = read_elem(
-                dtype, std::uint64_t(src.partial_address) + std::uint64_t(i) * width);
+                src.dtype,
+                std::uint64_t(src.partial_address) + std::uint64_t(i) * width);
             output_[i] = q * scale;
         }
-        int_result_ = false;
-        result_src0_int_ = result_src1_int_ = false;
         output_rows_ = 1;
         output_cols_ = vector_length_;
     }
@@ -837,8 +786,9 @@ private:
                 return;
             }
             case 0x82:
+                // full 16-bit vlen (ver.08 range); the 256-lane datapath
+                // strip-mines longer vectors inside the instruction
                 vector_length_ = (word >> 8) & 0xffffu;
-                require(vector_length_ <= kMaxVlen, "vlen exceeds 256 lanes");
                 return;
             case 0x88: case 0x89: {
                 const unsigned operand = (word >> 30) & 3u;
@@ -871,8 +821,8 @@ private:
                      (word >> 16) & 0xffu, (word >> 8) & 0xffu);
                 return;
             case 0x98: save(word); return;
-            case 0x14: reduce(false, ((word >> 27) & 1u) != 0); return;
-            case 0x19: reduce(true, ((word >> 27) & 1u) != 0); return;
+            case 0x14: reduce(false); return;
+            case 0x19: reduce(true); return;
             case 0x15: {
                 ++counters_.vector_ops;
                 check_vlen("broadcast");
@@ -889,8 +839,6 @@ private:
                     scalar = static_cast<float>(static_cast<std::int16_t>(value));
                 }
                 output_.assign(vector_length_, scalar);
-                int_result_ = false;
-                result_src0_int_ = result_src1_int_ = false;
                 output_rows_ = 1;
                 output_cols_ = vector_length_;
                 return;
@@ -902,8 +850,6 @@ private:
                 for (std::size_t i = 0; i < input1_.size(); ++i) {
                     output_[i] = sine ? std::sin(input1_[i]) : std::cos(input1_[i]);
                 }
-                int_result_ = false;
-                result_src0_int_ = result_src1_int_ = false;
                 output_rows_ = 1;
                 output_cols_ = static_cast<std::uint32_t>(output_.size());
                 return;

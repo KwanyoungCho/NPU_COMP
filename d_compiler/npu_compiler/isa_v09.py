@@ -112,33 +112,16 @@ def enc_wscale(address):
             enc_scale_addr(OP_WSCALE, address, True)]
 
 
-def enc_reduce_sum(carry_in=False):
-    return ((1 if carry_in else 0) << 27) | 0x14
+def enc_vquant():
+    """FP16 -> packed integer store; the format (INT8/INT4) comes from the
+    destination descriptor's dtype, not from an instruction bit."""
+    return OP_VQUANT
 
 
-def enc_reduce_max(carry_in=False):
-    """v09 semantics: seeded from the first element (V3-003 fix)."""
-    return ((1 if carry_in else 0) << 27) | 0x19
-
-
-def enc_vector_save_fp32():
-    """Vector save writing raw FP32 (flag [25]); lane count = result length."""
-    return (1 << 25) | 0x98
-
-
-def enc_matrix_save(carry_in=False, hold=False, strided=0, ncols=0, start=0):
-    """Matrix drain save; [27]=carry-in / [26]=hold chain group-wise dequant
-    through the FP32 drain accumulator (00 = plain ver.08 behavior)."""
-    return (enc_save(1, strided, ncols, start)
-            | ((1 if carry_in else 0) << 27) | ((1 if hold else 0) << 26))
-
-
-def enc_vquant(int4=False):
-    return ((1 if int4 else 0) << 27) | OP_VQUANT
-
-
-def enc_vdequant(int4=False):
-    return ((1 if int4 else 0) << 27) | OP_VDEQUANT
+def enc_vdequant():
+    """Packed integer -> FP16-bound floats; format from the source
+    descriptor's dtype."""
+    return OP_VDEQUANT
 
 
 def decode_dma(words):

@@ -5,9 +5,10 @@ Two proof strategies:
     mechanical converter (exactly the spec section-4 migration rule: multiply
     ver.08 element addresses by 4, everything else verbatim) turns a ver.08
     program into a v09 program; both runs must produce identical bytes.
-  * v09-only behavior (signed immediates, seeded reduce-max, reduce carry,
-    standard GELU, dtype feeders, drain dequant, VQUANT/VDEQUANT) is checked
-    against numpy references that replicate the simulator arithmetic order.
+  * v09-only behavior (signed immediates, seeded reduce-max, standard GELU,
+    dtype feeders, dequant-in-matmul incl. group scale changes over a MAC
+    chain, VQUANT/VDEQUANT) is checked against numpy references that
+    replicate the simulator arithmetic order.
 """
 import sys
 from pathlib import Path
@@ -222,29 +223,24 @@ def test_signed_immediates():
     np.testing.assert_array_equal(out[16:24], np.full(8, -5, np.float16))
 
 
-def test_reduce_max_seeded_and_sum_carry():
+def test_reduce_seeded_max_and_long_flat_sum():
+    """512-lane single-instruction reduces (the 256-lane datapath strip-mines
+    internally; no architectural carry state)."""
+    from npu_compiler.isa_0818 import enc_reduce_max, enc_reduce_sum
     rng = np.random.default_rng(7)
     values = (-rng.random(512).astype(np.float16) - np.float16(1))  # all < 0
     gbuf = np.zeros(1024, dtype=np.float16)
     gbuf[:512] = values
     program, cells = staged(gbuf.size)
-    program.append(enc_vlen(256))
-    # max over two 256-lane chunks through the FP32 carry
+    program.append(enc_vlen(512))
     program += vec_addr(0, 0)
     program.append(V.enc_load(0, 0))
-    program.append(V.enc_reduce_max())
-    program += vec_addr(0, 256 * 4)
-    program.append(V.enc_load(0, 0))
-    program.append(V.enc_reduce_max(carry_in=True))
+    program.append(enc_reduce_max())
     program += vec_addr(2, 600 * 4)
     program.append(V.enc_save(0))
-    # sum over the same two chunks
     program += vec_addr(0, 0)
     program.append(V.enc_load(0, 0))
-    program.append(V.enc_reduce_sum())
-    program += vec_addr(0, 256 * 4)
-    program.append(V.enc_load(0, 0))
-    program.append(V.enc_reduce_sum(carry_in=True))
+    program.append(enc_reduce_sum())
     program += vec_addr(2, 602 * 4)
     program.append(V.enc_save(0))
     out, _ = run_simple(finish(program, cells), gbuf)
@@ -265,7 +261,7 @@ def test_standard_gelu_activation_mode():
     program.append(V.enc_load(1, 0))
     from npu_compiler.isa_0818 import enc_m_add
     program.append(enc_m_add(IMM, 0, activation=V.ACT_GELU_STD))
-    program.append(V.enc_matrix_save())
+    program.append(V.enc_save(1))
     out, _ = run_simple(finish(program, cells), gbuf)
     xf = x.astype(np.float32)
     inner = f32(0.7978845608028654) * (xf + f32(0.044715) * xf * xf * xf)
@@ -315,7 +311,7 @@ def test_w8a16_feeder_and_drain_dequant():
     program += [V.enc_load(1, 0), V.enc_load(1, 1)]
     from npu_compiler.isa_0818 import enc_m_mul
     program.append(enc_m_mul(VECTOR))
-    program.append(V.enc_matrix_save())
+    program.append(V.enc_save(1))
     program += V.enc_gstore(12, 4, 256, rows=1, cols=4)
     program.append(V.enc_halt())
     images, _ = run_v09(program, image)
@@ -345,7 +341,7 @@ def test_w8a8_integer_path_and_double_scale_drain():
     program += [V.enc_load(1, 0), V.enc_load(1, 1)]
     from npu_compiler.isa_0818 import enc_m_mul
     program.append(enc_m_mul(VECTOR))
-    program.append(V.enc_matrix_save())
+    program.append(V.enc_save(1))
     program += V.enc_gstore(12, 4, 512, rows=1, cols=4)
     program.append(V.enc_halt())
     images, _ = run_v09(program, image)
@@ -355,7 +351,9 @@ def test_w8a8_integer_path_and_double_scale_drain():
         out, _dequant_reference(acc.astype(np.float32), w_scale, a_scale))
 
 
-def test_groupwise_drain_carry_chain():
+def test_groupwise_scale_change_over_mac_chain():
+    """Group quantization rides the existing MAC bit: re-point 0x8B between
+    groups and keep accumulating -- no extra flags or accumulator."""
     rng = np.random.default_rng(13)
     m, k, n = 2, 4, 4
     groups = 2
@@ -388,9 +386,8 @@ def test_groupwise_drain_carry_chain():
                         V.enc_mcols(operand, cols, PARTIAL, dtype)]
         program += V.enc_wscale(128 + g * n * 8)
         program += [V.enc_load(1, 0), V.enc_load(1, 1)]
-        program.append(enc_m_mul(VECTOR))
-        last = g == groups - 1
-        program.append(V.enc_matrix_save(carry_in=g > 0, hold=not last))
+        program.append(enc_m_mul(VECTOR, mac=g > 0))
+    program.append(V.enc_save(1))
     program += V.enc_gstore(16, 4, 512, rows=1, cols=4)
     program.append(V.enc_halt())
     images, _ = run_v09(program, image)
@@ -427,7 +424,8 @@ def test_vquant_vdequant_and_fp32_scale_production():
     program.append(V.enc_save(0))
     program += vec_addr(0, 80 * 4)
     program.append(V.enc_load(0, 0))
-    program.append(V.enc_reduce_max())
+    from npu_compiler.isa_0818 import enc_reduce_max
+    program.append(enc_reduce_max())
     program += vec_addr(2, 96 * 4)
     program.append(V.enc_save(0))
     program.append(enc_vlen(1))
@@ -435,18 +433,26 @@ def test_vquant_vdequant_and_fp32_scale_production():
     program.append(V.enc_load(0, 0))
     program.append(enc_div(IMM, 127))
     program += vec_addr(2, 1024)     # FP32 scale at nibble 1024
-    program.append(V.enc_vector_save_fp32())
+    program += [V.enc_mrows(2, 1, PARTIAL, V.DT_FP32),
+                V.enc_mcols(2, 1, PARTIAL, V.DT_FP32)]
+    program.append(V.enc_save(0))
     # VQUANT x -> INT8 at nibble 2048, then VDEQUANT back to FP16 at 3072
     program.append(enc_vlen(n))
     program += V.enc_ascale(1024)
     program += vec_addr(0, 0)
+    program += [V.enc_mrows(0, 1, PARTIAL, V.DT_FP16),
+                V.enc_mcols(0, n, PARTIAL, V.DT_FP16)]
     program += vec_addr(2, 2048)
+    program += [V.enc_mrows(2, 1, PARTIAL, V.DT_INT8),
+                V.enc_mcols(2, n, PARTIAL, V.DT_INT8)]
     program.append(V.enc_vquant())
     program += [enc_addr_lo(0, 2048), enc_addr_hi(0, 2048),
                 V.enc_mrows(0, 1, PARTIAL, V.DT_INT8),
                 V.enc_mcols(0, n, PARTIAL, V.DT_INT8)]
     program.append(V.enc_vdequant())
     program += vec_addr(2, 3072)
+    program += [V.enc_mrows(2, 1, PARTIAL, V.DT_FP16),
+                V.enc_mcols(2, n, PARTIAL, V.DT_FP16)]
     program.append(V.enc_save(0))
     out, counters = run_simple(finish(program, cells), gbuf)
     xf = x.astype(np.float32)
@@ -470,12 +476,16 @@ def test_vquant_saturation_and_int4():
     program += V.enc_ascale(2048)
     program += vec_addr(0, 0)
     program += vec_addr(2, 4096)
-    program.append(V.enc_vquant(int4=True))
+    program += [V.enc_mrows(2, 1, PARTIAL, V.DT_INT4),
+                V.enc_mcols(2, 8, PARTIAL, V.DT_INT4)]
+    program.append(V.enc_vquant())
     program += [enc_addr_lo(0, 4096), enc_addr_hi(0, 4096),
                 V.enc_mrows(0, 1, PARTIAL, V.DT_INT4),
                 V.enc_mcols(0, 8, PARTIAL, V.DT_INT4)]
-    program.append(V.enc_vdequant(int4=True))
+    program.append(V.enc_vdequant())
     program += vec_addr(2, 6144)
+    program += [V.enc_mrows(2, 1, PARTIAL, V.DT_FP16),
+                V.enc_mcols(2, 8, PARTIAL, V.DT_FP16)]
     program.append(V.enc_save(0))
     program += V.enc_gstore(5, 4, 6144, rows=1, cols=4)
     program.append(V.enc_halt())
@@ -500,7 +510,9 @@ def test_illegal_dtype_paths_are_errors():
             return
         raise AssertionError(f"expected error {needle!r}")
 
-    expect(base() + [enc_vlen(300)], "vlen exceeds 256")
+    p = base() + [enc_vlen(8)] + vec_addr(0, 0) + vec_addr(2, 512)
+    p.append(V.enc_vquant())      # DST descriptor left at default FP16
+    expect(p, "vquant destination dtype")
     p = base() + [enc_vlen(8)] + vec_addr(0, 0)
     p += [V.enc_mrows(0, 1, PARTIAL, V.DT_INT8),
           V.enc_mcols(0, 8, PARTIAL, V.DT_INT8), V.enc_load(0, 0)]
@@ -520,11 +532,11 @@ if __name__ == "__main__":
     test_fp16_vector_battery_matches_0818()
     test_fp16_matmul_battery_matches_0818()
     test_signed_immediates()
-    test_reduce_max_seeded_and_sum_carry()
+    test_reduce_seeded_max_and_long_flat_sum()
     test_standard_gelu_activation_mode()
     test_w8a16_feeder_and_drain_dequant()
     test_w8a8_integer_path_and_double_scale_drain()
-    test_groupwise_drain_carry_chain()
+    test_groupwise_scale_change_over_mac_chain()
     test_vquant_vdequant_and_fp32_scale_production()
     test_vquant_saturation_and_int4()
     test_illegal_dtype_paths_are_errors()

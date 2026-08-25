@@ -21,7 +21,8 @@
 | 6 | 기존 ISA | 주소설정·load/save·연산 **ver.08 인코딩 유지**: 0x80 주소만 nibble 재해석, rows/cols/stride/vlen은 값 그대로 |
 | 7 | 작업 순서 | memory 먼저 확정(3차) → **compute/양자화 5차 결정으로 확정 완료** (2026-08-24) |
 | 8 | loop/repeat | v09 범위 밖 (별도 단계; index-sincos op·async DMA+barrier도 이와 한 묶음) |
-| 9 | compute/양자화 (5차) | dtype 조합 5개(FP16², W8A16, W4A16, W8A8, W4A8) / **출구(drain) dequant** — 입구는 무손실 변환만 / W8A8 출력 항상 FP16 / scale 전달 **0x8A·0x8B 신설** / granularity: act per-row 동적·weight per-col + K-group g∈{64,128} / act 양자화 조립식(`VQUANT` 0x1A) + `VDEQUANT` 0x1B / vector 산술 FP 유지 / **scale은 FP32** / 용어는 requant 대신 dequant |
+| 9 | compute/양자화 (5차) | dtype 조합 5개(FP16², W8A16, W4A16, W8A8, W4A8) / 입구는 무손실 변환만 / W8A8 출력 항상 FP16 / scale 전달 **0x8A·0x8B 신설** / granularity: act per-row 동적·weight per-col + K-group g∈{64,128} / act 양자화 조립식(`VQUANT` 0x1A) + `VDEQUANT` 0x1B / vector 산술 FP 유지 / **scale은 FP32** / 용어는 requant 대신 dequant |
+| 10 | 단순화 (7차, 2026-08-26) | **flag 전면 제거**: dequant는 matmul 내부(각 tile 곱이 FP32 MAC 누적기에 들어갈 때 scale 곱 — 분배법칙으로 기존 MAC bit가 그룹 사슬까지 담당, save는 순수 ver.08) / reduce carry 폐지(vlen 16-bit 복원, 256-lane은 명령 내부 strip-mining) / FP32 저장·INT4 선택은 descriptor dtype으로 / **기존 명령의 신규 field는 dtype 2-bit 하나** |
 
 > 3차 결정으로 **강등/폐기된 v1 초안 항목**: 단일-word SRAM 주소(op2+addr22),
 > 2-word GLOAD 주소 형식, descriptor 3요소 재정의(MAIN/PARTIAL 폐지) —
@@ -68,10 +69,9 @@ nibble 시작주소 + element 단위 shape의 함의:
    ┌──────────────▼─────────────┐ ┌───▼──────────────────┐
    │ feeder(무손실 변환)          │ │ Vector Unit          │
    │  Matrix Unit 64×64          │ │ 256 lanes, FP 산술    │
-   │  FP16×FP16→FP32 누적        │ │ (norm·softmax·rope + │
-   │  INT8×INT8→INT32 누적       │ │  VQUANT/VDEQUANT:    │
-   │ drain: FP32 dequant-누적기   │ │  absmax→scale→pack)  │
-   │  ×scale → RNE → FP16       │ │                      │
+   │  tile 곱(FP32/정확한 INT32)  │ │ (긴 vlen은 내부 반복, │
+   │  → ×scale → FP32 MAC 누적기 │ │  norm·softmax·rope + │
+   │  save: RNE → FP16 (ver.08) │ │  VQUANT/VDEQUANT)    │
    └────────────────────────────┘ └──────────────────────┘
 ```
 
@@ -81,7 +81,7 @@ nibble 시작주소 + element 단위 shape의 함의:
   LLM에서 정확도 불가
 - SRAM은 dtype 공존: activation FP16, weight는 **packed INT8 그대로 상주**
   (SRAM 유효 용량 2×, DMA는 변환 없이 단순 이동). weight의 scale 복원은
-  전 mode 공통으로 **출구(drain)에서** — 입구는 무손실 형변환만
+  전 mode 공통으로 **matmul 내부(MAC 누적 직전)** — 입구는 무손실 형변환만
 - 주소는 nibble 단위, **ver.08의 2-half 주소 설정 기제 유지** (stale-high
   위험은 "두 half 항상 emit" 관례를 필수 규칙으로 명문화해 관리)
 - 공유 SRAM: allocator/DMA 엔진 1개. 유닛별 분리는 §2.3 후속 옵션
@@ -103,17 +103,19 @@ nibble 시작주소 + element 단위 shape의 함의:
 
 ### 2.2 compute/양자화 편 — **확정** (5차 결정, ISA_V09.md Part II)
 
-- matrix 파이프라인 3단: feeder(무손실 변환만) → 배열(FP32/INT32 누적,
-  기존 MAC bit) → **drain의 FP32 dequant-누적기** (spare 2-bit flag:
-  carry-in/hold — group-wise scale 사슬용, `00`=기존 동작)
+- matrix 파이프라인: feeder(무손실 변환만) → 배열이 K-tile 1개의 원시 곱 산출
+  (FP32, 또는 정확한 INT32) → **scale을 곱하며 기존 FP32 MAC 누적기에 합산**
+  (dequant-in-matmul, 7차 결정) → save는 순수 ver.08. scale 분배법칙으로
+  group-wise 사슬도 기존 MAC bit가 담당 — 추가 누적기/flag 없음
 - 연산 명령에 신규 mode bit 없음 — 동작은 operand dtype 조합에서 유도,
   불법 조합은 오류
 - scale 설정 명령 `0x8A`(a_scale)/`0x8B`(w_scale) 신설 (0x80과 같은 2-half
   형식, FP32 벡터를 가리킴). group-wise는 compiler가 group마다 0x8B 재설정
 - vector: 산술 FP 전용 유지, `VQUANT` 0x1A/`VDEQUANT` 0x1B 신설 (대칭·RNE·
-  포화 ±127/±7), save의 dst dtype=FP32 지원(scale 생산용 무반올림 저장)
-- 256-lane reduce: spare 2-bit carry-in/hold로 chunk 간 FP32 carry —
-  flat 순차와 동일 순서 (bit-exact 불변식 성립 조건)
+  포화 ±127/±7, INT8/INT4 선택은 descriptor dtype), save의 dst dtype=FP32
+  지원(scale 생산용 무반올림 저장)
+- vlen은 ver.08 16-bit 전 범위 — 256-lane datapath는 명령 내부 strip-mining,
+  reduce 누적기는 명령 내부 microarchitecture (아키텍처 상태 아님)
 - ver.08 버그 수정 확정: reduce-max 첫 원소 seed(V3-003), signed int16
   immediate(V3-030), 표준 tanh-GELU mode 추가(V3-004), save lane 수 정리
   (V3-006) — 각각 FP16 불변식에 무해함을 ISA_V09.md §11에 논증
@@ -133,8 +135,8 @@ nibble 시작주소 + element 단위 shape의 함의:
 ### 2.4 수치 불변식의 설계 근거 (FP16 모드 ≡ 0818 bit-exact)
 - 저장 FP16 / 연산 FP32 / 저장 시 RNE — 0818 계약 유지 (실측 §7 검증됨)
 - rows/cols/stride/vlen field 값이 ver.08과 동일, 시작 주소만 SRAM nibble → 주소 산술 동형
-- 256-lane chunking이 순서를 바꾸지 않도록: **reduce는 chunk 내부 순차 +
-  chunk 간 FP32 carry를 in-order 누적** = 기존 flat 순차와 동일 순서
+- 긴 벡터의 순서 보존: reduce는 한 명령이 vlen 전체를 flat 순차 FP32로 처리
+  (256-lane 반복은 명령 내부) = 기존과 동일 순서
 - matmul K 누적: tile 순서 유지, FP32 누적기 유지
 - SRAM staging은 FP16 값의 이동일 뿐 반올림 지점을 추가하지 않음
   (dequant-on-load는 FP16 모드에서 비활성 → 경로 자체가 동일)
@@ -146,8 +148,8 @@ nibble 시작주소 + element 단위 shape의 함의:
 | Mode | weight | activation | matrix 연산 | 비고 |
 |---|---|---|---|---|
 | FP16 | FP16 | FP16 | FP16×FP16→FP32 | 기존 — **0818 bit-exact 불변식 유지** |
-| **W8A16** (N6a) | INT8 packed (SRAM 상주) | FP16 | feeder 무손실 변환 → FP16×FP16→FP32 → drain ×w_scale | LLM weight-only 표준 (GPTQ/AWQ류) |
-| **W8A8** (N6b) | INT8 packed | INT8 (per-token 동적) | INT8×INT8→INT32 → 출구 dequant | quant/dequant sandwich가 여기서 발동 |
+| **W8A16** (N6a) | INT8 packed (SRAM 상주) | FP16 | feeder 무손실 변환 → tile 곱 ×w_scale → FP32 MAC 누적 | LLM weight-only 표준 (GPTQ/AWQ류) |
+| **W8A8** (N6b) | INT8 packed | INT8 (per-token 동적) | INT32 tile 곱 ×sa×sw → FP32 MAC 누적 | quant/dequant sandwich가 여기서 발동 |
 
 - weight 형식: **INT8 per-output-channel(열) symmetric** packed
   (INT4는 group-wise g∈{64,128} 필수, 4값/16-bit). 호스트 quantizer
@@ -157,11 +159,11 @@ nibble 시작주소 + element 단위 shape의 함의:
   scale 산출은 조립식 시퀀스(absmax→÷127→FP32 저장) + `VQUANT`
 - 출구 dequant 산술: INT32 누적 → FP32 × (w_scale[col] × a_scale[row])
   → FP16 (RNE). W8A16/W4A16은 배열이 FP16×FP16(무손실 변환 입력)이고
-  drain에서 w_scale만 곱함 — 반올림 지점은 출구 1곳
+  tile 곱에 w_scale만 곱해 MAC 누적 — FP16 반올림은 save 시 1곳
 - 정렬 규칙: packed tensor 시작은 dtype 폭 배수 nibble — 차원이 64 배수라
   자동 충족 (spec에 명문화)
 - 검증 사다리:
-  ① unpack/VDEQUANT/VQUANT/출구 dequant 단위 테스트 (host 계산과 bit-exact)
+  ① unpack/VDEQUANT/VQUANT/dequant-in-matmul 단위 테스트 (host 계산과 bit-exact)
   ② layer별 FP16 대비 오차 계측 (W8A16, W8A8 각각)
   ③ 세 모델 3-token greedy — **수용 기준: W8A16은 token 일치 기대,
   W8A8은 token 일치 또는 불일치 시 logits 지표와 함께 문서화**
@@ -188,11 +190,11 @@ nibble 시작주소 + element 단위 shape의 함의:
 | **N0** | ISA v09 spec — **memory 편(4차)·compute/양자화 편(5차) 모두 확정 완료(2026-08-24)** — ISA_V09.md v4 | ✅ 사용자 승인 |
 | **N1** | `mysim_v09.cpp` 골격: global(32-bit 칸 단위)/공유 SRAM(nibble 단위) 메모리 객체, decode 루프, HALT/SNAPSHOT, 경계 검사, perf counter | ✅ 단위 테스트 (2026-08-25) |
 | **N2** | 데이터 이동: GLOAD 0xA0/GSTORE 0xA8 (4-word) + ver.08 주소설정 nibble 재해석·dtype spare bit | ✅ DMA+`isa_v09.py` round-trip 테스트 (2026-08-25); 주소설정/dtype 재해석은 N3 연산과 함께 |
-| **N3** | 연산: vector 256-lane 전 연산(reduce carry 포함) + matrix 3단 파이프라인 + VQUANT/VDEQUANT + 버그수정 3건 | ✅ (2026-08-25) FP16 배터리는 0818 oracle과 byte-exact, v09 신규 기능은 산술 재현 numpy reference와 bit-exact; 음수 imm 전수 확인은 N4 codegen에서 |
+| **N3** | 연산: vector/matrix 전체 + dequant-in-matmul + VQUANT/VDEQUANT + 버그수정 3건 | ✅ (2026-08-25; 7차 단순화 반영 2026-08-26 재검증) FP16 배터리는 0818 oracle과 byte-exact, v09 신규 기능은 산술 재현 numpy reference와 bit-exact |
 | **N4** | `backend_v09.py` + SRAM staging codegen | ✅ (2026-08-25) proxy layer(홀수 차원 attention 전체) + 스트리밍 matmul + chunked reduce 모두 **0818 결과와 bit-exact** |
 | **N5** | 세 모델 golden을 v09 FP16 모드로 실행 | ✅ (2026-08-25; 4-word DMA 전환 후 Gemma·Qwen 재검증 통과) **세 모델 모두 token·hidden·KV cache·step별 logits까지 golden과 bit-exact** — Llama [358,2846,4560] / Gemma [108,236777,236789] (173s, table PLE) / Qwen [358,1184,311]. 불변식 최종 증명 완료 |
 | **N6a** | W8A16: quantizer(pack) + feeder dequant + INT8 weight 상주 실행 | §3 사다리 ①②③ |
-| **N6b** | W8A8: VQUANT 시퀀스 + INT8 MAC(INT32 누적) + 출구 dequant | §3 사다리 ①②③ |
+| **N6b** | W8A8: VQUANT 시퀀스 + INT8 tile 곱 + dequant-in-matmul | §3 사다리 ①②③ |
 | **N7** | 통계·문서화: v09 vs 0818 비교표(word/DMA/SRAM) + 공유 SRAM 접근 통계(분리 필요성 판단 자료), spec 최종판 | `report/report_v09.md` |
 
 예상 규모: N1~N3 = C-model 신작(~1,000줄), N4 = compiler 최대 작업(staging

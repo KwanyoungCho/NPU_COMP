@@ -16,6 +16,16 @@
 | M4 | dtype | **0x88/0x89의 spare 2-bit [26:25]**: `00=FP16 01=FP32 10=INT8 11=INT4` (vector 피연산자도 동일 descriptor 사용) |
 | M5 | DMA | GLOAD 0xA0 / GSTORE 0xA8, dtype 무관·동기, 4-word (SRAM 주소 24-bit는 opcode word에 수납) |
 
+**7차 (2026-08-26, 단순화 — flag 전면 제거)**
+
+| # | 항목 | 결정 |
+|---|---|---|
+| S1 | dequant 위치 | **matmul 내부** — 각 K-tile 곱을 FP32 MAC 누적기에 더할 때 현재 scale을 곱함. scale의 분배법칙으로 **기존 MAC bit가 그룹 양자화 사슬까지 담당** (그룹 사이에 0x8B만 재설정). save는 순수 ver.08 의미 유지 |
+| S2 | drain flag | CI/HD **폐지** (두 번째 누적기 불필요) |
+| S3 | reduce | carry flag **폐지** — vlen을 ver.08 16-bit 전 범위로 복원, 256-lane datapath는 명령 내부에서 반복(strip-mining). 누적기는 명령 내부 microarchitecture, 아키텍처 상태 아님 |
+| S4 | FP32 저장 / INT4 선택 | 전용 flag **폐지** — 목적지/원본 descriptor의 dtype으로 통일 (vector save: dst dtype FP16/FP32, VQUANT dst / VDEQUANT src: INT8/INT4) |
+| S5 | 결과 | 기존 명령에 추가된 field는 **dtype 2-bit 하나** |
+
 **5차 (compute/양자화)**
 
 | # | 항목 | 결정 |
@@ -153,29 +163,28 @@ y = Σₖ a·w ≈ **s_a·s_w × Σₖ(qa·qw)** — scale이 누적 도중 상�
 - 연산 명령(0x40~0x43)에 **신규 mode bit 없음** — 동작은 operand descriptor의
   dtype 조합에서 유도. MAC bit([27]) 등 기존 bit 유지
 
-## 7. Matrix 파이프라인 — 입구 / 배열 / 출구 dequant (C2·C3)
+## 7. Matrix 파이프라인 — dequant는 matmul 내부에서 (C2·C3·S1)
 
 ```
-SRAM ─▶ feeder(무손실 변환만) ─▶ 64×64 배열(곱-누적: FP32 또는 INT32)
-                                        │  MAC bit: K-tile 사슬 잇기 (scale 상수 구간)
+SRAM ─▶ feeder(무손실 변환만) ─▶ 64×64 배열: K-tile 1개의 원시 곱
+                                  (FP32, 또는 INT8×INT8 → 정확한 INT32;
+                                   tile 합 < 2^24 이므로 FP32 변환도 정확)
+                                        │  × w_scale[n] (× a_scale[m])   ← dequant
                                         ▼
-                       drain: FP32 dequant-누적기 (64×64)
-                       acc_out += FP32(배열 누적값) × w_scale[n] (× a_scale[m])
-                                        │  writeout 시 RNE → FP16 저장
+                        기존 FP32 MAC 누적기 (ver.08의 그것과 동일)
+                                        │  MAC bit로 K-tile·그룹 사슬 잇기
                                         ▼
-                                      SRAM (FP16)
+                        save (순수 ver.08): RNE → FP16 저장
 ```
 
-- **scale 적용 규칙**: src1이 INT이면 w_scale[열] 적용, src0이 INT이면
-  a_scale[행] 적용, FP16 operand에는 미적용. FP16×FP16은 drain을 통과만
-  (기존과 동일 — 불변식 유지)
-- **drain 누적 flag** (matrix save 0x98의 spare 2-bit, 가안 [27]=carry-in,
-  [26]=hold): group-wise(§9)에서 group마다 scale이 바뀌므로, group g의 배열
-  누적값을 dequant해 **FP32 drain 누적기에 더하고**(hold=1) 마지막 group에서
-  FP16으로 기록(hold=0). `00` = 기존 동작(즉시 FP16 기록) → ver.08 프로그램
-  무영향. per-col만 쓰는 경우 사슬 1개라 flag 불필요
-- FP16 중간 반올림이 group마다 생기는 것을 막는 장치가 이 FP32 drain
-  누적기다 — vector reduce carry(§10)와 동일한 설계
+- **scale 적용 규칙**: src1이 INT이면 w_scale[열], src0이 INT이면 a_scale[행]을
+  **tile 곱이 MAC 누적기에 들어가는 순간** 곱한다. FP16 operand에는 미적용 —
+  FP16×FP16은 scale 없이 기존 MAC 그대로 (불변식 유지)
+- **그룹 양자화가 공짜인 이유**: scale이 합에 분배되므로
+  s₀(T₁+T₂) + s₁(T₃+T₄) = s₀T₁ + s₀T₂ + s₁T₃ + s₁T₄.
+  compiler가 그룹 경계에서 0x8B만 재설정하고 MAC=1로 이어가면 되고,
+  FP16 중간 반올림도 없다 (누적은 끝까지 FP32)
+- save·누적기·flag 추가 없음 — 기존 명령에 추가된 field는 dtype 2-bit뿐 (S5)
 
 ## 8. scale 전달 — 0x8A / 0x8B 신설 (C4·C8)
 
@@ -194,7 +203,7 @@ SRAM ─▶ feeder(무손실 변환만) ─▶ 64×64 배열(곱-누적: FP32 �
 |---|---|---|
 | ✅ act | **per-row(=per-token) 동적** symmetric | 행별 scale은 drain에서 행 곱 |
 | ✅ weight | **per-col(=per-channel)** symmetric | 열별 scale은 drain에서 열 곱 |
-| ✅ weight | **K-group, g ∈ {64, 128}** | 배열이 K를 64씩 잘라 누적하므로 g가 64의 배수면 "group 사슬 → drain 누적" (§7 flag)으로 처리 |
+| ✅ weight | **K-group, g ∈ {64, 128}** | 배열이 K를 64씩 잘라 누적하므로 g가 64의 배수면 그룹 경계에서 0x8B 재설정 + 기존 MAC 사슬로 처리 (§7) |
 | ❌ | g < 64 | 누적 도중 scale 교체 — 배열 내부 로직 필요, 미지원 |
 | ❌ | act per-channel(K방향) | scale이 합산축에 있어 밖으로 못 뺌 — 수학적으로 불가. 필요 시 SmoothQuant류 host 전처리(가중치로 scale 재배분)로 해결 |
 
@@ -204,24 +213,23 @@ INT4 weight는 group-wise 필수(품질), INT8 weight는 per-col 기본.
 ## 10. Vector unit — FP 유지 + VQUANT/VDEQUANT (C6·C7)
 
 - **산술 연산(0x01..0x19)은 FP 전용 유지** (ver.08 그대로). INT operand 투입은 오류
-- vector load/save는 descriptor dtype **FP16/FP32** 지원: dst=FP32(01)면
-  내부 FP32 결과를 **반올림 없이 그대로 저장** (scale 생산에 사용, 신규 반올림
-  지점 아님 — FP16 모드에서는 미사용)
+- **vlen은 ver.08의 16-bit 전 범위** (S3): 256-lane datapath는 긴 벡터를
+  **명령 내부에서** 반복 처리(strip-mining)하고, reduce의 진행 중 누적값도
+  명령 내부 FP32 레지스터다 — 아키텍처 상태가 아니므로 ISA에 드러나지 않고,
+  flat 순차와 동일한 연산 순서가 하드웨어 정의로 보장됨 (bit-exact 근거)
+- vector save는 dst descriptor dtype을 따름: FP16(기본, RNE) 또는
+  **FP32(반올림 없이 저장** — scale 생산용; FP16 모드에서는 미사용)
 - **`VQUANT` 0x1A** (신설, ver.08 빈 자리): src descriptor의 FP16 벡터(vlen개)를
-  0x8A가 가리키는 **FP32 scale 1개**로 `q = clamp(RNE(x/s))` 후 dst dtype에
-  맞게 pack 저장 (INT8: ±127, INT4: ±7). 나눗셈은 내부 FP32
-- **`VDEQUANT` 0x1B** (신설): src의 packed INT8/INT4를 0x8A의 FP32 scale로
-  `x = q×s` → FP16 저장 (양자화 embedding 행 등)
+  0x8A가 가리키는 **FP32 scale 1개**로 `q = clamp(RNE(x/s))` 후 **dst
+  descriptor의 dtype**(INT8: ±127 / INT4: ±7)에 맞게 pack 저장. 명령 자체에
+  mode bit 없음 (S4)
+- **`VDEQUANT` 0x1B** (신설): src descriptor의 dtype(INT8/INT4)에 따라 packed
+  정수를 읽어 0x8A의 FP32 scale로 `x = q×s` → 결과 레지스터 (저장은 후속 save)
 - zero-point 없음(대칭만), 반올림 RNE — C6 확정값
 - **per-row 양자화 시퀀스** (조립식, row마다):
   ① |x|의 최대: `sign_inv`+`max`(0x12) → `reduce_max`(0x19, **seeded**)
-  ② `s = absmax ÷ 127` (div imm) → **FP32로 저장** (dst dtype=01)
-  ③ `VQUANT` (0x8A → s)
-- **256-lane reduce carry**: reduce(0x14/0x19)에 spare 2-bit
-  (가안 [27]=carry-in, [26]=hold — drain flag와 동일 의미):
-  chunk 내부는 순차 FP32, chunk 간은 **FP32 내부 누적기**로 잇고 마지막
-  chunk에서만 FP16 기록. `00`=기존 동작. flat 순차와 동일한 연산 순서 →
-  bit-exact 불변식 성립 조건
+  ② `s = absmax ÷ 127` (div imm) → dst dtype=FP32로 저장
+  ③ `VQUANT` (0x8A → s, dst dtype=INT8)
 
 ## 11. ver.08 버그 수정 3건 (v09에서 확정, FP16 불변식 무해 확인)
 
@@ -253,13 +261,13 @@ act A[64,128](INT8, 행 scale sa[64]) × weight W[128,64](INT8, 열 scale sw[64]
 src0: 0x80=A, 0x88 rows=64, 0x89 cols=128 + dtype=10(INT8)
 src1: 0x80=W, 0x88 rows=128, 0x89 cols=64 + dtype=10(INT8)
 
-matmul (K-tile 0, MAC=0)   ; INT8×INT8 → INT32 누적 시작
-matmul (K-tile 1, MAC=1)   ; K=128 = 64×2, 같은 scale 구간이므로 사슬로
-save   (flag 00)           ; drain: FP32(INT32) × sw[n] × sa[m] → RNE → FP16
+matmul (K-tile 0, MAC=0)   ; INT32 tile 곱 → ×sw[n]×sa[m] → MAC 누적기 =
+matmul (K-tile 1, MAC=1)   ; INT32 tile 곱 → ×sw[n]×sa[m] → MAC 누적기 +=
+save                       ; 순수 ver.08 save: RNE → FP16
 ```
 
 group-wise(W4A8, g=64)라면: K-tile마다 `0x8B ← sw[g]행` 재설정 후
-`save(hold=1/carry-in=1)`로 FP32 drain 누적, 마지막 tile에서 `hold=0` 기록.
+`matmul(MAC=1)`로 계속 누적 — save는 마지막에 한 번 (flag·추가 누적기 없음).
 
 ## 14. 보류 목록 (후속 단계)
 

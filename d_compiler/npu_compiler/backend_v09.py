@@ -2,7 +2,7 @@
 
 Reuses the row-major ver.08 memory plan unchanged (same offsets as the 0818
 backend, so goldens compare element-for-element) and mirrors the 0818 kernel
-loop orders exactly; the only additions are DMA staging and 256-lane chunking:
+loop orders exactly; the only addition is DMA staging:
 
   * Every binding stages its operands from global memory into SRAM, runs the
     ver.08-encoded kernel against SRAM nibble addresses, and stages the result
@@ -15,9 +15,10 @@ loop orders exactly; the only additions are DMA staging and 256-lane chunking:
   * Tensors above ``whole_limit`` elements stream through 2D panels/tiles
     (matmul weights, wide activations); their row stride must be even, which
     every 64-multiple model dimension satisfies.
-  * vlen is chunked to the 256-lane vector unit; reduces chain chunks with
-    the v09 FP32 carry flag, preserving the flat ver.08 accumulation order,
-    which is the basis of the bit-exactness proof.
+  * Vector instructions carry full ver.08-range vlen (the 256-lane datapath
+    strip-mines internally), so vector emission matches the 0818 backend and
+    the flat accumulation order -- the basis of the bit-exactness proof --
+    is preserved by construction.
 """
 from __future__ import annotations
 
@@ -27,11 +28,9 @@ from tvm import relax
 
 from .backend_0818 import CodegenError, _numel, _opname, plan
 from .isa_0818 import ACT_GELU, ACT_SILU, DST, IMM, SRC1, SRC2, VECTOR, Asm
-from .isa_v09 import (
-    SRAM_NIBBLES, enc_gload, enc_gstore, enc_halt,
-    enc_reduce_max, enc_reduce_sum)
+from .isa_v09 import SRAM_NIBBLES, enc_gload, enc_gstore, enc_halt
 
-VLEN = 256
+VLEN = 0xFFFF          # full 16-bit vlen; the 256-lane datapath strip-mines
 DMA_MAX_CELLS = 0xFFFF
 
 
@@ -51,12 +50,6 @@ class V09Asm(Asm):
 
     def halt(self):
         return self._emit(enc_halt())
-
-    def v_reduce_sum(self, carry_in=False):
-        return self._emit(enc_reduce_sum(carry_in))
-
-    def v_reduce_max(self, carry_in=False):
-        return self._emit(enc_reduce_max(carry_in))
 
 
 class _Stager:
@@ -189,13 +182,12 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
             a.addr(DST, dst_nib + base * 4).save(0)
 
     def reduce_row(kind, src_nib, count, dst_nib):
-        """Flat-order chunked reduce with FP32 carry; single FP16 rounding."""
-        for index, base in enumerate(range(0, count, VLEN)):
-            length = min(VLEN, count - base)
-            a.vlen(length)
-            a.addr(SRC1, src_nib + base * 4).load(0, SRC1)
-            (a.v_reduce_sum if kind == "sum" else a.v_reduce_max)(
-                carry_in=index != 0)
+        """One reduce instruction per row (ver.08 form; flat FP32 order)."""
+        if count > VLEN:
+            raise CodegenError(f"row of {count} elements exceeds the 16-bit vlen")
+        a.vlen(count)
+        a.addr(SRC1, src_nib).load(0, SRC1)
+        (a.v_reduce_sum if kind == "sum" else a.v_reduce_max)()
         a.addr(DST, dst_nib).save(0)
 
     # ------------------------------------------------------------- kernels
