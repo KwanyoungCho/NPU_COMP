@@ -75,9 +75,12 @@
   - 호스트 사전 재배치(타일 순서 packing)는 정적 weight에만 가능한 대안 —
     실행 중 device가 생성하는 중간 activation과 KV cache(넓은 버퍼에서 유효 열만
     읽는 접근)는 재배치가 불가능하므로 2차원 접근 능력이 필수
-  - 비용: rows=1이면 1차원 전송과 동일(상위집합), 인코딩 추가는 word 2개
-- 행 간격 필드가 32-bit → ver.08의 16-bit stride 제한으로 표현 불가능하던
-  대형 행렬(예: vocabulary 크기 행)을 직접 지정 가능
+  - 비용: rows=1이면 1차원 전송과 동일(상위집합)
+- **행 간격(stride)의 의미와 폭**: 전송 블록의 연속된 두 행의 시작 주소 차이,
+  즉 원본 행렬의 전체 행 폭. 주소 간 거리이므로 주소와 같은 32-bit 폭을 부여
+  - ver.08은 이 필드가 16-bit여서 행 폭이 65,535를 넘는 행렬
+    (예: Gemma의 vocabulary 262,144 원소 = 131,072 word)을 표현하지 못했고,
+    호스트에서 열 패널로 사전 재배치하는 우회가 필요했음 → v09에서 해소
 - 전송은 데이터 타입과 무관한 원본 복사(비트 보존): 압축(packed) INT8/INT4 blob도
   동일 경로로 이동, 해석은 연산 유닛에서만 수행
 - 동기식(blocking) 실행 — DMA 완료 후 다음 명령 수행.
@@ -195,15 +198,21 @@ dtype 조합에서 자동 결정되므로 명령 자체에 추가 bit이 없다.
 
 ### 3.2 신규 명령
 
-**DMA 전송 (GLOAD 0xA0 / GSTORE 0xA8)** — 5-word 명령
+**DMA 전송 (GLOAD 0xA0 / GSTORE 0xA8)** — 4-word 명령
 
 ```
- w0  ├────────────── 예약(0) ──────────────┼ 0xA0/0xA8 ┤   opcode
- w1  │        Global 시작 주소 32-bit  (word 단위)        │
- w2  │        Global 행 간격(stride) 32-bit (word 단위)   │   ← 16-bit 제한 해소
- w3  │        SRAM 시작 주소 32-bit (nibble 단위, 유효 24) │
- w4  ├── 행 수 rows 16-bit ──┼── 행당 word 수 cols 16-bit ┤
+      31                                    8 7        0
+ w0  ├─── SRAM 시작 주소 24-bit (nibble 단위) ─┼ 0xA0/0xA8┤
+ w1  │        Global 시작 주소 32-bit (word 단위)         │
+ w2  │        Global 행 간격(stride) 32-bit (word 단위)   │  ← 16-bit 제한 해소
+ w3  ├─── 행 수 rows 16-bit ──┼── 행당 word 수 cols 16-bit┤
 ```
+
+- SRAM 주소는 유효 폭이 정확히 24-bit(= 8 MiB / 4-bit)이므로 opcode word의
+  예약 구간에 그대로 수납된다 → 별도 주소 word가 불필요하고, 주소가 명령과
+  원자적으로 전달되어 설정 상태가 남는(stale) 위험도 없다
+- 부수 효과: 주소 필드 폭이 SRAM 용량과 정확히 일치하므로 **범위를 벗어난 시작
+  주소는 표현 자체가 불가능**하다 (해당 오류 경로가 구조적으로 제거됨)
 
 **scale 벡터 주소 설정 (0x8A: activation용 / 0x8B: weight용)** — 0x80과 동일 형식
 
