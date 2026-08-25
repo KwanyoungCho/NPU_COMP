@@ -14,7 +14,7 @@
 | M2 | SRAM | 8 MiB, **nibble 단위** (유효 24-bit, ver.08 32-bit field 재사용). compute는 SRAM만 접근 |
 | M3 | rows/cols/stride | **element 단위** — 16-bit field·값 ver.08과 동일 |
 | M4 | dtype | 0x88/0x89·0x82 **spare 2-bit**: `00=FP16 01=FP32 10=INT8 11=INT4` |
-| M5 | DMA | GLOAD 0xA0 / GSTORE 0xA8, dtype 무관·동기, 5-word |
+| M5 | DMA | GLOAD 0xA0 / GSTORE 0xA8, dtype 무관·동기, 4-word (SRAM 주소 24-bit는 opcode word에 수납) |
 
 **5차 (compute/양자화)**
 
@@ -82,17 +82,22 @@ dtype은 **operand 단위** 속성. 자기 descriptor와 같은 word에 원자�
 `0x82`의 spare 2-bit = vector operand. **FP16=00** 이므로 ver.08 프로그램은
 그대로 "dtype FP16인 유효한 v09 프로그램".
 
-## 3. DMA — GLOAD 0xA0 / GSTORE 0xA8 (5 words, 동기)
+## 3. DMA — GLOAD 0xA0 / GSTORE 0xA8 (4 words, 동기)
 
 ```
-w0: [7:0]=0xA0|0xA8, 나머지 예약(0, SRAM-scatter 확장용 spare 예약)
+w0: [31:8] SRAM 시작 주소 (nibble, 24-bit 전폭 = 8 MiB, 8-nibble 정렬)  [7:0]=0xA0|0xA8
 w1: global 시작 주소 (32-bit 칸 단위)
 w2: global 행 stride (칸 단위)          ← wide stride 직접 표현 (V3-027 해소)
-w3: SRAM 시작 주소 (nibble, 유효 24-bit, 8-nibble 정렬)
-w4: [31:16] rows  [15:0] cols (칸 개수)
+w3: [31:16] rows  [15:0] cols (칸 개수)
 ```
 
-행 r: global `[w1+r×w2 .. +cols)` 칸 ↔ SRAM `[w3+r×(cols×8) ..)` nibble
+- SRAM 주소는 유효 폭이 정확히 24-bit이므로 opcode word의 예약 구간에 그대로
+  수납된다 (다른 주소 설정 명령의 32-bit 2-half 형식과 달리 DMA만 단일 word —
+  주소가 명령과 원자적으로 이동해 stale 위험도 없음)
+- 확장 여지: SRAM-scatter 등 후속 플래그가 필요해지면 w3의 상위 예약 구간을
+  쓰거나(rows/cols는 16-bit로 충분) w4를 덧붙이는 형식으로 확장한다
+
+행 r: global `[w1+r×w2 .. +cols)` 칸 ↔ SRAM `[w0[31:8]+r×(cols×8) ..)` nibble
 (§1.2 순서, SRAM 쪽 행 연속). dtype 무관 — packed blob도 그냥 "칸들".
 범위 초과/비정렬/상위 8-bit≠0 → **즉시 오류 종료**.
 

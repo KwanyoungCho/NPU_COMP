@@ -134,19 +134,31 @@ def test_dma_little_endian_fp16_cell_mapping():
 
 
 def test_dma_bounds_and_alignment_errors():
+    # 4-word form: w0 = (sram nibble address << 8) | opcode
+    def word0(sram_addr):
+        return (sram_addr << 8) | 0xA0
+
     image = np.zeros(16, dtype=np.uint32)
-    bad_sram_align = [0xA0, 0, 1, 4, (1 << 16) | 1]        # nibble 4: mid-cell
-    bad_sram_high = [0xA0, 0, 1, 1 << 24, (1 << 16) | 1]   # upper bits set
-    bad_global = [0xA0, 15, 1, 0, (1 << 16) | 2]           # runs past cell 16
-    bad_sram_range = [0xA0, 0, 1, (2**24 - 8), (1 << 16) | 2]
-    zero_cols = [0xA0, 0, 1, 0, (1 << 16) | 0]
-    truncated = [0xA0, 0, 1]
+    bad_sram_align = [word0(4), 0, 1, (1 << 16) | 1]        # nibble 4: mid-cell
+    bad_global = [word0(0), 15, 1, (1 << 16) | 2]           # runs past cell 16
+    bad_sram_range = [word0(2**24 - 8), 0, 1, (1 << 16) | 2]
+    zero_cols = [word0(0), 0, 1, (1 << 16) | 0]
+    truncated = [word0(0), 0]
     _expect_error(bad_sram_align + [enc_halt()], image, "aligned")
-    _expect_error(bad_sram_high + [enc_halt()], image, "24-bit")
     _expect_error(bad_global + [enc_halt()], image, "global range")
     _expect_error(bad_sram_range + [enc_halt()], image, "SRAM range")
     _expect_error(zero_cols + [enc_halt()], image, "zero rows or cols")
     _expect_error(truncated, image, "truncated")
+
+
+def test_dma_address_field_cannot_exceed_sram():
+    """The 24-bit field width exactly matches the 2^24-nibble SRAM, so an
+    out-of-range start address is unrepresentable rather than an error case."""
+    from npu_compiler.isa_v09 import SRAM_NIBBLES
+    assert SRAM_NIBBLES == 1 << 24
+    widest = enc_gload(0, 1, SRAM_NIBBLES - 8, rows=1, cols=1)
+    assert (widest[0] >> 8) == SRAM_NIBBLES - 8
+    assert widest[0] & 0xFF == 0xA0
 
 
 def test_isa_v09_dma_encode_decode_roundtrip():
@@ -184,5 +196,6 @@ if __name__ == "__main__":
     test_dma_wide_stride_beyond_16bit()
     test_dma_little_endian_fp16_cell_mapping()
     test_dma_bounds_and_alignment_errors()
+    test_dma_address_field_cannot_exceed_sram()
     test_isa_v09_dma_encode_decode_roundtrip()
     print("ALL V09 C-MODEL N1+N2 TESTS PASSED")

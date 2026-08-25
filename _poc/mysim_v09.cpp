@@ -363,25 +363,25 @@ private:
 
     // ------------------------------------------------------------- DMA
 
-    // GLOAD (0xA0) / GSTORE (0xA8), 5 words (ISA_V09.md section 3):
-    //   w0 opcode | w1 global cell address | w2 global row stride (cells)
-    //   w3 SRAM nibble address (24 effective bits, 8-nibble aligned)
-    //   w4 rows[31:16] cols[15:0]  (cols in cells)
+    // GLOAD (0xA0) / GSTORE (0xA8), 4 words (ISA_V09.md section 3):
+    //   w0 [31:8] SRAM nibble address (24-bit, 8-nibble aligned) | [7:0] opcode
+    //   w1 global cell address | w2 global row stride (cells)
+    //   w3 rows[31:16] cols[15:0]  (cols in cells)
+    // The SRAM address is exactly 24 bits wide, so it rides in the opcode
+    // word's reserved field -- no separate address word, and the address
+    // travels atomically with the instruction.
     // dtype-blind synchronous copy; SRAM rows land contiguously
-    // (row r occupies nibbles w3 + r*cols*8 .. +cols*8).
+    // (row r occupies nibbles addr + r*cols*8 .. +cols*8).
     void dma(bool store) {
-        if (pc_ + 4 >= program_.size()) {
-            fail("truncated DMA instruction (needs 5 words)");
+        if (pc_ + 3 >= program_.size()) {
+            fail("truncated DMA instruction (needs 4 words)");
         }
+        const std::uint32_t sram_addr = program_[pc_] >> 8;
         const std::uint64_t g_addr = program_[pc_ + 1];
         const std::uint64_t g_stride = program_[pc_ + 2];
-        const std::uint32_t sram_addr = program_[pc_ + 3];
-        const std::uint32_t rows = program_[pc_ + 4] >> 16;
-        const std::uint32_t cols = program_[pc_ + 4] & 0xffffu;
-        pc_ += 4;
-        if (sram_addr >= kSramNibbles) {
-            fail("DMA SRAM address exceeds 24-bit nibble space");
-        }
+        const std::uint32_t rows = program_[pc_ + 3] >> 16;
+        const std::uint32_t cols = program_[pc_ + 3] & 0xffffu;
+        pc_ += 3;
         if (sram_addr % 8 != 0) {
             fail("DMA SRAM address not 8-nibble aligned");
         }

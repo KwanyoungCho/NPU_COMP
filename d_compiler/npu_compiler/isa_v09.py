@@ -30,7 +30,7 @@ DT_FP16, DT_FP32, DT_INT8, DT_INT4 = 0, 1, 2, 3
 ACT_OFF, ACT_GELU_STD, ACT_SILU, ACT_GELU_LEGACY = 0, 1, 2, 3
 
 SRAM_NIBBLES = 8 * 1024 * 1024 * 2  # 8 MiB, 2^24 nibbles
-DMA_WORDS = 5
+DMA_WORDS = 4
 
 
 class V09EncodeError(ValueError):
@@ -68,7 +68,8 @@ def _enc_dma(opcode, g_addr, g_stride, sram_addr, rows, cols):
     cols = _check(cols, 16, "cols")
     if rows == 0 or cols == 0:
         raise V09EncodeError("rows and cols must be nonzero")
-    return [opcode, g_addr, g_stride, sram_addr, (rows << 16) | cols]
+    # The 24-bit SRAM address rides in the opcode word's reserved field.
+    return [(sram_addr << 8) | opcode, g_addr, g_stride, (rows << 16) | cols]
 
 
 def enc_gload(g_addr, g_stride, sram_addr, rows, cols):
@@ -141,7 +142,7 @@ def enc_vdequant(int4=False):
 
 
 def decode_dma(words):
-    """Round-trip decoder for one 5-word DMA instruction (tests/tools)."""
+    """Round-trip decoder for one 4-word DMA instruction (tests/tools)."""
     if len(words) != DMA_WORDS:
         raise V09EncodeError(f"DMA instruction needs {DMA_WORDS} words")
     opcode = words[0] & 0xFF
@@ -151,7 +152,7 @@ def decode_dma(words):
         "op": "gload" if opcode == OP_GLOAD else "gstore",
         "g_addr": int(words[1]),
         "g_stride": int(words[2]),
-        "sram_addr": int(words[3]),
-        "rows": int(words[4]) >> 16,
-        "cols": int(words[4]) & 0xFFFF,
+        "sram_addr": int(words[0]) >> 8,
+        "rows": int(words[3]) >> 16,
+        "cols": int(words[3]) & 0xFFFF,
     }

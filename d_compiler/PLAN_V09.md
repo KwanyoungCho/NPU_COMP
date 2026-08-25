@@ -17,7 +17,7 @@
 | 2 | SRAM 구성 | **matrix/vector 공유 단일 SRAM(scratchpad), 8 MiB**. **시작 주소 단위 = 4-bit nibble**, 32-bit 주소 field에 유효 24-bit — **기존 ver.08 주소 기제 그대로 사용**, 여유 bit는 유지(부족 시 그때 축소). 유닛별 분리는 후속 옵션(§2.3) |
 | 3 | rows/cols/stride | **element 단위** (4차 결정, 2안) — 16-bit field·값이 ver.08과 동일(FP16 시), dtype별 표현 낭비 없음. 주소 생성은 dtype 폭(nibble)을 곱해 물리화 |
 | 4 | dtype 설정 | **기존 명령 spare bit** (4차 결정): 0x88/0x89(matrix operand)·0x82(vector)에 2-bit, `00=FP16/01=FP32/10=INT8/11=INT4`. 신규 상태 레지스터 없음 → stale hazard 원천 차단, ver.08 프로그램 = dtype FP16인 유효 v09 프로그램 |
-| 5 | DMA | GLOAD(0xA0)/GSTORE(0xA8), **dtype 무관(blind)·동기(blocking)**, 5-word. 환산: global 1칸 = SRAM 8 nibble. SRAM 쪽 주소는 8-nibble(칸) 정렬 규칙 |
+| 5 | DMA | GLOAD(0xA0)/GSTORE(0xA8), **dtype 무관(blind)·동기(blocking)**, **4-word** (SRAM 주소 24-bit를 opcode word [31:8]에 수납 — 6차 결정). 환산: global 1칸 = SRAM 8 nibble. SRAM 쪽 주소는 8-nibble(칸) 정렬 규칙 |
 | 6 | 기존 ISA | 주소설정·load/save·연산 **ver.08 인코딩 유지**: 0x80 주소만 nibble 재해석, rows/cols/stride/vlen은 값 그대로 |
 | 7 | 작업 순서 | memory 먼저 확정(3차) → **compute/양자화 5차 결정으로 확정 완료** (2026-08-24) |
 | 8 | loop/repeat | v09 범위 밖 (별도 단계; index-sincos op·async DMA+barrier도 이와 한 묶음) |
@@ -90,11 +90,11 @@ nibble 시작주소 + element 단위 shape의 함의:
 ## 2. ISA v09 — ver.08 대비 변경 목록
 
 ### 2.1 신규 — memory 편 (이번 범위의 본체, ISA_V09.md 확정)
-- `GLOAD` 0xA0 (5 words): global→SRAM DMA. w0 opcode / w1 global 주소 32-bit /
-  w2 global 행 stride 32-bit (wide stride 직접 표현 — V3-027 해소) /
-  w3 SRAM nibble 주소(8-nibble 정렬) / w4 rows|cols(32-bit 칸 개수).
+- `GLOAD` 0xA0 (4 words): global→SRAM DMA. w0 = SRAM nibble 주소 24-bit[31:8] |
+  opcode / w1 global 주소 32-bit / w2 global 행 stride 32-bit (wide stride 직접
+  표현 — V3-027 해소) / w3 rows|cols(32-bit 칸 개수).
   **dtype 무관 원본 이동·동기** — packed blob도 그냥 "칸들"
-- `GSTORE` 0xA8 (5 words): SRAM→global, 동일 형식 역방향
+- `GSTORE` 0xA8 (4 words): SRAM→global, 동일 형식 역방향
 - dtype 운반: 0x88/0x89·0x82 spare 2-bit (§확정 결정 4) — 신규 명령 없음
 - 종료/저장: `HALT` 신설(종료 + global 전체 기록 = 유일한 결과 회수 경로),
   `SNAPSHOT`(0xF0)은 중간 checkpoint 전용
@@ -187,7 +187,7 @@ nibble 시작주소 + element 단위 shape의 함의:
 |---|---|---|
 | **N0** | ISA v09 spec — **memory 편(4차)·compute/양자화 편(5차) 모두 확정 완료(2026-08-24)** — ISA_V09.md v4 | ✅ 사용자 승인 |
 | **N1** | `mysim_v09.cpp` 골격: global(32-bit 칸 단위)/공유 SRAM(nibble 단위) 메모리 객체, decode 루프, HALT/SNAPSHOT, 경계 검사, perf counter | ✅ 단위 테스트 (2026-08-25) |
-| **N2** | 데이터 이동: GLOAD 0xA0/GSTORE 0xA8 (5-word) + ver.08 주소설정 nibble 재해석·dtype spare bit | ✅ DMA+`isa_v09.py` round-trip 테스트 (2026-08-25); 주소설정/dtype 재해석은 N3 연산과 함께 |
+| **N2** | 데이터 이동: GLOAD 0xA0/GSTORE 0xA8 (4-word) + ver.08 주소설정 nibble 재해석·dtype spare bit | ✅ DMA+`isa_v09.py` round-trip 테스트 (2026-08-25); 주소설정/dtype 재해석은 N3 연산과 함께 |
 | **N3** | 연산: vector 256-lane 전 연산(reduce carry 포함) + matrix 3단 파이프라인 + VQUANT/VDEQUANT + 버그수정 3건 | ✅ (2026-08-25) FP16 배터리는 0818 oracle과 byte-exact, v09 신규 기능은 산술 재현 numpy reference와 bit-exact; 음수 imm 전수 확인은 N4 codegen에서 |
 | **N4** | `backend_v09.py` + SRAM staging codegen | ✅ (2026-08-25) proxy layer(홀수 차원 attention 전체) + 스트리밍 matmul + chunked reduce 모두 **0818 결과와 bit-exact** |
 | **N5** | 세 모델 golden을 v09 FP16 모드로 실행 | ✅ (2026-08-25) **세 모델 모두 token·hidden·KV cache·step별 logits까지 golden과 bit-exact** — Llama [358,2846,4560] / Gemma [108,236777,236789] (173s, table PLE) / Qwen [358,1184,311]. 불변식 최종 증명 완료 |
@@ -202,7 +202,7 @@ codegen). N5까지가 "동작 동일 증명", N6부터가 신기능.
 
 | 리스크 | 완화 |
 |---|---|
-| SRAM staging으로 프로그램 word 증가 (DMA 명령 추가) | GLOAD 5-word가 ver.08의 strided load 대비 크지 않음(주소 4-word + rows/cols 2-word + load 1-word = 7-word 상당). N4에서 `analyze_isa_stats` 전·후 비교로 정량 관리 (DMA는 bytes 축 별도 계상). 단일-word 주소 등 인코딩 압축은 측정 후 후보 |
+| SRAM staging으로 프로그램 word 증가 (DMA 명령 추가) | GLOAD 4-word가 ver.08의 strided load 대비 크지 않음(주소 4-word + rows/cols 2-word + load 1-word = 7-word 상당). N4에서 `analyze_isa_stats` 전·후 비교로 정량 관리 (DMA는 bytes 축 별도 계상). 단일-word 주소 등 추가 인코딩 압축은 측정 후 후보 |
 | 공유 SRAM의 유닛 간 경합 | 1차 모델은 기능 검증이라 무관. N7 접근 통계로 분리 필요성을 **데이터로** 판단 (§2.3 옵션) |
 | 256-lane chunking이 수치 변경 | §2.4 순서 보존 규칙 spec 명문화 + N3 bit-exact 검증 |
 | packed 접근의 경계 오류 | 정렬 규칙 spec 명문화 (64-배수 차원에서 자동 충족) + GLOAD 경계 검사 + unpack 단위 테스트 |
