@@ -66,6 +66,8 @@ public:
                 case 0x00: ++counters_.nop; break;
                 case 0xF0: ++counters_.snapshot; write_image(); break;
                 case 0xFF: ++counters_.halt; write_image(); return finish(0);
+                case 0xA0: ++counters_.gload; dma(false); break;
+                case 0xA8: ++counters_.gstore; dma(true); break;
                 default:
                     return fail("unknown opcode");
             }
@@ -137,6 +139,56 @@ private:
             file.read(reinterpret_cast<char*>(program_.data()), bytes);
         }
         return true;
+    }
+
+    // GLOAD (0xA0) / GSTORE (0xA8), 5 words (ISA_V09.md section 3):
+    //   w0 opcode | w1 global cell address | w2 global row stride (cells)
+    //   w3 SRAM nibble address (24 effective bits, 8-nibble aligned)
+    //   w4 rows[31:16] cols[15:0]  (cols in cells)
+    // dtype-blind synchronous copy; SRAM rows land contiguously
+    // (row r occupies nibbles w3 + r*cols*8 .. +cols*8).
+    void dma(bool store) {
+        if (pc_ + 4 >= program_.size()) {
+            fail("truncated DMA instruction (needs 5 words)");
+        }
+        const std::uint64_t g_addr = program_[pc_ + 1];
+        const std::uint64_t g_stride = program_[pc_ + 2];
+        const std::uint32_t sram_addr = program_[pc_ + 3];
+        const std::uint32_t rows = program_[pc_ + 4] >> 16;
+        const std::uint32_t cols = program_[pc_ + 4] & 0xffffu;
+        pc_ += 4;
+        if (sram_addr >= kSramNibbles) {
+            fail("DMA SRAM address exceeds 24-bit nibble space");
+        }
+        if (sram_addr % 8 != 0) {
+            fail("DMA SRAM address not 8-nibble aligned");
+        }
+        if (rows == 0 || cols == 0) {
+            fail("DMA with zero rows or cols");
+        }
+        const std::uint64_t sram_end =
+            static_cast<std::uint64_t>(sram_addr) +
+            static_cast<std::uint64_t>(rows) * cols * 8;
+        if (sram_end > kSramNibbles) {
+            fail("DMA SRAM range out of bounds");
+        }
+        const std::uint64_t g_end =
+            g_addr + static_cast<std::uint64_t>(rows - 1) * g_stride + cols;
+        if (g_end > global_.size()) {
+            fail("DMA global range out of bounds");
+        }
+        for (std::uint32_t row = 0; row < rows; ++row) {
+            std::uint32_t* g = global_.data() + g_addr + row * g_stride;
+            std::uint8_t* s = sram_.data() + (static_cast<std::size_t>(sram_addr) / 2) +
+                              static_cast<std::size_t>(row) * cols * 4;
+            if (store) {
+                std::memcpy(g, s, static_cast<std::size_t>(cols) * 4);
+            } else {
+                std::memcpy(s, g, static_cast<std::size_t>(cols) * 4);
+            }
+        }
+        const std::uint64_t cells = static_cast<std::uint64_t>(rows) * cols;
+        (store ? counters_.dma_cells_stored : counters_.dma_cells_loaded) += cells;
     }
 
     void write_image() {
