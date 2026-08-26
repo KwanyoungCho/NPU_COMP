@@ -16,7 +16,7 @@ def compile_func(func, tile=None):
 
 
 def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_oproj=True,
-                   pack_params=False, layouts=True, reuse=False):
+                   pack_params=False, layouts=True, reuse=False, quant_int8=None):
     """Relax module -> (asm, mp). Split out so a caller can compile ONCE and reuse
     the compiled program across many runs — e.g. the SAME decode kernel serves all
     28 layers and every token (only the weight *inputs* differ). This is what makes
@@ -32,7 +32,7 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
         mod = passes.npu_pipeline()(mod)
         return backend_v09.compile_module(mod, func_name,
                                           tile=64 if tile is None else tile,
-                                          reuse=reuse)
+                                          reuse=reuse, quant_int8=quant_int8)
     if backend in ("0818", "vendor-0818", "source-0818", "0818-source"):
         # ver.08 has native MAIN/PARTIAL sub-tile addressing.  Its backend owns a
         # row-major plan and deliberately does not inherit the 0710 packed layouts.
@@ -91,6 +91,14 @@ def run_compiled(asm, mp, inputs, maxrun=None):
         off = mp.offset[p]
         if arr.size != _numel(mp.shape[p]):
             raise ValueError(f"param #{i} '{p.name_hint}' size {arr.size} != {mp.shape[p]}")
+        if p.name_hint in getattr(asm, "quant_int8_params", {}):
+            # v09 W8A16: quantize per output channel and place packed int8
+            # bytes + FP32 scales inside the weight's FP16 region
+            from .quantize import quantize_per_col_int8, write_packed
+            K, N = mp.shape[p]
+            q, scale = quantize_per_col_int8(arr.reshape(K, N))
+            write_packed(gbuf.view(np.uint8), off, q, scale)
+            continue
         if p in mp.packed_meta:                    # packed weight param: reorder to tile-blocked
             K, N = mp.shape[p]
             arr = _pack2d(arr, K, N)

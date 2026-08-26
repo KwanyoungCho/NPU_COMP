@@ -28,7 +28,10 @@ from tvm import relax
 
 from .backend_0818 import CodegenError, _numel, _opname, plan
 from .isa_0818 import ACT_GELU, ACT_SILU, DST, IMM, SRC1, SRC2, VECTOR, Asm
-from .isa_v09 import SRAM_NIBBLES, enc_gload, enc_gstore, enc_halt
+from .isa_v09 import (
+    DT_FP16, DT_INT8, SRAM_NIBBLES, enc_ascale, enc_gload, enc_gstore,
+    enc_halt, enc_mcols, enc_mrows, enc_wscale)
+from .quantize import packed_layout
 
 VLEN = 0xFFFF          # full 16-bit vlen; the 256-lane datapath strip-mines
 DMA_MAX_CELLS = 0xFFFF
@@ -50,6 +53,15 @@ class V09Asm(Asm):
 
     def halt(self):
         return self._emit(enc_halt())
+
+    def shape_dt(self, operand, rows, cols, partial, dtype):
+        self._emit(enc_mrows(operand, rows, partial, dtype))
+        return self._emit(enc_mcols(operand, cols, partial, dtype))
+
+    def wscale(self, nibble):
+        for word in enc_wscale(nibble):
+            self._emit(word)
+        return self
 
 
 class _Stager:
@@ -146,15 +158,15 @@ class _Stager:
 
 
 def compile_module(mod, func_name="main", *, tile=64, reuse=False,
-                   whole_limit=1 << 20, chunk=1 << 16):
+                   whole_limit=1 << 20, chunk=1 << 16, quant_int8=None):
     func = mod[func_name]
     mp = plan(func, reuse=reuse)
     return compile_func(func, mp, tile=tile, whole_limit=whole_limit,
-                        chunk=chunk), mp
+                        chunk=chunk, quant_int8=quant_int8), mp
 
 
 def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
-                 emit_log=None):
+                 quant_int8=None, emit_log=None):
     """Compile a planned Relax function into a v09 program (ends with HALT)."""
     if tile <= 0 or tile > 64:
         raise ValueError(f"PE tile must be in 1..64, got {tile}")
@@ -162,17 +174,26 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
     a = V09Asm()
     st = _Stager(a)
     off = mp.offset
+    quant_names = frozenset(quant_int8 or ())
+    quant_vars = {p for p in mp.params if p.name_hint in quant_names}
+    for p in quant_vars:
+        k, n = mp.shape[p]
+        if k % tile or n % tile:
+            raise CodegenError(
+                f"INT8 weight '{p.name_hint}' [{k},{n}] must be {tile}-multiple")
+    a.quant_int8_params = {p.name_hint: tuple(mp.shape[p]) for p in quant_vars}
 
     def fits(count):
         return count <= whole_limit
 
     def sram_region(operand, nib0, stride, rows, cols, row, col,
-                    part_rows, part_cols):
+                    part_rows, part_cols, dtype=DT_FP16, width=4):
         """MAIN/PARTIAL descriptors for a staged window (addresses in nibbles,
-        shapes in elements — the ver.08 field values are unchanged)."""
-        a.addr(operand, nib0, 0).shape(operand, rows, stride, 0)
-        a.addr(operand, nib0 + (row * stride + col) * 4, 1)
-        a.shape(operand, part_rows, part_cols, 1)
+        shapes in elements — the ver.08 field values are unchanged; the operand
+        dtype rides in the shape words' spare bits)."""
+        a.addr(operand, nib0, 0).shape_dt(operand, rows, stride, 0, dtype)
+        a.addr(operand, nib0 + (row * stride + col) * width, 1)
+        a.shape_dt(operand, part_rows, part_cols, 1, dtype)
 
     def sram_copy(dst_nib, src_nib, count):
         for base in range(0, count, VLEN):
@@ -200,14 +221,20 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
             raise CodegenError("matmul expects two rank-2 tensors") from exc
         if inner != inner2:
             raise CodegenError(f"matmul K mismatch {inner} vs {inner2}")
+        rhs_int8 = rhs in quant_vars
         lhs_whole = fits(rows * inner)
-        rhs_whole = fits(inner * cols)
+        # packed INT8 occupies half the FP16-element footprint
+        rhs_elems = inner * cols // 2 if rhs_int8 else inner * cols
+        rhs_whole = fits(rhs_elems)
         dst_whole = fits(rows * cols)
+        if rhs_int8:
+            data_elem, scale_elem = packed_layout(off[rhs], inner, cols)
+            scale_nib = st.range_in(scale_elem, 2 * cols)
         if lhs_whole:
             lhs_nib = st.range_in(off[lhs], rows * inner)
             lhs_stride = inner
         if rhs_whole:
-            rhs_nib = st.range_in(off[rhs], inner * cols)
+            rhs_nib = st.range_in(data_elem if rhs_int8 else off[rhs], rhs_elems)
         if dst_whole:
             dst_nib = st.range_dst(off[dst], rows * cols)
         for row in range(0, rows, tile):
@@ -221,6 +248,10 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
                 for col in range(0, cols, tile):
                     part_cols = min(tile, cols - col)
                     with st.scope():
+                        if rhs_int8:
+                            # scale vector indexed tile-locally by the unit:
+                            # aim 0x8B at this column tile's first scale
+                            a.wscale(scale_nib + col * 8)
                         for k_index, k0 in enumerate(range(0, inner, tile)):
                             part_inner = min(tile, inner - k0)
                             if lhs_whole:
@@ -233,10 +264,25 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
                                             part_rows, part_inner)
                             a.load(1, SRC1)
                             with st.scope():
-                                if rhs_whole:
+                                if rhs_whole and rhs_int8:
+                                    sram_region(SRC2, rhs_nib, cols,
+                                                inner, cols, k0, col,
+                                                part_inner, part_cols,
+                                                dtype=DT_INT8, width=2)
+                                elif rhs_whole:
                                     sram_region(SRC2, rhs_nib, cols,
                                                 inner, cols, k0, col,
                                                 part_inner, part_cols)
+                                elif rhs_int8:
+                                    # int8 tile: window expressed in the
+                                    # FP16-element footprint (2 values/elem)
+                                    tile_nib, tile_stride = st.panel_in(
+                                        data_elem + (k0 * cols + col) // 2,
+                                        part_inner, part_cols // 2, cols // 2)
+                                    sram_region(SRC2, tile_nib, tile_stride * 2,
+                                                part_inner, part_cols, 0, 0,
+                                                part_inner, part_cols,
+                                                dtype=DT_INT8, width=2)
                                 else:
                                     tile_nib, tile_stride = st.panel_in(
                                         off[rhs] + k0 * cols + col,

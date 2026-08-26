@@ -164,6 +164,48 @@ def test_packed_rhs_gemm_matches_0818():
     np.testing.assert_array_equal(oracle.view(np.uint16), ours.view(np.uint16))
 
 
+def _w8a16_case(m, k, n, whole_limit):
+    from npu_compiler import backend_v09, passes
+    from npu_compiler.quantize import quantize_per_col_int8, w8a16_reference
+    bb = relax.BlockBuilder()
+    lhs = relax.Var("x", _sinfo([m, k]))
+    rhs = relax.Var("Wq", _sinfo([k, n]))
+    with bb.function("main", [lhs, rhs]):
+        with bb.dataflow():
+            output = bb.emit_output(bb.emit(relax.op.matmul(lhs, rhs)))
+        bb.emit_func_output(output)
+    mod = bb.finalize()
+    rng = np.random.default_rng(1000 + m + n)
+    x = rng.normal(0, 0.4, (m, k)).astype(np.float16)
+    w = rng.normal(0, 0.2, (k, n)).astype(np.float16)
+    lowered = passes.npu_pipeline()(mod)
+    func = lowered["main"]
+    mp = backend_v09.plan(func)
+    asm = backend_v09.compile_func(func, mp, whole_limit=whole_limit,
+                                   quant_int8={"Wq"})
+    assert asm.quant_int8_params == {"Wq": (k, n)}
+    got = np.asarray(driver.run_compiled(asm, mp, {"x": x, "Wq": w}),
+                     np.float16)
+    q, scale = quantize_per_col_int8(w)
+    expected = w8a16_reference(x, q, scale)
+    np.testing.assert_array_equal(got.view(np.uint16), expected.view(np.uint16))
+    # quantization error sanity vs the FP16 product
+    fp16 = np.asarray(driver.run_module(mod, {"x": x, "Wq": w},
+                                        backend="v09"), np.float32)
+    err = np.abs(got.astype(np.float32) - fp16)
+    assert err.max() < 0.5 and err.mean() < 0.05, (err.max(), err.mean())
+
+
+def test_w8a16_whole_staging_bit_exact():
+    """Two K tiles with MAC, per-column scales, whole-SRAM staging."""
+    _w8a16_case(7, 128, 64, whole_limit=1 << 20)
+
+
+def test_w8a16_streaming_bit_exact():
+    """Tiny whole_limit forces the packed INT8 tile-streaming path."""
+    _w8a16_case(65, 128, 128, whole_limit=512)
+
+
 if __name__ == "__main__":
     test_proxy_layer_bit_exact()
     test_long_row_reduce_chunking()
@@ -171,4 +213,6 @@ if __name__ == "__main__":
     test_streaming_matmul_paths()
     test_scalar_broadcast_path()
     test_packed_rhs_gemm_matches_0818()
+    test_w8a16_whole_staging_bit_exact()
+    test_w8a16_streaming_bit_exact()
     print("ALL V09 BACKEND N4 TESTS PASSED")
