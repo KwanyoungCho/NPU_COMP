@@ -43,17 +43,31 @@ class SourceGenerationSession:
     """Spec-driven execution bookkeeping shared by all model families."""
 
     BACKENDS = ("source-0818", "v09")
+    QUANT_MODES = (None, "w8a16")
 
-    def __init__(self, spec, sequence, backend="source-0818"):
+    def __init__(self, spec, sequence, backend="source-0818", quantize=None):
         self.spec = spec
         self.sequence = int(sequence)
         if self.sequence < 1:
             raise ValueError("prefill sequence must be positive")
         if backend not in self.BACKENDS:
             raise ValueError(f"unsupported generation backend {backend!r}")
+        if quantize not in self.QUANT_MODES:
+            raise ValueError(f"unsupported quantization mode {quantize!r}")
+        if quantize and backend != "v09":
+            raise ValueError("weight quantization requires the v09 backend")
         self.backend = backend
+        self.quantize = quantize
         self.invocations = 0
         self.elapsed_seconds = 0.0
+
+    @property
+    def quant_int8_names(self):
+        """Projection-weight param names to quantize (None in FP16 mode)."""
+        if self.quantize == "w8a16":
+            from .quantize import QUANT_PARAM_NAMES
+            return QUANT_PARAM_NAMES
+        return None
 
     def make_lm_gemm(self, inner, columns):
         """Wide-vocab panel GEMM for the session's backend (bit-identical

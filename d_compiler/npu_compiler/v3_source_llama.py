@@ -30,10 +30,10 @@ class Llama32SourceCompiler(SourceGenerationSession):
     }
 
     def __init__(self, sequence, assets=None, *, cache_weights=True,
-                 backend="source-0818"):
+                 backend="source-0818", quantize=None):
         self.assets = assets or Llama32Assets()
         super().__init__(llama32_spec(self.assets.config), sequence,
-                         backend=backend)
+                         backend=backend, quantize=quantize)
         self.cfg = model.LLAMA_3_2_3B
         self.cache_plan = build_cache_plan(self.spec)
         self.cache_weights = bool(cache_weights)
@@ -42,10 +42,12 @@ class Llama32SourceCompiler(SourceGenerationSession):
         self.prefill_program = driver.compile_module(
             model.build_v3_prefill_layer_module(
                 self.cfg, self.sequence, return_cache=True),
-            backend=self.backend, reuse=True)
+            backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         self.norm_program = driver.compile_module(
             model.build_v3_final_norm_module(self.cfg, 1),
-            backend=self.backend, reuse=True)
+            backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         self.lm_gemm = self.make_lm_gemm(self.cfg.D, self.spec.vocab_size)
         self.decode_programs = {}
 
@@ -102,7 +104,8 @@ class Llama32SourceCompiler(SourceGenerationSession):
         if context not in self.decode_programs:
             self.decode_programs[context] = driver.compile_module(
                 model.build_v3_decode_fused_layer_module(self.cfg, context),
-                backend=self.backend, reuse=True)
+                backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         return self.decode_programs[context]
 
     def _decode_inputs(self, layer, hidden, position, keys, values):

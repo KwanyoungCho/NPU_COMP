@@ -31,9 +31,9 @@ class Gemma4SourceCompiler(SourceGenerationSession):
     """Compile per-class layer programs and run official Gemma 4 E2B text."""
 
     def __init__(self, sequence, assets=None, *, cache_weights=True,
-                 backend="source-0818"):
+                 backend="source-0818", quantize=None):
         self.assets = assets or Gemma4Assets()
-        super().__init__(self.assets.spec, sequence, backend=backend)
+        super().__init__(self.assets.spec, sequence, backend=backend, quantize=quantize)
         self.cache_plan = build_cache_plan(self.spec)
         self.cache_weights = bool(cache_weights)
         self._weights = {}
@@ -44,7 +44,8 @@ class Gemma4SourceCompiler(SourceGenerationSession):
         self.decode_programs = {}
         self.norm_program = driver.compile_module(
             build_gemma4_final_norm_module(self.spec, 1),
-            backend=self.backend, reuse=True)
+            backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         self.lm_gemm = self.make_lm_gemm(self.spec.hidden_size, self.spec.vocab_size)
 
     def _layer_class(self, layer_index):
@@ -57,7 +58,8 @@ class Gemma4SourceCompiler(SourceGenerationSession):
             self.prefill_programs[key] = driver.compile_module(
                 build_gemma4_prefill_layer_module(
                     self.spec, layer_index, self.sequence),
-                backend=self.backend, reuse=True)
+                backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         return self.prefill_programs[key]
 
     def _decode_program(self, layer_index, context):
@@ -66,7 +68,8 @@ class Gemma4SourceCompiler(SourceGenerationSession):
             self.decode_programs[key] = driver.compile_module(
                 build_gemma4_decode_layer_module(
                     self.spec, layer_index, context),
-                backend=self.backend, reuse=True)
+                backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         return self.decode_programs[key]
 
     def compile_stats(self):

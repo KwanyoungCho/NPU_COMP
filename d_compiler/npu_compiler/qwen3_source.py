@@ -27,19 +27,21 @@ class Qwen3SourceCompiler(SourceGenerationSession):
     """Compile static-shape layer programs and run official Qwen3-4B."""
 
     def __init__(self, sequence, assets=None, *, cache_weights=True,
-                 backend="source-0818"):
+                 backend="source-0818", quantize=None):
         self.assets = assets or Qwen3Assets()
-        super().__init__(self.assets.spec, sequence, backend=backend)
+        super().__init__(self.assets.spec, sequence, backend=backend, quantize=quantize)
         self.cache_plan = build_cache_plan(self.spec)
         self.cache_weights = bool(cache_weights)
         self._weights = {}
         self._lm_weight = None
         self.prefill_program = driver.compile_module(
             build_qwen3_prefill_layer_module(self.spec, 0, self.sequence),
-            backend=self.backend, reuse=True)
+            backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         self.norm_program = driver.compile_module(
             build_qwen3_final_norm_module(self.spec, 1),
-            backend=self.backend, reuse=True)
+            backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         self.lm_gemm = self.make_lm_gemm(self.spec.hidden_size, self.spec.vocab_size)
         self.decode_programs = {}
 
@@ -63,7 +65,8 @@ class Qwen3SourceCompiler(SourceGenerationSession):
         if context not in self.decode_programs:
             self.decode_programs[context] = driver.compile_module(
                 build_qwen3_decode_layer_module(self.spec, 0, context),
-                backend=self.backend, reuse=True)
+                backend=self.backend, reuse=True,
+            quant_int8=self.quant_int8_names)
         return self.decode_programs[context]
 
     def _cached(self, key, loader):
