@@ -656,4 +656,5 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
                                  len(a.words)))
 
     a.halt()
+    a.sram_peak_nibbles = st.peak
     return a
