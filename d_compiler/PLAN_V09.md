@@ -193,7 +193,7 @@ nibble 시작주소 + element 단위 shape의 함의:
 | **N3** | 연산: vector/matrix 전체 + dequant-in-matmul + VQUANT/VDEQUANT + 버그수정 3건 | ✅ (2026-08-25; 7차 단순화 반영 2026-08-26 재검증) FP16 배터리는 0818 oracle과 byte-exact, v09 신규 기능은 산술 재현 numpy reference와 bit-exact |
 | **N4** | `backend_v09.py` + SRAM staging codegen | ✅ (2026-08-25) proxy layer(홀수 차원 attention 전체) + 스트리밍 matmul + chunked reduce 모두 **0818 결과와 bit-exact** |
 | **N5** | 세 모델 golden을 v09 FP16 모드로 실행 | ✅ (2026-08-25; 4-word DMA·7차 flag 제거 후에도 3-모델 전부 재검증 통과 2026-08-26) **세 모델 모두 token·hidden·KV cache·step별 logits까지 golden과 bit-exact** — Llama [358,2846,4560] / Gemma [108,236777,236789] (173s, table PLE) / Qwen [358,1184,311]. 불변식 최종 증명 완료 |
-| **N6a** | W8A16: quantizer(pack) + feeder dequant + INT8 weight 상주 실행 | §3 사다리 ①②③ |
+| **N6a** | W8A16: quantizer(pack) + INT8 weight 상주 실행 | ✅ (2026-08-26) 사다리 ①②③ 완료 — host reference와 bit-exact(whole·streaming 양 경로), 동일 문맥 logits cosine 0.9994+, 층별 진폭 변화 <5%; Gemma 3-token 전부 일치, Llama·Qwen은 각 1개 token이 **FP16 자체 1·2위 격차(0.031/0.047) < 양자화 RMSE(0.045/0.070)** 인 동률 지점에서 뒤집힘 |
 | **N6b** | W8A8: VQUANT 시퀀스 + INT8 tile 곱 + dequant-in-matmul | §3 사다리 ①②③ |
 | **N7** | 통계·문서화: v09 vs 0818 비교표(word/DMA/SRAM) + 공유 SRAM 접근 통계(분리 필요성 판단 자료), spec 최종판 | `report/report_v09.md` |
 
