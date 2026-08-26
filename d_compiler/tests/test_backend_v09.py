@@ -227,6 +227,38 @@ def test_w8a16_dtype_state_reset_after_matmul():
     np.testing.assert_array_equal(got.view(np.uint16), expected.view(np.uint16))
 
 
+def test_w8a8_bit_exact_and_error_bounded():
+    """Activations quantized on device (absmax -> scale -> VQUANT), integer
+    matmul, scales applied at MAC entry -- bit-exact vs the host mirror."""
+    from npu_compiler import backend_v09, passes
+    from npu_compiler.quantize import quantize_per_col_int8, w8a8_reference
+    m, k, n = 6, 128, 64
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", _sinfo([m, k]))
+    w = relax.Var("Wq", _sinfo([k, n]))
+    with bb.function("main", [x, w]):
+        with bb.dataflow():
+            output = bb.emit_output(bb.emit(relax.op.matmul(x, w)))
+        bb.emit_func_output(output)
+    mod = bb.finalize()
+    rng = np.random.default_rng(808)
+    inputs = {"x": rng.normal(0, 0.4, (m, k)).astype(np.float16),
+              "Wq": rng.normal(0, 0.2, (k, n)).astype(np.float16)}
+    lowered = passes.npu_pipeline()(mod)
+    func = lowered["main"]
+    mp = backend_v09.plan(func)
+    asm = backend_v09.compile_func(func, mp, quant_int8={"Wq"}, quant_act=True)
+    assert asm.quant_act
+    assert any((word & 0xFF) == 0x1A for word in asm.words), "no VQUANT emitted"
+    got = np.asarray(driver.run_compiled(asm, mp, inputs), np.float16)
+    q_w, w_scale = quantize_per_col_int8(inputs["Wq"])
+    expected, _, _ = w8a8_reference(inputs["x"], q_w, w_scale)
+    np.testing.assert_array_equal(got.view(np.uint16), expected.view(np.uint16))
+    fp16 = np.asarray(driver.run_module(mod, inputs, backend="v09"), np.float32)
+    err = np.abs(got.astype(np.float32) - fp16)
+    assert err.max() < 1.0 and err.mean() < 0.1, (err.max(), err.mean())
+
+
 def test_w8a16_whole_staging_bit_exact():
     """Two K tiles with MAC, per-column scales, whole-SRAM staging."""
     _w8a16_case(7, 128, 64, whole_limit=1 << 20)
@@ -247,4 +279,5 @@ if __name__ == "__main__":
     test_w8a16_dtype_state_reset_after_matmul()
     test_w8a16_whole_staging_bit_exact()
     test_w8a16_streaming_bit_exact()
+    test_w8a8_bit_exact_and_error_bounded()
     print("ALL V09 BACKEND N4 TESTS PASSED")

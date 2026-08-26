@@ -43,7 +43,7 @@ class SourceGenerationSession:
     """Spec-driven execution bookkeeping shared by all model families."""
 
     BACKENDS = ("source-0818", "v09")
-    QUANT_MODES = (None, "w8a16")
+    QUANT_MODES = (None, "w8a16", "w8a8")
 
     def __init__(self, spec, sequence, backend="source-0818", quantize=None):
         self.spec = spec
@@ -64,10 +64,15 @@ class SourceGenerationSession:
     @property
     def quant_int8_names(self):
         """Projection-weight param names to quantize (None in FP16 mode)."""
-        if self.quantize == "w8a16":
+        if self.quantize in ("w8a16", "w8a8"):
             from .quantize import QUANT_PARAM_NAMES
             return QUANT_PARAM_NAMES
         return None
+
+    @property
+    def quant_act(self):
+        """True when activations are quantized too (W8A8)."""
+        return self.quantize == "w8a8"
 
     def make_lm_gemm(self, inner, columns):
         """Wide-vocab panel GEMM for the session's backend (bit-identical

@@ -45,7 +45,8 @@ class Gemma4SourceCompiler(SourceGenerationSession):
         self.norm_program = driver.compile_module(
             build_gemma4_final_norm_module(self.spec, 1),
             backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         self.lm_gemm = self.make_lm_gemm(self.spec.hidden_size, self.spec.vocab_size)
 
     def _layer_class(self, layer_index):
@@ -59,7 +60,8 @@ class Gemma4SourceCompiler(SourceGenerationSession):
                 build_gemma4_prefill_layer_module(
                     self.spec, layer_index, self.sequence),
                 backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         return self.prefill_programs[key]
 
     def _decode_program(self, layer_index, context):
@@ -69,7 +71,8 @@ class Gemma4SourceCompiler(SourceGenerationSession):
                 build_gemma4_decode_layer_module(
                     self.spec, layer_index, context),
                 backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         return self.decode_programs[key]
 
     def compile_stats(self):

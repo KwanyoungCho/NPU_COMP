@@ -16,7 +16,8 @@ def compile_func(func, tile=None):
 
 
 def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_oproj=True,
-                   pack_params=False, layouts=True, reuse=False, quant_int8=None):
+                   pack_params=False, layouts=True, reuse=False, quant_int8=None,
+                   quant_act=False):
     """Relax module -> (asm, mp). Split out so a caller can compile ONCE and reuse
     the compiled program across many runs — e.g. the SAME decode kernel serves all
     28 layers and every token (only the weight *inputs* differ). This is what makes
@@ -32,7 +33,8 @@ def compile_module(mod, func_name="main", tile=None, backend="direct", fuse_opro
         mod = passes.npu_pipeline()(mod)
         return backend_v09.compile_module(mod, func_name,
                                           tile=64 if tile is None else tile,
-                                          reuse=reuse, quant_int8=quant_int8)
+                                          reuse=reuse, quant_int8=quant_int8,
+                                          quant_act=quant_act)
     if backend in ("0818", "vendor-0818", "source-0818", "0818-source"):
         # ver.08 has native MAIN/PARTIAL sub-tile addressing.  Its backend owns a
         # row-major plan and deliberately does not inherit the 0710 packed layouts.

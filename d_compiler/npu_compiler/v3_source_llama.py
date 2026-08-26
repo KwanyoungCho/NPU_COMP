@@ -43,11 +43,13 @@ class Llama32SourceCompiler(SourceGenerationSession):
             model.build_v3_prefill_layer_module(
                 self.cfg, self.sequence, return_cache=True),
             backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         self.norm_program = driver.compile_module(
             model.build_v3_final_norm_module(self.cfg, 1),
             backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         self.lm_gemm = self.make_lm_gemm(self.cfg.D, self.spec.vocab_size)
         self.decode_programs = {}
 
@@ -105,7 +107,8 @@ class Llama32SourceCompiler(SourceGenerationSession):
             self.decode_programs[context] = driver.compile_module(
                 model.build_v3_decode_fused_layer_module(self.cfg, context),
                 backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         return self.decode_programs[context]
 
     def _decode_inputs(self, layer, hidden, position, keys, values):

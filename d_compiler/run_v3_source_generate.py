@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--no-cache-weights", action="store_true")
     parser.add_argument("--backend", default="source-0818",
                         choices=["source-0818", "v09"])
-    parser.add_argument("--quant", default=None, choices=["w8a16"])
+    parser.add_argument("--quant", default=None, choices=["w8a16", "w8a8"])
     return parser.parse_args()
 
 

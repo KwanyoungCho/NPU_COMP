@@ -37,11 +37,13 @@ class Qwen3SourceCompiler(SourceGenerationSession):
         self.prefill_program = driver.compile_module(
             build_qwen3_prefill_layer_module(self.spec, 0, self.sequence),
             backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         self.norm_program = driver.compile_module(
             build_qwen3_final_norm_module(self.spec, 1),
             backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         self.lm_gemm = self.make_lm_gemm(self.spec.hidden_size, self.spec.vocab_size)
         self.decode_programs = {}
 
@@ -66,7 +68,8 @@ class Qwen3SourceCompiler(SourceGenerationSession):
             self.decode_programs[context] = driver.compile_module(
                 build_qwen3_decode_layer_module(self.spec, 0, context),
                 backend=self.backend, reuse=True,
-            quant_int8=self.quant_int8_names)
+            quant_int8=self.quant_int8_names,
+            quant_act=self.quant_act)
         return self.decode_programs[context]
 
     def _cached(self, key, loader):

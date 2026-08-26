@@ -29,8 +29,8 @@ from tvm import relax
 from .backend_0818 import CodegenError, _numel, _opname, plan
 from .isa_0818 import ACT_GELU, ACT_SILU, DST, IMM, SRC1, SRC2, VECTOR, Asm
 from .isa_v09 import (
-    DT_FP16, DT_INT8, SRAM_NIBBLES, enc_ascale, enc_gload, enc_gstore,
-    enc_halt, enc_mcols, enc_mrows, enc_wscale)
+    DT_FP16, DT_FP32, DT_INT8, SRAM_NIBBLES, enc_ascale, enc_gload,
+    enc_gstore, enc_halt, enc_mcols, enc_mrows, enc_vquant, enc_wscale)
 from .quantize import packed_layout
 
 VLEN = 0xFFFF          # full 16-bit vlen; the 256-lane datapath strip-mines
@@ -62,6 +62,14 @@ class V09Asm(Asm):
         for word in enc_wscale(nibble):
             self._emit(word)
         return self
+
+    def ascale(self, nibble):
+        for word in enc_ascale(nibble):
+            self._emit(word)
+        return self
+
+    def vquant(self):
+        return self._emit(enc_vquant())
 
 
 class _Stager:
@@ -158,15 +166,17 @@ class _Stager:
 
 
 def compile_module(mod, func_name="main", *, tile=64, reuse=False,
-                   whole_limit=1 << 20, chunk=1 << 16, quant_int8=None):
+                   whole_limit=1 << 20, chunk=1 << 16, quant_int8=None,
+                   quant_act=False):
     func = mod[func_name]
     mp = plan(func, reuse=reuse)
     return compile_func(func, mp, tile=tile, whole_limit=whole_limit,
-                        chunk=chunk, quant_int8=quant_int8), mp
+                        chunk=chunk, quant_int8=quant_int8,
+                        quant_act=quant_act), mp
 
 
 def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
-                 quant_int8=None, emit_log=None):
+                 quant_int8=None, quant_act=False, emit_log=None):
     """Compile a planned Relax function into a v09 program (ends with HALT)."""
     if tile <= 0 or tile > 64:
         raise ValueError(f"PE tile must be in 1..64, got {tile}")
@@ -182,6 +192,7 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
             raise CodegenError(
                 f"INT8 weight '{p.name_hint}' [{k},{n}] must be {tile}-multiple")
     a.quant_int8_params = {p.name_hint: tuple(mp.shape[p]) for p in quant_vars}
+    a.quant_act = bool(quant_act and quant_vars)
 
     def fits(count):
         return count <= whole_limit
@@ -211,6 +222,47 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
         (a.v_reduce_sum if kind == "sum" else a.v_reduce_max)()
         a.addr(DST, dst_nib).save(0)
 
+    def quantize_activation(src_nib, rows, cols):
+        """FP16 [rows, cols] in SRAM -> (INT8 buffer, FP32 per-row scales).
+
+        Per row: |x| = max(x, -x) -> seeded reduce-max -> divide by 127 and
+        store FP32 -> VQUANT.  All in SRAM; nothing touches global memory.
+        """
+        if cols > VLEN:
+            raise CodegenError(f"activation row of {cols} exceeds the vlen field")
+        qa_nib = st.alloc(rows * cols * 2)      # INT8: 2 nibbles per value
+        scale_nib = st.alloc(rows * 8)          # FP32 per row
+        tmp_nib = st.alloc(cols * 4)            # FP16 scratch row
+        acc_nib = st.alloc(8)                   # FP16 scalar scratch
+        for r in range(rows):
+            row_nib = src_nib + r * cols * 4
+            a.vlen(cols)
+            a.addr(SRC1, row_nib).shape_dt(SRC1, 1, cols, 1, DT_FP16)
+            a.load(0, SRC1)
+            a.v_sign_inv()
+            a.addr(DST, tmp_nib).shape_dt(DST, 1, cols, 1, DT_FP16)
+            a.save(0)
+            a.addr(SRC1, row_nib).load(0, SRC1)
+            a.addr(SRC2, tmp_nib).shape_dt(SRC2, 1, cols, 1, DT_FP16)
+            a.load(0, SRC2)
+            a.v_max(VECTOR)
+            a.addr(DST, tmp_nib).save(0)
+            a.addr(SRC1, tmp_nib).load(0, SRC1)
+            a.v_reduce_max()                    # seeded: correct for any sign
+            a.addr(DST, acc_nib).save(0)
+            a.vlen(1)
+            a.addr(SRC1, acc_nib).shape_dt(SRC1, 1, 1, 1, DT_FP16).load(0, SRC1)
+            a.v_div(IMM, 127)
+            a.addr(DST, scale_nib + r * 8).shape_dt(DST, 1, 1, 1, DT_FP32)
+            a.save(0)
+            a.vlen(cols)
+            a.ascale(scale_nib + r * 8)
+            a.addr(SRC1, row_nib).shape_dt(SRC1, 1, cols, 1, DT_FP16)
+            a.addr(DST, qa_nib + r * cols * 2).shape_dt(DST, 1, cols, 1, DT_INT8)
+            a.vquant()
+        a.shape_dt(DST, 1, cols, 1, DT_FP16)    # restore sticky dst dtype
+        return qa_nib, scale_nib
+
     # ------------------------------------------------------------- kernels
 
     def emit_matmul(dst, lhs, rhs):
@@ -230,9 +282,15 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
         if rhs_int8:
             data_elem, scale_elem = packed_layout(off[rhs], inner, cols)
             scale_nib = st.range_in(scale_elem, 2 * cols)
+        act_int8 = bool(quant_act) and rhs_int8
+        if act_int8 and not lhs_whole:
+            raise CodegenError(
+                "W8A8 requires the activation operand to fit SRAM whole")
         if lhs_whole:
             lhs_nib = st.range_in(off[lhs], rows * inner)
             lhs_stride = inner
+            if act_int8:
+                lhs_nib, a_scale_nib = quantize_activation(lhs_nib, rows, inner)
         if rhs_whole:
             rhs_nib = st.range_in(data_elem if rhs_int8 else off[rhs], rhs_elems)
         if dst_whole:
@@ -249,12 +307,19 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
                     part_cols = min(tile, cols - col)
                     with st.scope():
                         if rhs_int8:
-                            # scale vector indexed tile-locally by the unit:
-                            # aim 0x8B at this column tile's first scale
+                            # scale vectors are indexed tile-locally by the
+                            # unit: aim each at this tile's first entry
                             a.wscale(scale_nib + col * 8)
+                        if act_int8:
+                            a.ascale(a_scale_nib + row * 8)
                         for k_index, k0 in enumerate(range(0, inner, tile)):
                             part_inner = min(tile, inner - k0)
-                            if lhs_whole:
+                            if act_int8:
+                                sram_region(SRC1, lhs_nib, lhs_stride,
+                                            rows, inner, row, k0,
+                                            part_rows, part_inner,
+                                            dtype=DT_INT8, width=2)
+                            elif lhs_whole:
                                 sram_region(SRC1, lhs_nib, lhs_stride,
                                             rows, inner, row, k0,
                                             part_rows, part_inner)
@@ -307,9 +372,11 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
                             st.panel_out(off[dst] + row * cols + col,
                                          part_rows, part_cols, cols, out_nib)
         if rhs_int8:
-            # descriptor dtype is sticky state: restore SRC2 to FP16 so a
-            # following vector op (which sets only addresses) reads correctly
+            # descriptor dtype is sticky state: restore FP16 so a following
+            # vector op (which sets only addresses) reads correctly
             a.shape_dt(SRC2, min(inner, 0xFFFF), min(cols, 0xFFFF), 1, DT_FP16)
+        if act_int8:
+            a.shape_dt(SRC1, min(rows, 0xFFFF), min(inner, 0xFFFF), 1, DT_FP16)
         if dst_whole:
             st.range_out(off[dst], rows * cols, dst_nib)
 
