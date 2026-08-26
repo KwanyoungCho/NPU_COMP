@@ -306,6 +306,10 @@ def compile_func(func, mp, *, tile=64, whole_limit=1 << 20, chunk=1 << 16,
                             a.save(1)
                             st.panel_out(off[dst] + row * cols + col,
                                          part_rows, part_cols, cols, out_nib)
+        if rhs_int8:
+            # descriptor dtype is sticky state: restore SRC2 to FP16 so a
+            # following vector op (which sets only addresses) reads correctly
+            a.shape_dt(SRC2, min(inner, 0xFFFF), min(cols, 0xFFFF), 1, DT_FP16)
         if dst_whole:
             st.range_out(off[dst], rows * cols, dst_nib)
 

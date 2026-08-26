@@ -196,6 +196,37 @@ def _w8a16_case(m, k, n, whole_limit):
     assert err.max() < 0.5 and err.mean() < 0.05, (err.max(), err.mean())
 
 
+def test_w8a16_dtype_state_reset_after_matmul():
+    """A vector op touching operand 1 right after a quantized matmul must not
+    inherit the stale INT8 descriptor dtype (regression: full-model run)."""
+    from npu_compiler import backend_v09, passes
+    from npu_compiler.quantize import quantize_per_col_int8, w8a16_reference
+    m, k, n = 4, 64, 64
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", _sinfo([m, k]))
+    w = relax.Var("Wq", _sinfo([k, n]))
+    b = relax.Var("b", _sinfo([m, n]))
+    with bb.function("main", [x, w, b]):
+        with bb.dataflow():
+            y = bb.emit(relax.op.matmul(x, w))
+            output = bb.emit_output(bb.emit(relax.op.add(y, b)))
+        bb.emit_func_output(output)
+    mod = bb.finalize()
+    rng = np.random.default_rng(55)
+    inputs = {"x": rng.normal(0, 0.4, (m, k)).astype(np.float16),
+              "Wq": rng.normal(0, 0.2, (k, n)).astype(np.float16),
+              "b": rng.normal(0, 0.2, (m, n)).astype(np.float16)}
+    lowered = passes.npu_pipeline()(mod)
+    func = lowered["main"]
+    mp = backend_v09.plan(func)
+    asm = backend_v09.compile_func(func, mp, quant_int8={"Wq"})
+    got = np.asarray(driver.run_compiled(asm, mp, inputs), np.float16)
+    q, scale = quantize_per_col_int8(inputs["Wq"])
+    y = w8a16_reference(inputs["x"], q, scale).astype(np.float32)
+    expected = (y + inputs["b"].astype(np.float32)).astype(np.float16)
+    np.testing.assert_array_equal(got.view(np.uint16), expected.view(np.uint16))
+
+
 def test_w8a16_whole_staging_bit_exact():
     """Two K tiles with MAC, per-column scales, whole-SRAM staging."""
     _w8a16_case(7, 128, 64, whole_limit=1 << 20)
@@ -213,6 +244,7 @@ if __name__ == "__main__":
     test_streaming_matmul_paths()
     test_scalar_broadcast_path()
     test_packed_rhs_gemm_matches_0818()
+    test_w8a16_dtype_state_reset_after_matmul()
     test_w8a16_whole_staging_bit_exact()
     test_w8a16_streaming_bit_exact()
     print("ALL V09 BACKEND N4 TESTS PASSED")
