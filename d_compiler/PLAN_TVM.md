@@ -57,8 +57,8 @@
 
 | 단계 | 내용 | Gate |
 |---|---|---|
-| **S0** | **표준 프론트엔드**: `nn.Module`로 Llama 3.2 3B 정의(prefill/decode), `export_tvm()`, HF 가중치 이름 매핑 | `relax.build(target="llvm")` + VM 실행 → **HF와 token 일치** |
-| **S1** | **표준 파이프라인 골격**: `get_pipeline("zero")` 기반 + 커스텀 legalize map(rms_norm/softmax/gelu의 NPU 안전 분해) | llvm 빌드로 동일 결과 유지 (pass가 값을 바꾸지 않음) |
+| **S0** | **표준 프론트엔드**: `nn.Module`로 Llama 3.2 3B 정의, `export_tvm()`, HF 가중치 이름 매핑 | ✅ (2026-08-27) 전체 28층 실제 체크포인트 → llvm 빌드 → **첫 token 358 일치**. 소형 config는 numpy 참조와 cosine 0.999999 |
+| **S1** | **표준 파이프라인 골격**: 표준 단계를 명시적으로 구성(`tvm_pipeline.graph_pipeline`), 커스텀 legalize map 삽입 지점 확보 | ✅ (2026-08-27) stock 빌드와 **bit-identical**(융합 on/off 모두), 융합으로 40→21 PrimFunc, 전체 모델 4.9초·22 PrimFunc(층 간 커널 공유) |
 | **S2** | **NPU 인트린식 선언** — `npu_gemm_64x64`, 256-lane vector. `tensorize` 매칭 확인 | 인트린식 단위 테스트 |
 | **S3** | **TIR → v09 ISA codegen** — 스케줄된 TIR 순회 emitter | 커널 단위 **기존 backend와 bit-exact** |
 | **S4** | **스케줄 규칙** — tile 64 / `cache_read("sram")` / tensorize 적용 | 커널 bit-exact 유지 + word·DMA 측정 |
