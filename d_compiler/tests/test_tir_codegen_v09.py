@@ -43,6 +43,11 @@ class _SramView:
         self.stager = stager
         self.nib = bases          # element offset -> SRAM nibble of that tensor base
 
+    def vector(self, operand, elem_off):
+        """Address a contiguous vector run (no shape words needed)."""
+        base_elem, base_nib = self._owner(elem_off)
+        self.asm.addr(operand, base_nib + (elem_off - base_elem) * 4, 1)
+
     def region(self, operand, elem_off, stride, rows, cols):
         base_elem, base_nib = self._owner(elem_off)
         nib = base_nib + (elem_off - base_elem) * 4
@@ -137,7 +142,83 @@ def test_tir_matmul_multi_tile():
     print(f"  [PASS] multi-tile TIR matmul bit-exact ({len(asm.words)} words)")
 
 
+def _elementwise_module(shape, make):
+    bb = relax.BlockBuilder()
+    sinfo = relax.TensorStructInfo(list(shape), "float16")
+    x = relax.Var("x", sinfo)
+    y = relax.Var("y", sinfo)
+    with bb.function("main", [x, y]):
+        with bb.dataflow():
+            out = bb.emit_output(bb.emit(make(x, y)))
+        bb.emit_func_output(out)
+    return bb.finalize()
+
+
+def _tir_elementwise(mod, mp, shape, block, intrin, unary):
+    from npu_compiler import npu_intrin
+    legalized = relax.transform.LegalizeOps()(mod)
+    func_name = next(gv.name_hint for gv, fn in legalized.functions.items()
+                     if isinstance(fn, tir.PrimFunc))
+    scheduled = npu_intrin.schedule_elementwise(legalized, func_name, block, intrin)
+    prim = scheduled[func_name]
+
+    count = int(np.prod(shape))
+    asm = V09Asm()
+    stager = _Stager(asm)
+    params = list(mp.params)
+    offs = [mp.offset[p] for p in params] + [mp.offset[mp.output]]
+    if unary:
+        offs = [mp.offset[params[0]], mp.offset[mp.output]]
+    nibs = {off: (stager.range_in(off, count), count) for off in offs}
+    view = _SramView(asm, stager, nibs)
+    bases = {b.data: off for b, off in
+             zip(prim.buffer_map.values(), offs)}
+    Walker(asm, {}, view).run(prim, bases)
+    stager.range_out(offs[-1], count, nibs[offs[-1]][0])
+    asm.halt()
+    return asm
+
+
+def _check_elementwise(shape, make, block, intrin, unary=False):
+    from npu_compiler import passes
+    mod = _elementwise_module(shape, make)
+    rng = np.random.default_rng(9)
+    inputs = {"x": (rng.random(shape).astype(np.float16) + np.float16(0.5)),
+              "y": (rng.random(shape).astype(np.float16) + np.float16(0.5))}
+    lowered = passes.npu_pipeline()(mod)
+    func = lowered["main"]
+    mp = backend_v09.plan(func)
+    reference = np.asarray(
+        driver.run_compiled(backend_v09.compile_func(func, mp), mp, inputs),
+        np.float16)
+    asm = _tir_elementwise(lowered, mp, shape, block, intrin, unary)
+    got = np.asarray(driver.run_compiled(asm, mp, inputs), np.float16)
+    np.testing.assert_array_equal(reference.view(np.uint16), got.view(np.uint16))
+    return len(asm.words)
+
+
+def test_tir_elementwise_binary_bit_exact():
+    import tvm.relax.op as R
+    cases = [("add", R.add, "T_add"), ("subtract", R.subtract, "T_subtract"),
+             ("multiply", R.multiply, "T_multiply"), ("divide", R.divide, "T_divide")]
+    for name, op, block in cases:
+        words = _check_elementwise((4, 64), op, block, f"npu_v09_ew2_{name}")
+        print(f"  [PASS] {name:9s} bit-exact ({words} words)")
+
+
+def test_tir_elementwise_unary_bit_exact():
+    import tvm.relax.op as R
+    cases = [("sqrt", R.sqrt, "compute"), ("exp", R.exp, "compute"),
+             ("negative", R.negative, "compute")]
+    for name, op, block in cases:
+        words = _check_elementwise((4, 64), lambda a, _b, f=op: f(a), block,
+                                   f"npu_v09_ew1_{name}", unary=True)
+        print(f"  [PASS] {name:9s} bit-exact ({words} words)")
+
+
 if __name__ == "__main__":
     test_tir_matmul_bit_exact_with_relax_backend()
     test_tir_matmul_multi_tile()
+    test_tir_elementwise_binary_bit_exact()
+    test_tir_elementwise_unary_bit_exact()
     print("ALL TIR->v09 CODEGEN (S3) TESTS PASSED")

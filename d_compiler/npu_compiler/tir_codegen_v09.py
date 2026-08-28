@@ -18,7 +18,8 @@ import tvm
 import tvm.tir as tir
 from tvm import arith
 
-from .isa_0818 import DST, SRC1, SRC2, VECTOR
+from .isa_0818 import DST, IMM, SRC1, SRC2, VECTOR
+from .npu_intrin import VLEN
 from .tir_backend import TILE, TirBackendError, _TIR_BINOPS
 
 
@@ -144,6 +145,15 @@ class Walker:
             a, sa = self.ptr(expr.args[3]), self.ev(expr.args[4])
             b, sb = self.ptr(expr.args[5]), self.ev(expr.args[6])
             self.emit_gemm(c, sc, a, sa, b, sb)
+        elif name.startswith("npu_ew2_"):
+            self.flush()
+            self.emit_binary(name[len("npu_ew2_"):], self.ptr(expr.args[1]),
+                             self.ptr(expr.args[2]), self.ptr(expr.args[3]),
+                             self.ev(expr.args[4]))
+        elif name.startswith("npu_ew1_"):
+            self.flush()
+            self.emit_unary(name[len("npu_ew1_"):], self.ptr(expr.args[1]),
+                            self.ptr(expr.args[2]), self.ev(expr.args[3]))
         else:
             raise V09TirError(f"unknown intrinsic {name}")
 
@@ -168,6 +178,37 @@ class Walker:
         self.stage.region(SRC2, b, sb, TILE, TILE)
         asm.load(1, SRC2)
         asm.m_mul(VECTOR, mac=not first)
+
+    _BINARY = {"add": "v_add", "subtract": "v_sub",
+               "multiply": "v_mul", "divide": "v_div"}
+    _UNARY = {"sqrt": "v_sqrt", "exp": "v_exp", "negative": "v_sign_inv",
+              "cos": "v_cos", "sin": "v_sin"}
+
+    def emit_binary(self, op, dst, lhs, rhs, count):
+        method = self._BINARY.get(op)
+        if method is None:
+            raise V09TirError(f"unsupported binary op {op}")
+        asm = self.a
+        asm.vlen(count)
+        self.stage.vector(SRC1, lhs)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, rhs)
+        asm.load(0, SRC2)
+        getattr(asm, method)(VECTOR)
+        self.stage.vector(DST, dst)
+        asm.save(0)
+
+    def emit_unary(self, op, dst, src, count):
+        method = self._UNARY.get(op)
+        if method is None:
+            raise V09TirError(f"unsupported unary op {op}")
+        asm = self.a
+        asm.vlen(count)
+        self.stage.vector(SRC1, src)
+        asm.load(0, SRC1)
+        getattr(asm, method)()
+        self.stage.vector(DST, dst)
+        asm.save(0)
 
     def flush(self):
         """Store the finished accumulator tile."""
