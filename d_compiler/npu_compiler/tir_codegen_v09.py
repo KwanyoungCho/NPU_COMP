@@ -542,13 +542,13 @@ class Walker:
         outer = spatial[:-1]
         length = extents[inner]
         self.flush()
+        source = self._addresser(value, inner, outer)
+        target = self._addresser(store, inner, outer, store=True)
+        src_unit = 4 if value.buffer.data in self.sram else 1
+        dst_unit = 4 if store.buffer.data in self.sram else 1
         for position in self._outer_positions(outer, extents):
-            for var, val in zip(outer, position):
-                self.env[var] = val
-            src_base, src_stride = self._affine_flat(value, inner)
-            dst_base, dst_stride = self._affine_flat_store(store, inner)
-            src_unit = 4 if value.buffer.data in self.sram else 1
-            dst_unit = 4 if store.buffer.data in self.sram else 1
+            src_base, src_stride = source(position)
+            dst_base, dst_stride = target(position)
             if dst_stride != dst_unit:
                 raise V09TirError(f"movement destination stride {dst_stride}")
             asm = self.a
@@ -587,14 +587,14 @@ class Walker:
             # a write-back reads SRAM the accumulator still owns; staging an
             # input does not touch the PE, so it must not break a MAC chain
             self.flush()
+        source = self._addresser(load, inner, outer)
+        target = self._addresser(store, inner, outer, store=True)
+        src_unit = 4 if load.buffer.data in self.sram else 1
+        dst_unit = 4 if store.buffer.data in self.sram else 1
         segments = []
         for position in self._outer_positions(outer, extents):
-            for var, val in zip(outer, position):
-                self.env[var] = val
-            src_base, src_stride = self._affine_flat(load, inner)
-            dst_base, dst_stride = self._affine_flat_store(store, inner)
-            src_unit = 4 if load.buffer.data in self.sram else 1
-            dst_unit = 4 if store.buffer.data in self.sram else 1
+            src_base, src_stride = source(position)
+            dst_base, dst_stride = target(position)
             if src_stride != src_unit or dst_stride != dst_unit:
                 raise V09TirError("DMA stage needs contiguous rows")
             glob, sram = ((src_base, dst_base) if to_sram
@@ -606,8 +606,65 @@ class Walker:
                 segments.append([glob, sram, length])
         self._emit_segments(segments, to_sram)
 
+    def _addresser(self, access, inner, outer, store=False):
+        """A function from an outer loop position to (address, inner stride).
+
+        Most index expressions are affine in the loop variables, and then the
+        address is one multiply-add per axis instead of an evaluation of TIR
+        per row -- which matters at real dimensions, where a single matmul
+        stages tens of thousands of rows.  ``repeat`` and friends index
+        through a floordiv, so those fall back to evaluating each row.
+        """
+        flat = self._affine_flat_store if store else self._affine_flat
+
+        def evaluate(position):
+            for var, value in zip(outer, position):
+                self.env[var] = value
+            return flat(access, inner)
+
+        if not self._is_affine(access.indices, outer):
+            return evaluate
+        saved = {var: self.env.get(var) for var in outer}
+        for var in outer:
+            self.env[var] = 0
+        origin, stride = flat(access, inner)
+        steps = []
+        for var in outer:
+            self.env[var] = 1
+            steps.append(flat(access, inner)[0] - origin)
+            self.env[var] = 0
+        for var, value in saved.items():
+            if value is None:
+                self.env.pop(var, None)
+            else:
+                self.env[var] = value
+        return lambda position: (
+            origin + sum(map(int.__mul__, steps, position)), stride)
+
+    @staticmethod
+    def _is_affine(indices, outer):
+        variable = set(outer)
+        linear = True
+
+        def visit(node):
+            nonlocal linear
+            if isinstance(node, (tir.FloorDiv, tir.FloorMod, tir.Div, tir.Mod,
+                                 tir.Min, tir.Max, tir.Select, tir.Call)):
+                if any(var in variable
+                       for var in tir.analysis.undefined_vars(node)):
+                    linear = False
+            elif isinstance(node, tir.Mul):
+                if any(var in variable for var in tir.analysis.undefined_vars(node.a)) \
+                        and any(var in variable
+                                for var in tir.analysis.undefined_vars(node.b)):
+                    linear = False
+
+        for index in indices:
+            tir.stmt_functor.post_order_visit(index, visit)
+        return linear
+
     def _emit_segments(self, segments, to_sram):
-        index = 0
+        index, group, aligned = 0, 0, False
         while index < len(segments):
             rows, stride = self._regular_block(segments, index)
             glob, sram, count = segments[index]
@@ -615,10 +672,13 @@ class Walker:
                 # a tile of a wider tensor: exactly what the 2D transfer is for
                 self.stage.dma_2d(glob, stride, sram, rows, count, to_sram)
                 index += rows
+                group = 0
                 continue
-            group = self._contiguous_group(segments, index)
-            if all(g % 2 == 0 and n % 2 == 0
-                   for g, _, n in segments[index:group]) or group == index + 1:
+            if index >= group:
+                group = self._contiguous_group(segments, index)
+                aligned = all(g % 2 == 0 and n % 2 == 0
+                              for g, _, n in segments[index:group])
+            if aligned or group == index + 1:
                 if glob % 2:
                     raise V09TirError("DMA region must start on a 32-bit cell")
                 if to_sram:
