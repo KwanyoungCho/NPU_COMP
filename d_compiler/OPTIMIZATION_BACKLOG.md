@@ -96,11 +96,12 @@
 - **효과**: 실모델 차원에서 커널당 SRAM이 8 MiB 안에 들어온다
   (예: `matmul` 1.18 MiB, `matmul4` 2.43 MiB — 압축 전에는 18~48 MiB)
 - **실측 (3B 차원 1층, hidden 3072 / ffn 8192 / head 24·8×128, seq 7)**:
-  링크 1,032,615 word · 45 kernel · image 194.4 MiB,
-  C-model 실행 결과가 llvm 빌드 대비 **cosine 0.999965, max|diff| 0.00256**.
-  7행 중 6행 argmax 일치, 마지막 행만 불일치 — 그 행의 llvm top1−top2 간격이
-  0.000732로 해당 행의 FP16 오차 0.001831보다 작은 **근소차 뒤집힘**
-  (난수 가중치 N(0,0.02)라 logit이 거의 균일한 탓)
+  링크 1,032,615 word · 45 kernel · image 194.4 MiB (`run_real_layer_npu.py`).
+  float32 numpy 기준으로 채점하면 **NPU가 cosine 1.000000 / max|diff| 0.00008**,
+  llvm 빌드가 0.999965 / 0.00260. 마지막 행 argmax도 NPU만 기준과 일치(243).
+  → 두 빌드가 갈리는 이유는 **TVM의 float16 matmul이 float16으로 누적**하는 반면
+  우리 기계는 내부 누적이 FP32이기 때문이다. **llvm 빌드는 우리보다 느슨한
+  기준**이므로, 둘이 어긋나면 float32 numpy로 판정해야 한다
 
 ## C6. DMA 셀 정렬 — 홀수 길이 행 (2026-08-28 해결)
 - **무엇이었나**: 전송은 32-bit 셀 단위이므로 길이가 홀수인 행은 다음 행이
