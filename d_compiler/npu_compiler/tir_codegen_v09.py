@@ -587,7 +587,7 @@ class Walker:
             # a write-back reads SRAM the accumulator still owns; staging an
             # input does not touch the PE, so it must not break a MAC chain
             self.flush()
-        groups = []
+        segments = []
         for position in self._outer_positions(outer, extents):
             for var, val in zip(outer, position):
                 self.env[var] = val
@@ -599,21 +599,68 @@ class Walker:
                 raise V09TirError("DMA stage needs contiguous rows")
             glob, sram = ((src_base, dst_base) if to_sram
                           else (dst_base, src_base))
-            if groups and glob == groups[-1][0] + groups[-1][1]:
-                groups[-1][1] += length
-                groups[-1][2].append((sram, length))
+            if segments and glob == segments[-1][0] + segments[-1][2] \
+                    and sram == segments[-1][1] + segments[-1][2] * 4:
+                segments[-1][2] += length     # one contiguous run on both sides
             else:
-                groups.append([glob, length, [(sram, length)]])
-        for glob, total, pieces in groups:
-            packed = all(nxt == addr + count * 4
-                         for (addr, count), (nxt, _) in zip(pieces, pieces[1:]))
-            if packed and glob % 2 == 0:
+                segments.append([glob, sram, length])
+        self._emit_segments(segments, to_sram)
+
+    def _emit_segments(self, segments, to_sram):
+        index = 0
+        while index < len(segments):
+            rows, stride = self._regular_block(segments, index)
+            glob, sram, count = segments[index]
+            if rows > 1:
+                # a tile of a wider tensor: exactly what the 2D transfer is for
+                self.stage.dma_2d(glob, stride, sram, rows, count, to_sram)
+                index += rows
+                continue
+            group = self._contiguous_group(segments, index)
+            if all(g % 2 == 0 and n % 2 == 0
+                   for g, _, n in segments[index:group]) or group == index + 1:
+                if glob % 2:
+                    raise V09TirError("DMA region must start on a 32-bit cell")
                 if to_sram:
-                    self.stage.dma_in(glob, pieces[0][0], total)
+                    self.stage.dma_in(glob, sram, count)
                 else:
-                    self.stage.dma_out(glob, pieces[0][0], total)
-            else:
-                self._bounce_dma(glob, pieces, to_sram)
+                    self.stage.dma_out(glob, sram, count)
+                index += 1
+                continue
+            self._bounce_dma(glob, [(s, n) for _, s, n in segments[index:group]],
+                             to_sram)
+            index = group
+
+    @staticmethod
+    def _contiguous_group(segments, index):
+        """End of the run of segments that are adjacent in global memory."""
+        end = index + 1
+        while end < len(segments) and \
+                segments[end][0] == segments[end - 1][0] + segments[end - 1][2]:
+            end += 1
+        return end
+
+    @staticmethod
+    def _regular_block(segments, index):
+        """Length and global row stride of a 2D block starting at ``index``.
+
+        A transfer addresses global memory in cells and packs SRAM rows, so a
+        block needs an even base, an even row length, and an even stride.
+        """
+        glob, sram, count = segments[index]
+        if index + 1 >= len(segments) or glob % 2 or count % 2:
+            return 1, 0
+        stride = segments[index + 1][0] - glob
+        if stride % 2 or stride < count:
+            return 1, 0
+        rows = 1
+        while index + rows < len(segments):
+            next_glob, next_sram, next_count = segments[index + rows]
+            if next_count != count or next_glob != glob + rows * stride \
+                    or next_sram != sram + rows * count * 4:
+                break
+            rows += 1
+        return rows, stride
 
     def _bounce_dma(self, glob, pieces, to_sram):
         """Move a globally contiguous range whose SRAM image is scattered.
@@ -849,6 +896,14 @@ class SramEmitter:
     def dma_out(self, global_elem, sram_nibble, count):
         cells, nib = self._cells(global_elem, count, sram_nibble)
         self.asm.gstore(global_elem // 2, cells, nib, 1, cells)
+
+    def dma_2d(self, global_elem, global_stride, sram_nibble, rows, count,
+               to_sram):
+        """Move ``rows`` rows of ``count`` elements spaced ``global_stride``
+        apart in global memory to or from a packed SRAM block."""
+        cells, nib = self._cells(global_elem, count, sram_nibble)
+        move = self.asm.gload if to_sram else self.asm.gstore
+        move(global_elem // 2, global_stride // 2, nib, rows, cells)
 
     @staticmethod
     def _cells(global_elem, count, sram_nibble):
