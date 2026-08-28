@@ -85,6 +85,8 @@ class Walker:
     def visit(self, stmt):
         kind = type(stmt)
         if kind is tir.For:
+            if self._match_nest(stmt):
+                return
             begin, extent = self.ev(stmt.min), self.ev(stmt.extent)
             for value in range(begin, begin + extent):
                 self.env[stmt.loop_var] = value
@@ -112,6 +114,169 @@ class Walker:
             self.visit(stmt.body)
         else:
             raise V09TirError(f"unhandled TIR node {kind}")
+
+    # ---- whole-loop-nest patterns (movement and reduction) ----------------
+    # Ops that tensorize poorly because their extent varies (row reductions,
+    # broadcast, transpose, slice) are recognised as a complete loop nest and
+    # emitted as one vector instruction per output row, which is what the ISA
+    # actually provides.
+
+    def _collect_nest(self, stmt):
+        loops, node = [], stmt
+        while isinstance(node, tir.For):
+            loops.append(node)
+            node = node.body
+        return (loops, node) if isinstance(node, tir.BlockRealize) else None
+
+    def _match_nest(self, stmt):
+        collected = self._collect_nest(stmt)
+        if collected is None:
+            return False
+        loops, realize = collected
+        block = realize.block
+        if block.match_buffers:
+            return False                       # tensorized: handled elsewhere
+        body = block.body
+        if not isinstance(body, tir.BufferStore):
+            return False
+        for iter_var, value in zip(block.iter_vars, realize.iter_values):
+            if not isinstance(value, tir.Var):
+                return False
+            self.env[iter_var.var] = 0
+        spatial = [v.var for v in block.iter_vars if v.iter_type == 0]
+        reduce_axes = [v.var for v in block.iter_vars if v.iter_type == 2]
+        extents = {}
+        for loop, iter_var in zip(loops, block.iter_vars):
+            extents[iter_var.var] = self.ev(loop.extent)
+        try:
+            if block.init is not None and len(reduce_axes) == 1:
+                self._emit_reduction(body, block.init, spatial, reduce_axes[0],
+                                     extents)
+            elif not reduce_axes:
+                self._emit_movement(body, spatial, extents)
+            else:
+                return False
+        finally:
+            for iter_var in block.iter_vars:
+                self.env.pop(iter_var.var, None)
+        return True
+
+    def _affine(self, expr, axis):
+        """(base, stride) of an index expression along one symbolic axis."""
+        self.env[axis] = 0
+        base = self.ev(expr)
+        self.env[axis] = 1
+        stride = self.ev(expr) - base
+        self.env[axis] = 0
+        return base, stride
+
+    @staticmethod
+    def _flat(buffer, indices, walker):
+        """Absolute element offset of a buffer access, given the current env."""
+        if buffer.data not in walker.bases:
+            raise V09TirError(f"unplaced buffer {buffer.name}")
+        shape = [int(d) for d in buffer.shape]
+        offset, scale = 0, 1
+        for dim, index in reversed(list(zip(shape, indices))):
+            offset += walker.ev(index) * scale
+            scale *= dim
+        return walker.bases[buffer.data] + offset
+
+    def _outer_positions(self, axes, extents):
+        """Iterate concrete values for every axis except the innermost."""
+        if not axes:
+            yield ()
+            return
+        counts = [extents[a] for a in axes]
+        total = 1
+        for c in counts:
+            total *= c
+        for flat in range(total):
+            values, rest = [], flat
+            for c in reversed(counts):
+                values.append(rest % c)
+                rest //= c
+            yield tuple(reversed(values))
+
+    def _emit_reduction(self, store, init, spatial, axis, extents):
+        value = store.value
+        if isinstance(value, tir.Add):
+            method, kind = "v_reduce_sum", "sum"
+        elif isinstance(value, tir.Max):
+            method, kind = "v_reduce_max", "max"
+        else:
+            raise V09TirError(f"unsupported reduction {type(value)}")
+        source = value.b if isinstance(value.b, tir.BufferLoad) else value.a
+        if not isinstance(source, tir.BufferLoad):
+            raise V09TirError("reduction source is not a buffer load")
+        length = extents[axis]
+        self.flush()
+        for position in self._outer_positions(spatial, extents):
+            for var, val in zip(spatial, position):
+                self.env[var] = val
+            base, stride = self._affine_flat(source, axis)
+            if stride != 1:
+                raise V09TirError(f"reduction needs a contiguous axis, got {stride}")
+            dst = self._flat(store.buffer, store.indices, self)
+            asm = self.a
+            asm.vlen(length)
+            self.stage.vector(SRC1, base)
+            asm.load(0, SRC1)
+            getattr(asm, method)()
+            self.stage.vector(DST, dst)
+            asm.save(0)
+
+    def _affine_flat(self, load, axis):
+        """(base element offset, stride) of a buffer load along one axis."""
+        self.env[axis] = 0
+        base = self._flat(load.buffer, load.indices, self)
+        self.env[axis] = 1
+        stride = self._flat(load.buffer, load.indices, self) - base
+        self.env[axis] = 0
+        return base, stride
+
+    def _emit_movement(self, store, spatial, extents):
+        value = store.value
+        if not isinstance(value, tir.BufferLoad):
+            raise V09TirError(f"unsupported movement value {type(value)}")
+        inner = spatial[-1]
+        outer = spatial[:-1]
+        length = extents[inner]
+        self.flush()
+        for position in self._outer_positions(outer, extents):
+            for var, val in zip(outer, position):
+                self.env[var] = val
+            src_base, src_stride = self._affine_flat(value, inner)
+            dst_base, dst_stride = self._affine_flat_store(store, inner)
+            if dst_stride != 1:
+                raise V09TirError(f"movement destination stride {dst_stride}")
+            asm = self.a
+            if src_stride == 1:                      # contiguous copy / slice
+                asm.vlen(length)
+                self.stage.vector(SRC1, src_base)
+                asm.load(0, SRC1)
+                asm.v_copy()
+            elif src_stride == 0:                    # broadcast along the row
+                asm.vlen(length)
+                self.stage.broadcast(src_base)
+            else:
+                # non-unit source stride (transpose): the vector load only
+                # reads contiguously, so use the matrix strided load, which
+                # gathers one column, then copy it out as a vector
+                self.stage.strided(SRC1, src_base, src_stride, length)
+                asm.load(1, SRC1, strided=1, ncols=1, start=0)
+                asm.vlen(length)
+                asm.v_copy()
+            self.stage.vector(DST, dst_base)
+            asm.save(0)
+
+    def _affine_flat_store(self, store, axis):
+        self.env[axis] = 0
+        base = self._flat(store.buffer, store.indices, self)
+        self.env[axis] = 1
+        stride = self._flat(store.buffer, store.indices, self) - base
+        self.env[axis] = 0
+        return base, stride
 
     def _bind_match(self, match):
         """A tensorized block views a tile of a root buffer through

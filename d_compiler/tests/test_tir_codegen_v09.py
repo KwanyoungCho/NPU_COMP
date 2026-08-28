@@ -48,6 +48,20 @@ class _SramView:
         base_elem, base_nib = self._owner(elem_off)
         self.asm.addr(operand, base_nib + (elem_off - base_elem) * 4, 1)
 
+    def broadcast(self, elem_off):
+        base_elem, base_nib = self._owner(elem_off)
+        self.asm.v_broadcast_addr(base_nib + (elem_off - base_elem) * 4)
+
+    def strided(self, operand, elem_off, stride, count):
+        """A column of `count` elements spaced `stride` apart: MAIN carries the
+        row width, PARTIAL selects a single column."""
+        base_elem, base_nib = self._owner(elem_off)
+        nib = base_nib + (elem_off - base_elem) * 4
+        self.asm.addr(operand, nib, 0)
+        self.asm.shape(operand, count, stride, 0)
+        self.asm.addr(operand, nib, 1)
+        self.asm.shape(operand, count, 1, 1)
+
     def region(self, operand, elem_off, stride, rows, cols):
         base_elem, base_nib = self._owner(elem_off)
         nib = base_nib + (elem_off - base_elem) * 4
@@ -216,9 +230,79 @@ def test_tir_elementwise_unary_bit_exact():
         print(f"  [PASS] {name:9s} bit-exact ({words} words)")
 
 
+def _tir_single_op(mod, mp, offs, count_out):
+    """Compile a single-op module through LegalizeOps + the pattern walker."""
+    legalized = relax.transform.LegalizeOps()(mod)
+    func_name = next(gv.name_hint for gv, fn in legalized.functions.items()
+                     if isinstance(fn, tir.PrimFunc))
+    prim = legalized[func_name]
+    asm = V09Asm()
+    stager = _Stager(asm)
+    nibs = {off: (stager.range_in(off, size), size) for off, size in offs}
+    view = _SramView(asm, stager, nibs)
+    bases = {b.data: off for b, (off, _) in
+             zip(prim.buffer_map.values(), [(o, s) for o, s in offs])}
+    Walker(asm, {}, view).run(prim, bases)
+    out_off = offs[-1][0]
+    stager.range_out(out_off, count_out, nibs[out_off][0])
+    asm.halt()
+    return asm
+
+
+def _check_single(shapes, make, inputs):
+    from npu_compiler import passes
+    bb = relax.BlockBuilder()
+    vars = [relax.Var(f"a{i}", relax.TensorStructInfo(list(s), "float16"))
+            for i, s in enumerate(shapes)]
+    with bb.function("main", vars):
+        with bb.dataflow():
+            out = bb.emit_output(bb.emit(make(*vars)))
+        bb.emit_func_output(out)
+    mod = passes.npu_pipeline()(bb.finalize())
+    func = mod["main"]
+    mp = backend_v09.plan(func)
+    reference = np.asarray(
+        driver.run_compiled(backend_v09.compile_func(func, mp), mp, inputs),
+        np.float16)
+    sizes = [(mp.offset[p], int(np.prod(mp.shape[p]))) for p in mp.params]
+    sizes.append((mp.offset[mp.output], int(np.prod(mp.shape[mp.output]))))
+    asm = _tir_single_op(mod, mp, sizes, sizes[-1][1])
+    got = np.asarray(driver.run_compiled(asm, mp, inputs), np.float16)
+    np.testing.assert_array_equal(reference.view(np.uint16), got.view(np.uint16))
+    return len(asm.words)
+
+
+def test_tir_reduction_bit_exact():
+    import tvm.relax.op as R
+    rng = np.random.default_rng(12)
+    x = rng.standard_normal((4, 64)).astype(np.float16)
+    for name, op in (("sum", lambda a: R.sum(a, axis=[1], keepdims=True)),
+                     ("max", lambda a: R.max(a, axis=[1], keepdims=True))):
+        words = _check_single([(4, 64)], op, {"a0": x})
+        print(f"  [PASS] {name:9s} bit-exact ({words} words)")
+
+
+def test_tir_movement_bit_exact():
+    import tvm.relax.op as R
+    rng = np.random.default_rng(13)
+    cases = [
+        ("broadcast", [(4, 1)], lambda a: R.broadcast_to(a, relax.ShapeExpr([4, 64]))),
+        ("transpose", [(4, 64)], lambda a: R.permute_dims(a)),
+        ("slice", [(4, 64)],
+         lambda a: R.strided_slice(a, axes=[1], begin=[16], end=[48])),
+    ]
+    for name, shapes, op in cases:
+        inputs = {f"a{i}": rng.standard_normal(s).astype(np.float16)
+                  for i, s in enumerate(shapes)}
+        words = _check_single(shapes, op, inputs)
+        print(f"  [PASS] {name:9s} bit-exact ({words} words)")
+
+
 if __name__ == "__main__":
     test_tir_matmul_bit_exact_with_relax_backend()
     test_tir_matmul_multi_tile()
     test_tir_elementwise_binary_bit_exact()
     test_tir_elementwise_unary_bit_exact()
+    test_tir_reduction_bit_exact()
+    test_tir_movement_bit_exact()
     print("ALL TIR->v09 CODEGEN (S3) TESTS PASSED")
