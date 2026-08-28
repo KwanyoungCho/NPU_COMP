@@ -65,7 +65,7 @@
 | **S2** | **메모리 계획을 표준 pass로** — 표준 시퀀스 뒤 storage/offset을 평면 정적 주소로 배정 (`npu_memplan.py`) | ✅ (2026-08-28) 생존구간 충돌 0, 재사용으로 footprint 감소. **`LiftTransformParams` 발견 적용** — 런타임 가중치 전치 제거로 활성 pool 1,599.7→0.7 MiB (값 보존 확인) |
 | **S3** | **인트린식·walker 재타깃** — compiler-v2의 인트린식·tensorize 스케줄·TIR walker를 **v09 ISA로 이식** | ✅ (2026-08-28, matmul) 64³·128³ 모두 backend_v09와 **bit-exact**. MAIN/PARTIAL 서술자 덕에 0710의 gather/scatter 불필요 → walker 대폭 단순화. **커널 13종 전부 bit-exact 완료** (matmul 64³·128³, binary 4, unary 3, sum/max, broadcast, transpose, slice) |
 | **S4** | **SRAM staging** — `cache_read/cache_write("global.sram")`으로 DMA 표현 | ✅ (2026-08-28) 64³·128³ 모두 backend_v09와 **bit-exact**. 연산은 SRAM만 접근, global은 DMA에만 등장 |
-| **S5** | **링크** — 커널 인스턴스를 하나의 명령 스트림으로 연결 | 층 전체 실행, HF 대비 수치 |
+| **S5** | **링크** — 커널 인스턴스를 하나의 명령 스트림으로 연결 | 🔶 진행 중 (2026-08-28): 링커·상수 풀·표현식 직렬화·일반 SRAM staging·커스텀 legalize 구현 완료. **남은 것**: ① tuple 출력(split 등) 메모리 계획 ② 64 배수 미만 matmul(패딩 또는 소형 인트린식) |
 | **S6** | **target 등록 + `relax.build` 통합** | `relax.build(mod, target="npu")` 산출물로 실행 |
 | **S7** | **3-모델 end-to-end** (Gemma·Qwen3 nn.Module 추가) | **HF token 일치 + logits cosine ≥ 기존 golden 수준** |
 | **S8** | **양자화를 Relax pass로** (현재 driver 실행 시 처리) | W8A16/W8A8 기존 측정치 재현 |
@@ -79,7 +79,8 @@
 
 | pass | 역할 |
 |---|---|
-| `LegalizeOps` (커스텀 map 포함) | Relax op → TIR PrimFunc. NPU 안전 분해 3건은 여기에 등록 |
+| `LegalizeOps` (커스텀 map 포함) | Relax op → TIR PrimFunc. NPU 안전 분해는 `npu_legalize.legalize_map()`에 등록 (현재 RMSNorm — 기본 lowering이 FP32 중간 버퍼를 만들어 우리 vector 유닛이 담을 수 없음) |
+| `LiftTransformParams` | 파라미터 전용 계산(`nn.Linear`의 weight 전치)을 호스트 1회 실행으로 분리 |
 | `AnnotateTIROpPattern` | 융합 가능성 분류 |
 | `FuseOps` → `FuseTIR` | 연산 융합 → 융합 커널을 하나의 PrimFunc로 |
 | `FoldConstant` | prefill RoPE 상수 등 컴파일타임 계산 |

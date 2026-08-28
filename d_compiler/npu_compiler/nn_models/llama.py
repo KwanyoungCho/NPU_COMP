@@ -105,8 +105,10 @@ class Attention(nn.Module):
         scores = op.multiply(scores, nn.Tensor.from_scalar(
             1.0 / np.sqrt(hd), dtype=scores.dtype))
         scores = op.add(scores, mask)
-        probs = op.softmax(op.astype(scores, "float32"), axis=-1)
-        probs = op.astype(probs, scores.dtype)
+        # softmax stays in the tensor dtype: the NPU's vector unit already
+        # accumulates in FP32 internally, so an explicit float32 round trip
+        # would only add casts the machine cannot express
+        probs = op.softmax(scores, axis=-1)
         out = op.matmul(probs, v)                       # [h, seq, hd]
         out = op.reshape(op.permute_dims(out, [1, 0, 2]), [seq, h * hd])
         return self.o_proj(out)

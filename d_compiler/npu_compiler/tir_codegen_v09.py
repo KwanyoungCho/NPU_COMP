@@ -44,6 +44,9 @@ class Walker:
         self.zeroed = set()
         self.scopes = {}                # buffer data Var -> "global" | SRAM_SCOPE
         self.sram = {}                  # buffer data Var -> SRAM nibble base
+        self.constants = {}             # float value -> SRAM nibble of that scalar
+        self.scratch_slots = ()         # SRAM nibbles for expression temporaries
+        self.depth = 0
 
     # ---- index evaluation (ported from tir_backend) ----
 
@@ -164,7 +167,7 @@ class Walker:
             if init is not None and len(reduce_axes) == 1:
                 self._emit_reduction(body, init, spatial, reduce_axes[0], extents)
             elif not reduce_axes:
-                self._emit_movement(body, spatial, extents)
+                self._emit_pointwise(body, spatial, extents)
             else:
                 return False
         finally:
@@ -223,26 +226,64 @@ class Walker:
             method, kind = "v_reduce_max", "max"
         else:
             raise V09TirError(f"unsupported reduction {type(value)}")
-        source = value.b if isinstance(value.b, tir.BufferLoad) else value.a
-        if not isinstance(source, tir.BufferLoad):
-            raise V09TirError("reduction source is not a buffer load")
+        accumulator = store.buffer
+        summand = None
+        for side in (value.a, value.b):
+            if not (isinstance(side, tir.BufferLoad)
+                    and side.buffer.data is accumulator.data):
+                summand = side
+        if summand is None:
+            raise V09TirError("reduction has no summand")
         length = extents[axis]
         self.flush()
         for position in self._outer_positions(spatial, extents):
             for var, val in zip(spatial, position):
                 self.env[var] = val
-            base, stride = self._affine_flat(source, axis)
-            unit = 4 if source.buffer.data in self.sram else 1
-            if stride != unit:
-                raise V09TirError(f"reduction needs a contiguous axis, got {stride}")
-            dst = self._flat(store.buffer, store.indices, self)
             asm = self.a
-            asm.vlen(length)
-            self.stage.vector(SRC1, base)
-            asm.load(0, SRC1)
+            if isinstance(summand, tir.BufferLoad):
+                base, stride = self._affine_flat(summand, axis)
+                unit = 4 if summand.buffer.data in self.sram else 1
+                if stride != unit:
+                    raise V09TirError(
+                        f"reduction needs a contiguous axis, got {stride}")
+                asm.vlen(length)
+                self.stage.vector(SRC1, base)
+                asm.load(0, SRC1)
+            else:
+                # compound summand (e.g. x*x): materialize it, then reduce
+                self.depth = 0
+                nibble = self._materialize(summand, axis, length)
+                asm.vlen(length)
+                self.stage.vector(SRC1, nibble)
+                asm.load(0, SRC1)
             getattr(asm, method)()
+            dst = self._flat(store.buffer, store.indices, self)
             self.stage.vector(DST, dst)
             asm.save(0)
+
+    def _pointwise_into(self, dst_nibble, expr, inner, length):
+        """Emit a pointwise expression over `length` elements into SRAM."""
+        asm = self.a
+        method = self._POINTWISE.get(type(expr))
+        if method is not None:
+            asm.vlen(length)
+            self._operand(expr.a, SRC1, inner, length)
+            self._operand(expr.b, SRC2, inner, length)
+            asm.vlen(length)
+            getattr(asm, method)(VECTOR)
+        elif isinstance(expr, tir.Call):
+            name = expr.op.name if hasattr(expr.op, "name") else str(expr.op)
+            call = self._CALLS.get(name)
+            if call is None:
+                raise V09TirError(f"unsupported intrinsic {name}")
+            asm.vlen(length)
+            self._operand(expr.args[0], SRC1, inner, length)
+            asm.vlen(length)
+            getattr(asm, call)()
+        else:
+            raise V09TirError(f"unsupported expression {type(expr)}")
+        self.stage.vector(DST, dst_nibble)
+        asm.save(0)
 
     def _affine_flat(self, load, axis):
         """(base element offset, stride) of a buffer load along one axis."""
@@ -253,10 +294,141 @@ class Walker:
         self.env[axis] = 0
         return base, stride
 
+    _POINTWISE = {tir.Add: "v_add", tir.Sub: "v_sub",
+                  tir.Mul: "v_mul", tir.Div: "v_div"}
+    _CALLS = {"tir.exp": "v_exp", "tir.sqrt": "v_sqrt",
+              "tir.cos": "v_cos", "tir.sin": "v_sin"}
+
+    def _emit_pointwise(self, store, spatial, extents):
+        """A per-element block: copy, or an arbitrary pointwise expression."""
+        value = store.value
+        if isinstance(value, tir.BufferLoad):
+            return self._emit_movement(store, spatial, extents)
+        inner = spatial[-1]
+        outer = spatial[:-1]
+        length = extents[inner]
+        self.flush()
+        for position in self._outer_positions(outer, extents):
+            for var, val in zip(outer, position):
+                self.env[var] = val
+            dst, dst_stride = self._affine_flat_store(store, inner)
+            unit = 4 if store.buffer.data in self.sram else 1
+            if dst_stride != unit:
+                raise V09TirError(f"pointwise destination stride {dst_stride}")
+            self.depth = 0
+            self._materialize(value, inner, length, into=dst)
+
+    # ---- expression materialization -------------------------------------
+    # The vector unit applies one operation to a whole vector, so an
+    # expression tree is serialized into vector steps with SRAM temporaries.
+
+    def _slot(self):
+        if self.depth >= len(self.scratch_slots):
+            raise V09TirError("expression nesting exceeds the scratch slots")
+        nibble = self.scratch_slots[self.depth]
+        self.depth += 1
+        return nibble
+
+    def _materialize(self, expr, inner, length, into=None):
+        """Emit `expr` over `length` elements; return the SRAM address holding it."""
+        asm = self.a
+        if isinstance(expr, tir.BufferLoad):
+            base, stride = self._affine_flat(expr, inner)
+            unit = 4 if expr.buffer.data in self.sram else 1
+            if stride == 0:
+                # a per-row scalar (e.g. the reciprocal norm): broadcast it
+                target = into if into is not None else self._slot()
+                asm.vlen(length)
+                self.stage.broadcast(base)
+                self.stage.vector(DST, target)
+                asm.save(0)
+                return target
+            if stride != unit:
+                raise V09TirError(f"operand stride {stride} is not contiguous")
+            if into is None:
+                return base
+            asm.vlen(length)
+            self.stage.vector(SRC1, base)
+            asm.load(0, SRC1)
+            asm.v_copy()
+            self.stage.vector(DST, into)
+            asm.save(0)
+            return into
+        if isinstance(expr, (tir.FloatImm, tir.IntImm)):
+            value = float(expr.value)
+            if value not in self.constants:
+                raise V09TirError(f"constant {value} not in the pool")
+            target = into if into is not None else self._slot()
+            asm.vlen(length)
+            self.stage.broadcast(self.constants[value])
+            self.stage.vector(DST, target)
+            asm.save(0)
+            return target
+        method = self._POINTWISE.get(type(expr))
+        if method is not None:
+            depth = self.depth
+            left = self._materialize(expr.a, inner, length)
+            right = self._materialize(expr.b, inner, length)
+            self.depth = depth
+            target = into if into is not None else self._slot()
+            asm.vlen(length)
+            self.stage.vector(SRC1, left)
+            asm.load(0, SRC1)
+            self.stage.vector(SRC2, right)
+            asm.load(0, SRC2)
+            getattr(asm, method)(VECTOR)
+            self.stage.vector(DST, target)
+            asm.save(0)
+            return target
+        if isinstance(expr, tir.Call):
+            name = expr.op.name if hasattr(expr.op, "name") else str(expr.op)
+            call = self._CALLS.get(name)
+            if call is None and name == "tir.rsqrt":
+                return self._rsqrt(expr, inner, length, into)
+            if call is None:
+                raise V09TirError(f"unsupported intrinsic {name}")
+            depth = self.depth
+            operand = self._materialize(expr.args[0], inner, length)
+            self.depth = depth
+            target = into if into is not None else self._slot()
+            asm.vlen(length)
+            self.stage.vector(SRC1, operand)
+            asm.load(0, SRC1)
+            getattr(asm, call)()
+            self.stage.vector(DST, target)
+            asm.save(0)
+            return target
+        raise V09TirError(f"unsupported expression {type(expr)}")
+
+    def _rsqrt(self, expr, inner, length, into):
+        """1/sqrt(x) via the sqrt and divide the unit provides."""
+        asm = self.a
+        depth = self.depth
+        operand = self._materialize(expr.args[0], inner, length)
+        self.depth = depth
+        root = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, operand)
+        asm.load(0, SRC1)
+        asm.v_sqrt()
+        self.stage.vector(DST, root)
+        asm.save(0)
+        one = self._materialize(tir.FloatImm("float16", 1.0), inner, length)
+        target = into if into is not None else self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, one)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, root)
+        asm.load(0, SRC2)
+        asm.v_div(VECTOR)
+        self.stage.vector(DST, target)
+        asm.save(0)
+        return target
+
     def _emit_movement(self, store, spatial, extents):
         value = store.value
         if not isinstance(value, tir.BufferLoad):
-            raise V09TirError(f"unsupported movement value {type(value)}")
+            raise V09TirError("movement expects a buffer load")
         dst_space = self._space(store.buffer)
         src_space = self._space(value.buffer)
         if dst_space != src_space:

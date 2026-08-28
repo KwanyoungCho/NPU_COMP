@@ -107,6 +107,13 @@ def assign_addresses(mod, func_name="prefill", unit_bytes=2):
     for block in blocks:
         for binding in block.bindings:
             value = binding.value
+            if isinstance(value, relax.Var):
+                # an alias binding (the rewrite names a call's result); it
+                # shares the allocation it was bound from
+                if value.name_hint in plan.address:
+                    plan.address[binding.var.name_hint] = plan.address[value.name_hint]
+                    plan.nbytes[binding.var.name_hint] = plan.nbytes[value.name_hint]
+                continue
             if not isinstance(value, relax.Call):
                 continue
             name = value.op.name if hasattr(value.op, "name") else str(value.op)

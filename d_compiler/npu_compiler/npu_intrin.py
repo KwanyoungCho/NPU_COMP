@@ -195,7 +195,16 @@ def schedule_matmul_sram(mod, func_name, tile=64):
     """
     sch = tir.Schedule(mod)
     block = sch.get_block("matmul", func_name=func_name)
-    i, j, k = sch.get_loops(block)
+    loops = sch.get_loops(block)
+    if len(loops) < 3:
+        raise ValueError("matmul needs at least three loops")
+    # a batched matmul keeps its batch loops outside the tiled M/N/K nest
+    i, j, k = loops[-3:]
+    extents = [int(sch.get(loop).extent) for loop in (i, j, k)]
+    if any(extent % tile for extent in extents):
+        raise ValueError(
+            f"matmul dims {extents} are not {tile}-multiples; sub-tile shapes "
+            "need padding or a smaller intrinsic (not implemented)")
     i_o, i_i = sch.split(i, [None, tile])
     j_o, j_i = sch.split(j, [None, tile])
     k_o, k_i = sch.split(k, [None, tile])
@@ -206,8 +215,8 @@ def schedule_matmul_sram(mod, func_name, tile=64):
         stage = sch.cache_read(block, index, SRAM_SCOPE)
         sch.compute_at(stage, k_o)
     init = sch.decompose_reduction(block, k_o)
-    sch.tensorize(sch.get_loops(block)[3], "npu_gemm_acc_sram")
-    sch.tensorize(sch.get_loops(init)[2], "npu_fill_zero_sram")
+    sch.tensorize(sch.get_loops(block)[-3], "npu_gemm_acc_sram")
+    sch.tensorize(sch.get_loops(init)[-2], "npu_fill_zero_sram")
     return sch.mod
 
 
@@ -223,3 +232,46 @@ def schedule_elementwise(mod, func_name, block_name, intrin):
 
 
 register_all()
+
+
+def schedule_generic_sram(mod, func_name):
+    """Stage a non-matmul kernel entirely in SRAM.
+
+    Compute units address SRAM only, so a kernel's parameters are cache_read
+    in, its result cache_written out, and every intermediate the kernel
+    allocates internally is re-scoped to SRAM.  Whole tensors are staged here;
+    tiling them is a scheduling refinement, not a correctness requirement.
+    """
+    sch = tir.Schedule(mod)
+    root = sch.get_block("root", func_name=func_name)
+    children = sch.get_child_blocks(root)
+    prim = sch.mod[func_name]
+    params = {prim.buffer_map[p].data for p in prim.params}
+    output = prim.buffer_map[prim.params[-1]].data
+
+    # intermediates the kernel allocates itself
+    for block_rv in children:
+        block = sch.get(block_rv)
+        if not block.writes:
+            continue
+        target = block.writes[0].buffer
+        if target.data not in params:
+            sch.set_scope(block_rv, 0, SRAM_SCOPE)
+
+    # the producer of the result writes SRAM, then one stage copies it out
+    for block_rv in children:
+        block = sch.get(block_rv)
+        if block.writes and block.writes[0].buffer.data is output:
+            sch.cache_write(block_rv, 0, SRAM_SCOPE)
+            break
+
+    # every read of a parameter comes from SRAM
+    for block_rv in sch.get_child_blocks(sch.get_block("root", func_name=func_name)):
+        block = sch.get(block_rv)
+        for index, region in enumerate(block.reads):
+            if region.buffer.data in params:
+                try:
+                    sch.cache_read(block_rv, index, SRAM_SCOPE)
+                except Exception:
+                    pass
+    return sch.mod
