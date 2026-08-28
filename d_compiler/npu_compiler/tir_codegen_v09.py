@@ -606,6 +606,63 @@ class Walker:
                 segments.append([glob, sram, length])
         self._emit_segments(segments, to_sram)
 
+    def _compile(self, expr):
+        """Turn an index expression into a Python function of the environment.
+
+        Reading a TIR node's children crosses the FFI, so evaluating the same
+        expression once per staged row dominated link time.  Compiling it once
+        leaves plain arithmetic in the loop.  Returns None for anything the
+        walker's general evaluator has to handle.
+        """
+        kind = type(expr)
+        if kind is tir.IntImm:
+            value = int(expr.value)
+            return lambda env: value
+        if kind is tir.Var or kind is tir.SizeVar:
+            return lambda env: env[expr]
+        operator = _TIR_BINOPS.get(kind)
+        if operator is None:
+            return None
+        a, b = expr.a, expr.b
+        if kind is not tir.Add and kind is not tir.Sub:
+            # a product of two varying factors, or a floordiv of one, makes the
+            # address non-affine; noting it here saves a second traversal
+            if kind is not tir.Mul or not (isinstance(a, tir.IntImm)
+                                           or isinstance(b, tir.IntImm)):
+                self._linear = False
+        left, right = self._compile(a), self._compile(b)
+        if left is None or right is None:
+            return None
+        return lambda env: operator(left(env), right(env))
+
+    def _flattener(self, access):
+        """(address function of the environment, is it affine in the loops).
+
+        The address function is None when some index needs the walker's
+        general evaluator.
+        """
+        buffer = access.buffer
+        shape = [int(dim) for dim in buffer.shape]
+        scales, scale = [1] * len(shape), 1
+        for position in range(len(shape) - 1, -1, -1):
+            scales[position] = scale
+            scale *= shape[position]
+        self._linear = True
+        indices = [self._compile(index) for index in access.indices]
+        linear = self._linear
+        if any(index is None for index in indices):
+            return None, False
+        data = buffer.data
+        if data in self.sram:
+            base, unit = self.sram[data], 4
+        elif data in self.bases:
+            base, unit = self.bases[data], 1
+        else:
+            raise V09TirError(f"unplaced buffer {buffer.name}")
+        pairs = list(zip(indices, scales))
+        return (lambda env: base + unit * sum(
+            index(env) * scale for index, scale in pairs)), linear
+
     def _addresser(self, access, inner, outer, store=False):
         """A function from an outer loop position to (address, inner stride).
 
@@ -615,14 +672,24 @@ class Walker:
         stages tens of thousands of rows.  ``repeat`` and friends index
         through a floordiv, so those fall back to evaluating each row.
         """
-        flat = self._affine_flat_store if store else self._affine_flat
+        compiled, linear = self._flattener(access)
+        if compiled is None:
+            flat = self._affine_flat_store if store else self._affine_flat
+        else:
+            def flat(_access, axis):
+                self.env[axis] = self.inner_base
+                base = compiled(self.env)
+                self.env[axis] = self.inner_base + 1
+                stride = compiled(self.env) - base
+                self.env[axis] = self.inner_base
+                return base, stride
 
         def evaluate(position):
             for var, value in zip(outer, position):
                 self.env[var] = value
             return flat(access, inner)
 
-        if not self._is_affine(access.indices, outer):
+        if compiled is None or not linear:
             return evaluate
         saved = {var: self.env.get(var) for var in outer}
         for var in outer:
@@ -640,28 +707,6 @@ class Walker:
                 self.env[var] = value
         return lambda position: (
             origin + sum(map(int.__mul__, steps, position)), stride)
-
-    @staticmethod
-    def _is_affine(indices, outer):
-        variable = set(outer)
-        linear = True
-
-        def visit(node):
-            nonlocal linear
-            if isinstance(node, (tir.FloorDiv, tir.FloorMod, tir.Div, tir.Mod,
-                                 tir.Min, tir.Max, tir.Select, tir.Call)):
-                if any(var in variable
-                       for var in tir.analysis.undefined_vars(node)):
-                    linear = False
-            elif isinstance(node, tir.Mul):
-                if any(var in variable for var in tir.analysis.undefined_vars(node.a)) \
-                        and any(var in variable
-                                for var in tir.analysis.undefined_vars(node.b)):
-                    linear = False
-
-        for index in indices:
-            tir.stmt_functor.post_order_visit(index, visit)
-        return linear
 
     def _emit_segments(self, segments, to_sram):
         index, group, aligned = 0, 0, False
