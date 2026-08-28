@@ -144,6 +144,34 @@ def test_padded_matmul_stages_its_inputs():
     print(f"  [PASS] padded matmul stages through DMA ({dma} DMA words seen)")
 
 
+def test_tile_staging_uses_one_2d_transfer():
+    """A tile of a wider tensor must move as one 2D transfer, not one
+    instruction per row."""
+    from npu_compiler.isa_v09 import decode_dma
+    rng = np.random.default_rng(31)
+    a = rng.normal(0, 0.3, (64, 192)).astype(np.float16)
+    b = rng.normal(0, 0.3, (192, 192)).astype(np.float16)
+    bb = relax.BlockBuilder()
+    args = [relax.Var("a", relax.TensorStructInfo([64, 192], "float16")),
+            relax.Var("b", relax.TensorStructInfo([192, 192], "float16"))]
+    with bb.function("prefill", args):
+        with bb.dataflow():
+            out = bb.emit_output(bb.emit(relax.op.matmul(*args)))
+        bb.emit_func_output(out)
+    lowered = P.graph_pipeline(custom_legalize=npu_legalize.legalize_map(),
+                               fuse=False, lift_params=False)(bb.finalize())
+    asm, _ = npu_link.compile_program(lowered)
+    words = asm.words
+    blocks = [decode_dma(words[i:i + 4]) for i in range(len(words) - 3)
+              if (words[i] & 0xFF) in (0xA0, 0xA8)]
+    multirow = [d for d in blocks if d["rows"] > 1]
+    assert multirow, "tile staging fell back to one transfer per row"
+    widest = max(d["rows"] for d in multirow)
+    assert widest == 64, widest
+    print(f"  [PASS] tile staging uses 2D transfers "
+          f"({len(multirow)}/{len(blocks)} DMAs, up to {widest} rows each)")
+
+
 def test_odd_row_lengths_transfer_correctly():
     """A transfer moves whole 32-bit cells, so rows of odd length start
     mid-cell; they have to be gathered before they can leave SRAM."""
@@ -208,6 +236,7 @@ if __name__ == "__main__":
     test_linked_matmul_shapes()
     test_layer_ops_match_numpy()
     test_padded_matmul_stages_its_inputs()
+    test_tile_staging_uses_one_2d_transfer()
     test_odd_row_lengths_transfer_correctly()
     test_whole_layer_matches_the_cpu_build()
     print("ALL NPU LINK (S5) TESTS PASSED")
