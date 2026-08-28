@@ -50,14 +50,21 @@ def _schedule(module, gvar, prim):
     except Exception as error:
         raise LinkError(f"{name}: {type(error).__name__}: "
                         f"{str(error).splitlines()[-1][:120]}") from error
-    # NOTE: cache_read allocates a buffer with the producer's full shape even
-    # when only a tile is staged, so real weight shapes exceed the 8 MiB SRAM.
-    # The standard fix is CompactBufferAllocation, but it (and
-    # PlanAndUpdateBufferAllocationLocation) require every block's init to be
-    # lowered first, and LowerInitBlock rewrites reductions into a guarded
-    # store that the loop-nest matcher does not read.  Tracked in
-    # OPTIMIZATION_BACKLOG.md; until then only tile-sized shapes link.
-    return scheduled[name]
+    # cache_read allocates a buffer with the producer's full shape even when a
+    # single tile is staged, so real weight shapes would need tens of MiB of
+    # SRAM.  The standard passes shrink each buffer to the region actually
+    # accessed; they require init blocks lowered first, which turns reductions
+    # into a guarded store the codegen understands.
+    from tvm import IRModule, tir as _tir
+    import tvm as _tvm
+    single = IRModule({gvar: scheduled[name]})
+    single = _tvm.transform.Sequential([
+        _tir.transform.LowerInitBlock(),
+        _tir.transform.PlanAndUpdateBufferAllocationLocation(),
+        _tir.transform.ConvertBlocksToOpaque(),
+        _tir.transform.CompactBufferAllocation(),
+    ])(single)
+    return single[gvar]
 
 
 def _sram_layout(prim, cursor=0):

@@ -144,6 +144,23 @@ def test_padded_matmul_stages_its_inputs():
     print(f"  [PASS] padded matmul stages through DMA ({dma} DMA words seen)")
 
 
+def test_odd_row_lengths_transfer_correctly():
+    """A transfer moves whole 32-bit cells, so rows of odd length start
+    mid-cell; they have to be gathered before they can leave SRAM."""
+    import tvm.relax.op as R
+    rng = np.random.default_rng(23)
+    heads, seq = 3, 7
+    q = rng.normal(0, 0.4, (heads, seq, 32)).astype(np.float16)
+    k = rng.normal(0, 0.4, (heads, 32, seq)).astype(np.float16)
+    got, words, _ = _run([(heads, seq, 32), (heads, 32, seq)], R.matmul,
+                         [q, k], (heads, seq, seq))
+    ref = q.astype(np.float32) @ k.astype(np.float32)
+    error = float(np.abs(got.astype(np.float32) - ref).max())
+    assert error < 0.02, error
+    print(f"  [PASS] odd-length rows [{heads},{seq},{seq}] "
+          f"max|diff|={error:.5f} ({words:,} words)")
+
+
 def test_whole_layer_matches_the_cpu_build():
     """A one-layer model, linked and run on the C-model, against the llvm build
     of the same lowered module."""
@@ -191,5 +208,6 @@ if __name__ == "__main__":
     test_linked_matmul_shapes()
     test_layer_ops_match_numpy()
     test_padded_matmul_stages_its_inputs()
+    test_odd_row_lengths_transfer_correctly()
     test_whole_layer_matches_the_cpu_build()
     print("ALL NPU LINK (S5) TESTS PASSED")

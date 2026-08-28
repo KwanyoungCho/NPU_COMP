@@ -151,16 +151,29 @@ class Walker:
         block = realize.block
         if block.match_buffers:
             return False                       # tensorized: handled elsewhere
-        if not isinstance(block.body, tir.BufferStore):
+        body, init, guard = block.body, block.init, None
+        # LowerInitBlock rewrites a reduction into a guarded initial store
+        # followed by the accumulating store, and ConvertBlocksToOpaque then
+        # strips the iter vars, so the reduce axis has to come from the guard.
+        if (isinstance(body, tir.SeqStmt) and len(body) == 2
+                and isinstance(body[0], tir.IfThenElse)
+                and body[0].else_case is None
+                and isinstance(body[0].then_case, tir.BufferStore)
+                and isinstance(body[1], tir.BufferStore)):
+            init, guard, body = body[0].then_case, body[0].condition, body[1]
+        if not isinstance(body, tir.BufferStore):
             return False
         # after compute_at the block's iter values are affine in the enclosing
         # loops, so substitute them away and work in terms of the local loops
         subst = {iv.var: value for iv, value
                  in zip(block.iter_vars, realize.iter_values)}
-        body = tir.stmt_functor.substitute(block.body, subst)
-        init = (tir.stmt_functor.substitute(block.init, subst)
-                if block.init is not None else None)
+        body = tir.stmt_functor.substitute(body, subst)
+        init = (tir.stmt_functor.substitute(init, subst)
+                if init is not None else None)
         reduce_vars = set()
+        if guard is not None:
+            guard = tir.stmt_functor.substitute(guard, subst)
+            reduce_vars = set(tir.analysis.undefined_vars(guard))
         for iter_var, value in zip(block.iter_vars, realize.iter_values):
             if iter_var.iter_type == 2:
                 reduce_vars |= set(tir.analysis.undefined_vars(value))
@@ -559,7 +572,14 @@ class Walker:
             asm.save(0)
 
     def _emit_dma(self, store, load, spatial, extents, to_sram):
-        """Emit one GLOAD/GSTORE per staged row of a cache block."""
+        """Emit GLOAD/GSTORE for a cache block, one per contiguous run.
+
+        Rows that are adjacent on both sides are merged into a single
+        transfer.  Merging is what makes odd row lengths work at all: a
+        transfer moves whole 32-bit cells, so a row of odd length would leave
+        the next row starting mid-cell, while the whole staged region starts
+        at the tensor's own (cell-aligned) base.
+        """
         inner = spatial[-1]
         outer = spatial[:-1]
         length = extents[inner]
@@ -567,6 +587,7 @@ class Walker:
             # a write-back reads SRAM the accumulator still owns; staging an
             # input does not touch the PE, so it must not break a MAC chain
             self.flush()
+        groups = []
         for position in self._outer_positions(outer, extents):
             for var, val in zip(outer, position):
                 self.env[var] = val
@@ -576,10 +597,67 @@ class Walker:
             dst_unit = 4 if store.buffer.data in self.sram else 1
             if src_stride != src_unit or dst_stride != dst_unit:
                 raise V09TirError("DMA stage needs contiguous rows")
-            if to_sram:
-                self.stage.dma_in(src_base, dst_base, length)
+            glob, sram = ((src_base, dst_base) if to_sram
+                          else (dst_base, src_base))
+            if groups and glob == groups[-1][0] + groups[-1][1]:
+                groups[-1][1] += length
+                groups[-1][2].append((sram, length))
             else:
-                self.stage.dma_out(dst_base, src_base, length)
+                groups.append([glob, length, [(sram, length)]])
+        for glob, total, pieces in groups:
+            packed = all(nxt == addr + count * 4
+                         for (addr, count), (nxt, _) in zip(pieces, pieces[1:]))
+            if packed and glob % 2 == 0:
+                if to_sram:
+                    self.stage.dma_in(glob, pieces[0][0], total)
+                else:
+                    self.stage.dma_out(glob, pieces[0][0], total)
+            else:
+                self._bounce_dma(glob, pieces, to_sram)
+
+    def _bounce_dma(self, glob, pieces, to_sram):
+        """Move a globally contiguous range whose SRAM image is scattered.
+
+        A transfer moves whole 32-bit cells, so a row that begins mid-cell
+        cannot be moved on its own; a vector copy has element granularity.
+        The rows are therefore gathered into a contiguous scratch region and
+        moved in aligned chunks.
+        """
+        if glob % 2:
+            raise V09TirError("DMA region must start on a 32-bit cell")
+        self.flush()                    # the copies below take the PE output
+        scratch = self.scratch_slots[0]
+        chunk, total = [], 0
+        for piece in pieces:
+            chunk.append(piece)
+            total += piece[1]
+            if total >= self.BOUNCE_ELEMS and total % 2 == 0:
+                glob = self._bounce_chunk(glob, chunk, total, scratch, to_sram)
+                chunk, total = [], 0
+        if chunk:
+            self._bounce_chunk(glob, chunk, total, scratch, to_sram)
+
+    BOUNCE_ELEMS = 4096
+
+    def _bounce_chunk(self, glob, pieces, total, scratch, to_sram):
+        if total > 2 * self.BOUNCE_ELEMS:
+            raise V09TirError(f"bounce chunk of {total} exceeds the scratch slot")
+        if to_sram:
+            self.stage.dma_in(glob, scratch, total)
+        offset = 0
+        for sram, count in pieces:
+            src, dst = ((scratch + offset * 4, sram) if to_sram
+                        else (sram, scratch + offset * 4))
+            self.a.vlen(count)
+            self.stage.vector(SRC1, src)
+            self.a.load(0, SRC1)
+            self.a.v_copy()
+            self.stage.vector(DST, dst)
+            self.a.save(0)
+            offset += count
+        if not to_sram:
+            self.stage.dma_out(glob, scratch, total)
+        return glob + total
 
     def _affine_flat_store(self, store, axis):
         self.env[axis] = self.inner_base

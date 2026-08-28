@@ -14,10 +14,10 @@
   선형 dead-store 제거로 증명 가능하게 안전. word 스트림 대상이라 신·구 codegen 공용
 - **주의**: "두 half 항상 emit" 관례는 하드웨어 요구가 아니라 방어 규칙이었음
 
-### A2. 인접 DMA 병합
+### A2. 인접 DMA 병합 — **완료 (2026-08-28)**, C6 참조
 - **무엇**: 연속된 GLOAD/GSTORE가 인접 영역이면 하나로 합치기
-- **왜**: 현재 staging이 행 단위로 DMA를 내보내 명령 수가 불필요하게 많다
-- **측정**: 미측정
+- **남은 것**: 아직 **커널 하나 안**에서만 병합한다. 커널 경계를 넘는 병합
+  (같은 텐서를 연속 커널이 staging하는 경우)은 미구현
 
 ### A3. 표현식 임시 버퍼 재사용
 - **무엇**: `_materialize`가 표현식 트리를 풀 때 쓰는 scratch slot을 생존구간
@@ -79,21 +79,32 @@
   같은 성질의 비용
 - **측정**: 미측정
 
-## C5. SRAM 캐시 버퍼 압축 — **실모델 확장의 차단 요인**
-- **무엇**: `cache_read`는 타일 하나만 staging해도 **생산자의 전체 shape**로
+## C5. SRAM 캐시 버퍼 압축 — **해결됨 (2026-08-28)**
+- **무엇이었나**: `cache_read`는 타일 하나만 staging해도 **생산자의 전체 shape**로
   버퍼를 할당한다. 실제 weight([3072,3072] = 18 MiB)에서는 8 MiB SRAM을 초과해
-  링크가 실패한다 (`LinkError: kernel exceeds SRAM capacity`)
-- **표준 해법**: `CompactBufferAllocation` — 실제 접근 영역으로 버퍼를 줄인다
-- **막힌 지점** (2026-08-28 시도): `CompactBufferAllocation`과 그 선행 pass
-  `PlanAndUpdateBufferAllocationLocation`은 **모든 블록의 init이 lower된 상태**를
-  요구한다(`Check failed: !init.defined()`). 그런데 선행 `LowerInitBlock`은
-  리덕션을 "가드된 store"로 바꾸고, 우리 loop-nest 매처는 `block.init` 유무로
-  리덕션을 판별하므로 그 형태를 읽지 못한다
-- **선택지**: ① 매처를 가드된-store 형태까지 읽도록 확장 ② matmul 커널에만
-  적용하되 pad_einsum이 남기는 init 블록을 정리 ③ 링커가 타일 원점을 추적해
-  압축된 주소로 직접 매핑(= 압축을 우리가 구현)
-- **영향**: 이게 풀리기 전까지 실모델 차원은 링크되지 않는다.
-  현재 검증 범위는 타일 규모(1-layer, D=64)까지
+  링크가 실패했다 (`LinkError: kernel exceeds SRAM capacity`)
+- **표준 해법 그대로 적용**: `npu_link._schedule`이 스케줄 뒤에
+  `LowerInitBlock` → `PlanAndUpdateBufferAllocationLocation` →
+  `ConvertBlocksToOpaque` → `CompactBufferAllocation`을 돌린다
+- **막혔던 지점과 해법**: `LowerInitBlock`은 리덕션을 "가드된 초기 store +
+  누적 store"로 바꾸고 `ConvertBlocksToOpaque`는 iter var를 없앤다. 매처가
+  `block.init`과 `iter_type == 2`로 리덕션을 판별했기 때문에 그 형태를 못 읽었다
+  → **선택지 ①**대로 `_match_nest`가 그 형태를 읽고 감축 축을 **가드 조건에
+  나타나는 루프 변수**로 잡도록 확장했다 (`tir_codegen_v09.py`)
+- **효과**: 실모델 차원에서 커널당 SRAM이 8 MiB 안에 들어온다
+  (예: `matmul` 1.18 MiB, `matmul4` 2.43 MiB — 압축 전에는 18~48 MiB)
+
+## C6. DMA 셀 정렬 — 홀수 길이 행 (2026-08-28 해결)
+- **무엇이었나**: 전송은 32-bit 셀 단위이므로 길이가 홀수인 행은 다음 행이
+  셀 중간에서 시작한다. `seq=7`의 어텐션 점수([24,7,7])를 되쓸 때
+  `DMA row must start on a 32-bit cell`로 실패했다
+- **해법**: `_emit_dma`가 (a) 전역·SRAM 양쪽이 이어지는 행들을 **하나의 전송으로
+  병합**하고, (b) 전역만 이어지고 SRAM이 흩어져 있으면 **scratch에 모아서**
+  셀 정렬된 덩어리로 한 번에 전송한다(`_bounce_dma`). 벡터 복사는 원소 단위라
+  정렬 제약이 없다
+- **부수 효과**: 백로그 A2(인접 DMA 병합)의 대부분이 여기서 해결됐다.
+  1층 검증 프로그램이 **44,826 → 39,438 word (−12.0%)**,
+  `matmul[64,64]x[64,64]` 단독은 801 → 45 word
 
 ## D. naive로 둔 정확성 우회 (성능이 아니라 단순화)
 
