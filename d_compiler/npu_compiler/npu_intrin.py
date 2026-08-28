@@ -201,7 +201,9 @@ def schedule_matmul_sram(mod, func_name, tile=64):
     # a batched matmul keeps its batch loops outside the tiled M/N/K nest
     i, j, k = loops[-3:]
     extents = [int(sch.get(loop).extent) for loop in (i, j, k)]
+    unpad = None
     if any(extent % tile for extent in extents):
+        output = sch.get(block).writes[0].buffer
         # pad_einsum is the standard primitive for exactly this: grow the
         # iteration domain to the intrinsic's factor and insert the producer /
         # consumer padding blocks that keep accesses in bounds
@@ -211,6 +213,9 @@ def schedule_matmul_sram(mod, func_name, tile=64):
         # directly, but compute units address SRAM only -- stage their inputs
         root = sch.get_block("root", func_name=func_name)
         for child in sch.get_child_blocks(root):
+            if sch.get(child).writes[0].buffer.same_as(output):
+                unpad = child          # copies the padded result back out
+                continue
             if not sch.get(child).name_hint.endswith("_pad"):
                 continue
             for index in range(len(sch.get(child).reads)):
@@ -237,6 +242,10 @@ def schedule_matmul_sram(mod, func_name, tile=64):
     sch.reorder(i_o, j_o, k_o, i_i, j_i, k_i)
     write_back = sch.cache_write(block, 0, SRAM_SCOPE)
     sch.reverse_compute_at(write_back, j_o)
+    if unpad is not None:
+        # otherwise the padded result stays live across the whole N axis, and
+        # a wide output (lm_head is [64, 128256] once M is padded) does not fit
+        sch.reverse_compute_at(unpad, j_o)
     for index in (0, 1):
         if sch.get(block).reads[index].buffer.scope() == SRAM_SCOPE:
             continue                       # already staged (padded operand)

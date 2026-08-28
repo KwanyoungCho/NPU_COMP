@@ -27,6 +27,16 @@ class V09TirError(RuntimeError):
     pass
 
 
+# guards -- padding predicates and concat conditions -- are scanned per element,
+# so they get the same compiled evaluation as an address
+_COMPARISONS = {
+    tir.LT: lambda a, b: a < b, tir.LE: lambda a, b: a <= b,
+    tir.GT: lambda a, b: a > b, tir.GE: lambda a, b: a >= b,
+    tir.EQ: lambda a, b: a == b, tir.NE: lambda a, b: a != b,
+    tir.And: lambda a, b: a and b, tir.Or: lambda a, b: a or b,
+}
+
+
 class Walker:
     """Interpret scheduled TIR and emit v09 instructions.
 
@@ -181,6 +191,9 @@ class Walker:
         extents = {loop.loop_var: self.ev(loop.extent) for loop in loops}
         spatial = [v for v in local if v not in reduce_vars]
         reduce_axes = [v for v in local if v in reduce_vars]
+        if not (isinstance(realize.predicate, tir.IntImm)
+                and int(realize.predicate.value) == 1):
+            extents = self._narrow(realize.predicate, spatial, extents)
         saved = {v: self.env.get(v) for v in local}
         for v in local:
             self.env[v] = 0
@@ -345,6 +358,40 @@ class Walker:
                 self.depth = 0
                 self._materialize(expr, inner, count, into=dst)
             self.inner_base = 0
+
+    def _narrow(self, predicate, spatial, extents):
+        """Shrink the loop extents to the part a block predicate allows.
+
+        ``pad_einsum``'s copy-back carries a predicate clipping the padded
+        tile to the real output.  The allowed region has to be a box anchored
+        at the origin -- which is the shape a padding predicate always has --
+        and anything else is rejected rather than silently truncated.
+        """
+        guard = self._compile(predicate)
+        if guard is None:
+            guard = lambda env: bool(self.ev(predicate))
+        saved = {axis: self.env.get(axis) for axis in spatial}
+        limits, allowed = [0] * len(spatial), 0
+        for position in self._outer_positions(spatial, extents):
+            for axis, value in zip(spatial, position):
+                self.env[axis] = value
+            if guard(self.env):
+                allowed += 1
+                limits = [max(limit, value + 1)
+                          for limit, value in zip(limits, position)]
+        for axis, value in saved.items():
+            if value is None:
+                self.env.pop(axis, None)
+            else:
+                self.env[axis] = value
+        box = 1
+        for limit in limits:
+            box *= limit
+        if box != allowed:
+            raise V09TirError("block predicate is not a box at the origin")
+        narrowed = dict(extents)
+        narrowed.update(zip(spatial, limits))
+        return narrowed
 
     def _pieces(self, value, inner, length):
         """Split a row into (expression, start, count) pieces.
@@ -620,7 +667,7 @@ class Walker:
             return lambda env: value
         if kind is tir.Var or kind is tir.SizeVar:
             return lambda env: env[expr]
-        operator = _TIR_BINOPS.get(kind)
+        operator = _TIR_BINOPS.get(kind) or _COMPARISONS.get(kind)
         if operator is None:
             return None
         a, b = expr.a, expr.b
@@ -775,28 +822,34 @@ class Walker:
         The rows are therefore gathered into a contiguous scratch region and
         moved in aligned chunks.
         """
-        if glob % 2:
-            raise V09TirError("DMA region must start on a 32-bit cell")
         self.flush()                    # the copies below take the PE output
         scratch = self.scratch_slots[0]
+        lead = glob % 2       # a region starting mid-cell shares its first cell
+        glob -= lead
         chunk, total = [], 0
         for piece in pieces:
             chunk.append(piece)
             total += piece[1]
-            if total >= self.BOUNCE_ELEMS and total % 2 == 0:
-                glob = self._bounce_chunk(glob, chunk, total, scratch, to_sram)
-                chunk, total = [], 0
+            if total + lead >= self.BOUNCE_ELEMS and (total + lead) % 2 == 0:
+                glob = self._bounce_chunk(glob, chunk, total, scratch, to_sram,
+                                          lead)
+                chunk, total, lead = [], 0, 0
         if chunk:
-            self._bounce_chunk(glob, chunk, total, scratch, to_sram)
+            self._bounce_chunk(glob, chunk, total, scratch, to_sram, lead)
 
     BOUNCE_ELEMS = 4096
 
-    def _bounce_chunk(self, glob, pieces, total, scratch, to_sram):
-        if total > 2 * self.BOUNCE_ELEMS:
-            raise V09TirError(f"bounce chunk of {total} exceeds the scratch slot")
+    def _bounce_chunk(self, glob, pieces, total, scratch, to_sram, lead):
+        span = total + lead
+        if span > 2 * self.BOUNCE_ELEMS:
+            raise V09TirError(f"bounce chunk of {span} exceeds the scratch slot")
         if to_sram:
-            self.stage.dma_in(glob, scratch, total)
-        offset = 0
+            self.stage.dma_in(glob, scratch, span)
+        elif lead:
+            # the element sharing the first cell belongs to someone else, so
+            # read it back before the cell is written
+            self.stage.dma_in(glob, scratch, lead)
+        offset = lead
         for sram, count in pieces:
             src, dst = ((scratch + offset * 4, sram) if to_sram
                         else (sram, scratch + offset * 4))
@@ -808,8 +861,8 @@ class Walker:
             self.a.save(0)
             offset += count
         if not to_sram:
-            self.stage.dma_out(glob, scratch, total)
-        return glob + total
+            self.stage.dma_out(glob, scratch, span)
+        return glob + span
 
     def _affine_flat_store(self, store, axis):
         self.env[axis] = self.inner_base
