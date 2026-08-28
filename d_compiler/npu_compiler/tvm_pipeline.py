@@ -16,17 +16,27 @@ import tvm
 from tvm import relax
 
 
-def graph_pipeline(custom_legalize=None, fuse=True):
+def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True):
     """Relax -> TIR PrimFuncs, following the standard stage order.
 
     ``custom_legalize`` is TVM's per-op legalization override map; NPU specific
     op decompositions are registered there rather than in a bespoke pass.
+
+    ``lift_params`` runs ``LiftTransformParams``, which hoists parameter-only
+    computation (notably the ``permute_dims`` that ``nn.Linear`` applies to its
+    weight) into a separate ``transform_params`` function the host runs once at
+    load time.  Without it those transposes are materialized on every
+    invocation -- for Llama's lm_head that is a 751 MiB tensor.
     """
     stages = [
         relax.transform.CanonicalizeBindings(),
         relax.transform.EliminateCommonSubexpr(),
         relax.transform.FoldConstant(),
         relax.transform.RewriteDataflowReshape(),
+    ]
+    if lift_params:
+        stages.append(relax.transform.LiftTransformParams())
+    stages += [
         relax.transform.LegalizeOps(custom_legalize),
         relax.transform.AnnotateTIROpPattern(),
     ]
@@ -36,9 +46,10 @@ def graph_pipeline(custom_legalize=None, fuse=True):
     return tvm.transform.Sequential(stages, name="npu_graph_pipeline")
 
 
-def build_llvm(mod, custom_legalize=None, fuse=True):
+def build_llvm(mod, custom_legalize=None, fuse=True, lift_params=True):
     """Validation build: run the graph pipeline, then the stock CPU build."""
-    return relax.build(graph_pipeline(custom_legalize, fuse)(mod), target="llvm")
+    return relax.build(graph_pipeline(custom_legalize, fuse, lift_params)(mod),
+                       target="llvm")
 
 
 def kernel_summary(mod):

@@ -14,6 +14,9 @@
 3. **NPU 특화 최적화는 나중에 별도 검토** — 서술자 peephole, transpose 흡수,
    DMA 병합 등은 §6에 보류 목록으로 두고 이번 전환에서 구현하지 않는다.
    목표는 "빠른 파이프라인"이 아니라 **"올바른 구조의 파이프라인"**이다
+4. **표준 pass가 default, 기존 구현은 검증용** (2026-08-28 확정) — 자체 layout
+   배정·메모리 계획(`memplan.py`, `v2_backend._assign_layouts/_plan_memory`)은
+   표준 pass로 **교체**한다. 기존 backend는 oracle로만 남긴다
 
 ## 1. 검증 전략의 변경 (중요)
 
@@ -59,10 +62,10 @@
 |---|---|---|
 | **S0** | **표준 프론트엔드**: `nn.Module`로 Llama 3.2 3B 정의, `export_tvm()`, HF 가중치 이름 매핑 | ✅ (2026-08-27) 전체 28층 실제 체크포인트 → llvm 빌드 → **첫 token 358 일치**. 소형 config는 numpy 참조와 cosine 0.999999 |
 | **S1** | **표준 파이프라인 골격**: 표준 단계를 명시적으로 구성(`tvm_pipeline.graph_pipeline`), 커스텀 legalize map 삽입 지점 확보 | ✅ (2026-08-27) stock 빌드와 **bit-identical**(융합 on/off 모두), 융합으로 40→21 PrimFunc, 전체 모델 4.9초·22 PrimFunc(층 간 커널 공유) |
-| **S2** | **NPU 인트린식 선언** — `npu_gemm_64x64`, 256-lane vector. `tensorize` 매칭 확인 | 인트린식 단위 테스트 |
-| **S3** | **TIR → v09 ISA codegen** — 스케줄된 TIR 순회 emitter | 커널 단위 **기존 backend와 bit-exact** |
-| **S4** | **스케줄 규칙** — tile 64 / `cache_read("sram")` / tensorize 적용 | 커널 bit-exact 유지 + word·DMA 측정 |
-| **S5** | **메모리·링크** — `StaticPlanBlockMemory` + 정적 주소 배정, 커널 연결 | 층 전체 실행, HF 대비 수치 |
+| **S2** | **메모리 계획을 표준 pass로** — `ToNonDataflow`→`RemovePurityChecking`→`CallTIRRewrite`→`StaticPlanBlockMemory` 뒤, storage/offset을 평면 정적 주소로 배정 | 생존구간 겹침 없음 + 사용량이 무재사용 대비 감소 |
+| **S3** | **인트린식·walker 재타깃** — compiler-v2의 인트린식 21종·tensorize 스케줄·TIR walker를 **v09 ISA로 이식** (신규 작성 아님) | 커널 단위 **기존 backend와 bit-exact** |
+| **S4** | **SRAM staging** — `cache_read/cache_write("sram")`으로 DMA 표현 (0710엔 없던 신규 작업) | 커널 bit-exact 유지 + word·DMA 측정 |
+| **S5** | **링크** — 커널 인스턴스를 하나의 명령 스트림으로 연결 | 층 전체 실행, HF 대비 수치 |
 | **S6** | **target 등록 + `relax.build` 통합** | `relax.build(mod, target="npu")` 산출물로 실행 |
 | **S7** | **3-모델 end-to-end** (Gemma·Qwen3 nn.Module 추가) | **HF token 일치 + logits cosine ≥ 기존 golden 수준** |
 | **S8** | **양자화를 Relax pass로** (현재 driver 실행 시 처리) | W8A16/W8A8 기존 측정치 재현 |
@@ -91,7 +94,9 @@
 |---|---|
 | v09 ISA·C-model·시뮬레이터 | **그대로 유지** — 타깃은 안 바뀐다 |
 | `legalize.py`의 NPU 안전 분해 | **유지** — 커스텀 legalize map으로 재등록 (V3-003/004/020 회피는 여전히 필요) |
-| `backend_0818`/`backend_v09` | **oracle로 동결** — 커널 bit-exact 비교용 |
+| `backend_0818`/`backend_v09` | **oracle로 동결** — 커널 bit-exact 비교용 (default 자리에서 물러남) |
+| **compiler-v2의 TIR backend** (`tir_backend.py`, `v2_backend.py`) | **재타깃 대상** — 인트린식 21종(gemm/elementwise/unary/silu/copy/transpose/slice/reduce/broadcast), tensorize 스케줄, TIR walker 골격·인덱스 평가를 v09로 이식. 0710용 emit 함수만 교체 |
+| `memplan.py`, v2의 layout/메모리 계획 | **표준 pass로 교체** (방침 4). 검증 비교용으로만 유지 |
 | 3-모델 golden | **참조값으로 유지** — 모델 수준은 HF 기준으로 비교 |
 | 손작성 graph builder 3벌 | 과거 자산. S7 완료 시 사용 중단 (삭제는 별도 판단) |
 | `tir_backend.py`(0710) | **참고 구현** — TIR 순회 codegen의 전례 |

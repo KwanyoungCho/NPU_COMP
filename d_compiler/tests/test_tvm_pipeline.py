@@ -44,7 +44,8 @@ def test_pipeline_matches_stock_build():
 
     counts = {}
     for fuse in (False, True):
-        lowered = P.graph_pipeline(fuse=fuse)(mod)
+        # lift_params changes the calling convention; it is covered separately
+        lowered = P.graph_pipeline(fuse=fuse, lift_params=False)(mod)
         counts[fuse] = P.kernel_summary(lowered)["prim_funcs"]
         got = _run(relax.build(lowered, target="llvm"), args, weights)
         np.testing.assert_array_equal(stock.view(np.uint16), got.view(np.uint16))
@@ -56,7 +57,7 @@ def test_pipeline_matches_stock_build():
 def test_fusion_produces_expected_kernels():
     """Fusion must actually merge the LLM-shaped chains, not just rename."""
     mod, _, _ = llama.build_prefill(TINY, seq=SEQ)
-    names = P.kernel_summary(P.graph_pipeline()(mod))["names"]
+    names = P.kernel_summary(P.graph_pipeline(lift_params=False)(mod))["names"]
     joined = " ".join(names)
     assert any("silu" in n and "matmul" in n for n in names), \
         f"SwiGLU chain not fused: {names}"
@@ -65,6 +66,30 @@ def test_fusion_produces_expected_kernels():
         f"RoPE chain not fused: {names}"
     print(f"  [PASS] fused kernels include SwiGLU / softmax / RoPE chains "
           f"({len(names)} kernels)")
+
+
+def test_lift_transform_params_is_value_preserving_and_shrinks_memory():
+    """nn.Linear transposes its weight; without LiftTransformParams that
+    transpose is materialized on every call (751 MiB for Llama's lm_head).
+    The lifted form must compute the same values."""
+    from npu_compiler import npu_memplan as M
+    mod, params, cfg = llama.build_prefill(TINY, seq=SEQ)
+    args, weights = _inputs(cfg, params)
+
+    plain = P.graph_pipeline(lift_params=False)(mod)
+    base = _run(relax.build(plain, target="llvm"), args, weights)
+
+    lifted = P.graph_pipeline(lift_params=True)(mod)
+    vm = relax.VirtualMachine(relax.build(lifted, target="llvm"), tvm.cpu())
+    transformed = vm["prefill_transform_params"]([weights])
+    got = vm["prefill"](*args, *transformed).numpy()
+    np.testing.assert_array_equal(base.view(np.uint16), got.view(np.uint16))
+
+    pools = lambda m: sum(M.assign_addresses(m)[1].pool_bytes.values())
+    before, after = pools(plain), pools(lifted)
+    assert after < before, (before, after)
+    print(f"  [PASS] LiftTransformParams value-preserving; activation pools "
+          f"{before:,} -> {after:,} B")
 
 
 def test_layers_share_kernels():
@@ -82,5 +107,6 @@ def test_layers_share_kernels():
 if __name__ == "__main__":
     test_pipeline_matches_stock_build()
     test_fusion_produces_expected_kernels()
+    test_lift_transform_params_is_value_preserving_and_shrinks_memory()
     test_layers_share_kernels()
     print("ALL TVM PIPELINE (S1) TESTS PASSED")
