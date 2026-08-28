@@ -119,6 +119,12 @@ class Walker:
             raise V09TirError(f"un-tensorized statement reached codegen: {kind}")
         elif kind is tir.Block:
             self.visit(stmt.body)
+        elif kind is tir.IfThenElse:
+            # the program is fully unrolled, so every guard is decidable here
+            if self.ev(stmt.condition):
+                self.visit(stmt.then_case)
+            elif stmt.else_case is not None:
+                self.visit(stmt.else_case)
         elif kind is tir.AttrStmt or kind is tir.AllocateConst:
             self.visit(stmt.body)
         else:

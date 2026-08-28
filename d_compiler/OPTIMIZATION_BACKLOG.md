@@ -79,6 +79,22 @@
   같은 성질의 비용
 - **측정**: 미측정
 
+## C5. SRAM 캐시 버퍼 압축 — **실모델 확장의 차단 요인**
+- **무엇**: `cache_read`는 타일 하나만 staging해도 **생산자의 전체 shape**로
+  버퍼를 할당한다. 실제 weight([3072,3072] = 18 MiB)에서는 8 MiB SRAM을 초과해
+  링크가 실패한다 (`LinkError: kernel exceeds SRAM capacity`)
+- **표준 해법**: `CompactBufferAllocation` — 실제 접근 영역으로 버퍼를 줄인다
+- **막힌 지점** (2026-08-28 시도): `CompactBufferAllocation`과 그 선행 pass
+  `PlanAndUpdateBufferAllocationLocation`은 **모든 블록의 init이 lower된 상태**를
+  요구한다(`Check failed: !init.defined()`). 그런데 선행 `LowerInitBlock`은
+  리덕션을 "가드된 store"로 바꾸고, 우리 loop-nest 매처는 `block.init` 유무로
+  리덕션을 판별하므로 그 형태를 읽지 못한다
+- **선택지**: ① 매처를 가드된-store 형태까지 읽도록 확장 ② matmul 커널에만
+  적용하되 pad_einsum이 남기는 init 블록을 정리 ③ 링커가 타일 원점을 추적해
+  압축된 주소로 직접 매핑(= 압축을 우리가 구현)
+- **영향**: 이게 풀리기 전까지 실모델 차원은 링크되지 않는다.
+  현재 검증 범위는 타일 규모(1-layer, D=64)까지
+
 ## D. naive로 둔 정확성 우회 (성능이 아니라 단순화)
 
 | 항목 | 현재 naive 방식 | 나중에 |

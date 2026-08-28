@@ -44,20 +44,42 @@ def _schedule(module, gvar, prim):
     name = gvar.name_hint
     try:
         if _is_matmul(prim):
-            return npu_intrin.schedule_matmul_sram(module, name)[name]
-        return npu_intrin.schedule_generic_sram(module, name)[name]
+            scheduled = npu_intrin.schedule_matmul_sram(module, name)
+        else:
+            scheduled = npu_intrin.schedule_generic_sram(module, name)
     except Exception as error:
         raise LinkError(f"{name}: {type(error).__name__}: "
                         f"{str(error).splitlines()[-1][:120]}") from error
+    # NOTE: cache_read allocates a buffer with the producer's full shape even
+    # when only a tile is staged, so real weight shapes exceed the 8 MiB SRAM.
+    # The standard fix is CompactBufferAllocation, but it (and
+    # PlanAndUpdateBufferAllocationLocation) require every block's init to be
+    # lowered first, and LowerInitBlock rewrites reductions into a guarded
+    # store that the loop-nest matcher does not read.  Tracked in
+    # OPTIMIZATION_BACKLOG.md; until then only tile-sized shapes link.
+    return scheduled[name]
 
 
 def _sram_layout(prim, cursor=0):
-    """Bump-allocate the kernel's cache buffers in SRAM."""
+    """Bump-allocate the kernel's cache buffers in SRAM.
+
+    Buffers may be allocated at any block after
+    PlanAndUpdateBufferAllocationLocation moves them inward, so collect them
+    from the whole body rather than the root block.
+    """
     placement = {}
-    body = prim.body
-    if not isinstance(body, tir.BlockRealize):
-        return placement, cursor
-    for buffer in body.block.alloc_buffers:
+    buffers = []
+    seen = set()
+
+    def visit(node):
+        if isinstance(node, tir.Block):
+            for buffer in node.alloc_buffers:
+                if buffer.data not in seen:
+                    seen.add(buffer.data)
+                    buffers.append(buffer)
+
+    tir.stmt_functor.post_order_visit(prim.body, visit)
+    for buffer in buffers:
         # every kernel-local temporary lives in SRAM: compute units cannot
         # address global memory, so a buffer allocated inside a kernel has
         # nowhere else to go (padding buffers from pad_einsum included)
