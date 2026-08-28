@@ -58,6 +58,7 @@ class Walker:
         self.scratch_slots = ()         # SRAM nibbles for expression temporaries
         self.depth = 0
         self.inner_base = 0             # offset applied to the innermost axis
+        self._match_plans = {}          # match_buffer node -> what it binds
         self.stored = {}                # C tile address -> stride, once stored
 
     # ---- index evaluation (ported from tir_backend) ----
@@ -875,31 +876,46 @@ class Walker:
     def _bind_match(self, match):
         """A tensorized block views a tile of a root buffer through
         match_buffer; bind the view's data Var to the tile's element offset and
-        its symbolic stride to the parent row width."""
-        source, view = match.source, match.buffer
-        parent = source.buffer.data
-        # a tile lives in the last two axes; leading axes select the batch
-        shape = [int(d) for d in source.buffer.shape]
+        its symbolic stride to the parent row width.
+
+        Every tensorized tile visits the same match_buffer node, so its shape
+        and origin expressions are read from TIR once and evaluated per visit;
+        the node is kept alive by the cache, which is what makes its address
+        usable as the key.
+        """
+        plan = self._match_plans.get(match.handle.value)
+        if plan is None:
+            source, view = match.source, match.buffer
+            # a tile lives in the last two axes; leading axes select the batch
+            shape = [int(d) for d in source.buffer.shape]
+            elem_offset = view.elem_offset
+            plan = (match, source.buffer.data, view.data, source.buffer.name,
+                    elem_offset if isinstance(elem_offset, tir.Var) else None,
+                    [symbol if isinstance(symbol, tir.Var) else None
+                     for symbol in view.strides],
+                    shape, [(self._compile(r.min), r.min) for r in source.region])
+            self._match_plans[match.handle.value] = plan
+        _, parent, data, name, elem_offset, strides, shape, origins = plan
         stride = shape[-1]
         offset, scale = 0, 1
-        for dim, region in reversed(list(zip(shape, source.region))):
-            offset += self.ev(region.min) * scale
+        for dim, (compiled, expr) in zip(reversed(shape), reversed(origins)):
+            offset += (compiled(self.env) if compiled is not None
+                       else self.ev(expr)) * scale
             scale *= dim
         # a view shares the parent's data pointer; its position is carried by
         # the symbolic elem_offset that access_ptr adds
         if parent in self.sram:
-            self.sram[view.data] = self.sram[parent]
-            self.scopes[view.data] = self.scopes.get(parent)
+            self.sram[data] = self.sram[parent]
+            self.scopes[data] = self.scopes.get(parent)
         elif parent in self.bases:
-            self.bases[view.data] = self.bases[parent]
+            self.bases[data] = self.bases[parent]
         else:
-            raise V09TirError(f"match_buffer source is not a known buffer: "
-                              f"{source.buffer.name}")
+            raise V09TirError(f"match_buffer source is not a known buffer: {name}")
         unit = 4 if parent in self.sram else 1
-        if isinstance(view.elem_offset, tir.Var):
-            self.env[view.elem_offset] = offset * unit
-        for symbol, value in zip(view.strides, (stride, 1)):
-            if isinstance(symbol, tir.Var):
+        if elem_offset is not None:
+            self.env[elem_offset] = offset * unit
+        for symbol, value in zip(strides, (stride, 1)):
+            if symbol is not None:
                 self.env[symbol] = value
 
     def call(self, expr):
