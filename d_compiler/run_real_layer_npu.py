@@ -37,7 +37,7 @@ def parse_args():
     parser.add_argument("--seq", type=int, default=7)
     parser.add_argument("--vocab", type=int, default=256,
                         help="a small vocabulary keeps lm_head cheap; the real "
-                             "one is exercised by run_nn_llama_npu.py")
+                             "one is exercised by run_nn_npu.py")
     return parser.parse_args()
 
 

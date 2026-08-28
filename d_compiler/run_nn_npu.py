@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""S7 gate: the real Llama 3.2 3B checkpoint, compiled through the standard
-pipeline, linked to v09 instructions, and executed on the C-model.
+"""S7 gate: a real checkpoint, compiled through the standard pipeline, linked
+to v09 instructions, and executed on the C-model.
 
 The same lowered module is also built for llvm, so the run is judged twice:
 against the CPU build of the identical IR (numerical agreement) and against
-the known first generated token (end-to-end agreement with HF).
+the known first generated token (end-to-end agreement with HF).  Note that
+the CPU build accumulates float16 matmuls in float16 while the machine
+accumulates in float32, so a cosine below 1 there is expected -- see
+run_real_layer_npu.py, which scores both against float32.
 """
 import argparse
 import json
@@ -21,14 +24,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from npu_compiler import npu_legalize, npu_link, npu_memplan
 from npu_compiler import tvm_pipeline as pipeline
-from npu_compiler.nn_models import llama
-from npu_compiler.v3_model import Llama32Assets
 
 os.environ.setdefault("NPU_V09_TMPDIR", "/data2/chokwans99/npu_tmp")
 
 
+def load_family(name):
+    """-> (frontend module, checkpoint assets) for one model family."""
+    if name == "llama":
+        from npu_compiler.nn_models import llama
+        from npu_compiler.v3_model import Llama32Assets
+        return llama, Llama32Assets()
+    if name == "qwen3":
+        from npu_compiler.nn_models import qwen3
+        from npu_compiler.qwen3_model import Qwen3Assets
+        return qwen3, Qwen3Assets()
+    raise SystemExit(f"unknown model family {name!r}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="llama", choices=("llama", "qwen3"))
     parser.add_argument("--prompt", default="Hello, NPU compiler!")
     parser.add_argument("--layers", type=int, default=0,
                         help="0 = all layers; smaller values truncate for a fast check")
@@ -41,7 +56,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    assets = Llama32Assets()
+    family, assets = load_family(args.model)
     config = dict(assets.config)
     if args.layers:
         config["num_hidden_layers"] = args.layers
@@ -52,7 +67,7 @@ def main():
     print(f"prompt {args.prompt!r} -> {seq} tokens, "
           f"{config['num_hidden_layers']} layers", flush=True)
 
-    mod, params, cfg = llama.build_prefill(config, seq)
+    mod, params, cfg = family.build_prefill(config, seq)
     lowered = pipeline.graph_pipeline(
         custom_legalize=npu_legalize.legalize_map(),
         fuse=False, lift_params=True)(mod)
@@ -60,7 +75,7 @@ def main():
     started = time.perf_counter()
     weights = []
     for name, param in params:
-        key = llama.hf_param_map(name, cfg.num_layers)
+        key = family.hf_param_map(name, cfg.num_layers)
         if key == "lm_head.weight" and key not in assets.weight_map:
             key = "model.embed_tokens.weight"       # tied embeddings
         value = assets._slice(key, (slice(None),) * len(param.shape))
@@ -68,8 +83,8 @@ def main():
     print(f"  weights loaded: {time.perf_counter() - started:.1f}s", flush=True)
 
     embeds = assets.embedding([int(i) for i in input_ids]).astype(np.float16)
-    cos, sin = llama.rope_inputs(cfg, np.arange(seq))
-    mask = llama.causal_mask(cfg.num_heads, seq)
+    cos, sin = family.rope_inputs(cfg, np.arange(seq))
+    mask = family.causal_mask(cfg.num_heads, seq)
 
     started = time.perf_counter()
     vm = relax.VirtualMachine(relax.build(lowered, "llvm"), tvm.cpu())
@@ -102,7 +117,8 @@ def main():
     print(f"  c-model run: {time.perf_counter() - started:.0f}s", flush=True)
 
     token = int(np.argmax(logits[-1]))
-    result = {"first_token": token, "decoded": assets.tokenizer.decode([token]),
+    result = {"model": args.model, "first_token": token,
+              "decoded": assets.tokenizer.decode([token]),
               "words": len(asm.words), "kernels": asm.kernel_count}
     if reference is not None:
         a = logits.astype(np.float64).ravel()

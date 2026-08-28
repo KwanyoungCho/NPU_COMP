@@ -67,6 +67,8 @@ float32 numpy로 판정한다. 재현: `d_compiler/run_real_layer_npu.py`.
 | **실모델 차원 1층** (hidden 3072 / ffn 8192 / head 24·8×128, seq 7) | 링크 1,005,891 word · 45 kernel · image 194.4 MiB, **float32 기준 cosine 1.000000** |
 | **실 체크포인트 1층** (Llama 3.2 3B, vocab 128256) | 링크 4,263,891 word · image 946 MiB, C-model 실행 64s, llvm과 같은 token |
 | Qwen3 프론트엔드 (신규) | numpy 기준 cosine 0.999999(llvm), C-model 1층 **cosine 1.000000** |
+| **Qwen3-4B 전체 36층 (llvm)** | **token 358 — golden 일치**, HF logits 대비 cosine 0.9852 |
+| Qwen3-4B 1층 (C-model, 실 체크포인트) | 링크 4,527,605 word · 47 kernel · image 937 MiB, 실행 61초 |
 | 전체 28층 Llama (llvm) | **token 358 — golden 일치** |
 | **전체 28층 Llama (C-model)** | **token 358 — golden 일치**. 31,222,473 word · 1,206 kernel · image 6,130 MiB, 링크 10,268초(2.85h), 실행 462초 |
 
@@ -80,9 +82,12 @@ DMA 적재 1,619,976,420 cell(≈6.5 GB — 가중치를 사실상 한 번씩만
 
 ## 3. 진행 중 / 다음 할 일
 
-1. **Qwen3 전체 깊이 CPU 게이트** — `run_nn_qwen3_cpu.py`(2층 스모크만 확인).
-   golden은 `d_compiler/build/qwen3_reference_generate_hello_3.npz`의 `[358,1184,311]`.
-   그 다음이 Qwen3의 NPU end-to-end(`run_nn_llama_npu.py`를 본떠 만들면 된다).
+1. **Qwen3 전체 36층 NPU end-to-end** — `run_nn_npu.py --model qwen3 --skip-llvm`을
+   백그라운드로 돌려놨다(링크 예상 4시간대). CPU 게이트는 이미 통과했다.
+   결과가 없으면 그대로 다시 돌리면 된다.
+
+   참고로 **llvm의 HF logits cosine이 0.9852**로 기존 golden 수준(0.9999대)에 못 미치는데,
+   §1.3대로 llvm이 fp16으로 누적하기 때문이다. cosine 게이트는 **NPU 결과로** 재야 한다.
 2. **Gemma 프론트엔드** — S7의 남은 한 family. Llama/Qwen3와 달리 델타가 크다
    (PLE, 공유 KV, sliding window, 추가 norm 5종). `npu_compiler/gemma4_graph.py`가
    검증된 참조 구현이므로 그대로 옮기면 된다.
