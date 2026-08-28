@@ -330,8 +330,10 @@ class Walker:
     def _pieces(self, value, inner, length):
         """Split a row into (expression, start, count) pieces.
 
-        A padded copy (``if_then_else`` from ``pad_einsum``) becomes an
-        in-bounds part and a constant-fill part; anything else is one piece.
+        A conditional select (``if_then_else`` from concat or from
+        ``pad_einsum``'s fill) becomes one piece per run of the condition; the
+        condition is not assumed to hold on a prefix, since concat's holds on
+        the tail.
         """
         name = (value.op.name if isinstance(value, tir.Call)
                 and hasattr(value.op, "name") else None)
@@ -339,17 +341,21 @@ class Walker:
             return [(value, 0, length)]
         condition, taken, other = value.args
         saved = self.env.get(inner)
-        prefix = 0
-        while prefix < length:
-            self.env[inner] = prefix
-            if not self.ev(condition):
-                break
-            prefix += 1
+        flags = []
+        for index in range(length):
+            self.env[inner] = index
+            flags.append(bool(self.ev(condition)))
         if saved is None:
             self.env.pop(inner, None)
         else:
             self.env[inner] = saved
-        return [(taken, 0, prefix), (other, prefix, length - prefix)]
+        pieces, start = [], 0
+        for index in range(1, length + 1):
+            if index == length or flags[index] != flags[start]:
+                pieces.append((taken if flags[start] else other,
+                               start, index - start))
+                start = index
+        return pieces
 
     # ---- expression materialization -------------------------------------
     # The vector unit applies one operation to a whole vector, so an
@@ -583,8 +589,13 @@ class Walker:
         its symbolic stride to the parent row width."""
         source, view = match.source, match.buffer
         parent = source.buffer.data
-        row, col = source.region[0].min, source.region[1].min
-        stride = int(source.buffer.shape[1])
+        # a tile lives in the last two axes; leading axes select the batch
+        shape = [int(d) for d in source.buffer.shape]
+        stride = shape[-1]
+        offset, scale = 0, 1
+        for dim, region in reversed(list(zip(shape, source.region))):
+            offset += self.ev(region.min) * scale
+            scale *= dim
         # a view shares the parent's data pointer; its position is carried by
         # the symbolic elem_offset that access_ptr adds
         if parent in self.sram:
@@ -597,8 +608,7 @@ class Walker:
                               f"{source.buffer.name}")
         unit = 4 if parent in self.sram else 1
         if isinstance(view.elem_offset, tir.Var):
-            self.env[view.elem_offset] = (self.ev(row) * stride
-                                          + self.ev(col)) * unit
+            self.env[view.elem_offset] = offset * unit
         for symbol, value in zip(view.strides, (stride, 1)):
             if isinstance(symbol, tir.Var):
                 self.env[symbol] = value
