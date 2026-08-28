@@ -10,7 +10,7 @@
 
 시작 시점의 상태는 "표준 파이프라인이 **타일 규모(1층, D=64)** 까지만 링크된다"였다.
 실모델 차원은 `LinkError: kernel exceeds SRAM capacity`로 막혀 있었다.
-지금은 **실모델 차원이 링크되고 C-model에서 정확히 실행된다.**
+지금은 **실 체크포인트 전체 28층이 C-model에서 golden token과 일치한다.**
 
 ### 1.1 막고 있던 것 두 가지 (백로그 C5, C6)
 
@@ -68,21 +68,26 @@ float32 numpy로 판정한다. 재현: `d_compiler/run_real_layer_npu.py`.
 | **실 체크포인트 1층** (Llama 3.2 3B, vocab 128256) | 링크 4,263,891 word · image 946 MiB, C-model 실행 64s, llvm과 같은 token |
 | Qwen3 프론트엔드 (신규) | numpy 기준 cosine 0.999999(llvm), C-model 1층 **cosine 1.000000** |
 | 전체 28층 Llama (llvm) | **token 358 — golden 일치** |
+| **전체 28층 Llama (C-model)** | **token 358 — golden 일치**. 31,222,473 word · 1,206 kernel · image 6,130 MiB, 링크 10,268초(2.85h), 실행 462초 |
+
+전체 모델 실행 카운터(참고): 실행 word 28,793,514 / gload 786,312 · gstore 23,341 /
+DMA 적재 1,619,976,420 cell(≈6.5 GB — 가중치를 사실상 한 번씩만 읽는다. `seq=7`이라
+행 타일이 하나여서 재적재가 없다) / matrix 787,008 · vector 1,826,591.
+손작성 oracle이 층당 615,462 word였으므로 28층 환산 대비 **약 1.8배**인데,
+백로그 A1(서술자 dead-store 62.8%)이 아직 안 들어간 상태다.
 
 ---
 
 ## 3. 진행 중 / 다음 할 일
 
-1. **전체 28층 Llama의 C-model 실행** — `run_nn_llama_npu.py`가 백그라운드에서
-   링크 중이었다(층당 약 250초 + lm_head). 결과가 없으면 그냥 다시 돌리면 된다.
-   메모리가 빠듯하니(이미지 약 6.4 GB) 다른 큰 작업과 겹치지 않게 할 것.
-2. **Qwen3 전체 깊이 CPU 게이트** — `run_nn_qwen3_cpu.py`(2층 스모크만 확인).
+1. **Qwen3 전체 깊이 CPU 게이트** — `run_nn_qwen3_cpu.py`(2층 스모크만 확인).
    golden은 `d_compiler/build/qwen3_reference_generate_hello_3.npz`의 `[358,1184,311]`.
-3. **Gemma 프론트엔드** — S7의 남은 한 family. Llama/Qwen3와 달리 델타가 크다
+   그 다음이 Qwen3의 NPU end-to-end(`run_nn_llama_npu.py`를 본떠 만들면 된다).
+2. **Gemma 프론트엔드** — S7의 남은 한 family. Llama/Qwen3와 달리 델타가 크다
    (PLE, 공유 KV, sliding window, 추가 norm 5종). `npu_compiler/gemma4_graph.py`가
    검증된 참조 구현이므로 그대로 옮기면 된다.
-4. **S6** (custom target + `relax.build` 통합), **S8** (양자화를 Relax pass로).
-5. 백로그 최우선은 여전히 **A1 서술자 dead-store 제거**(측정 62.8%).
+3. **S6** (custom target + `relax.build` 통합), **S8** (양자화를 Relax pass로).
+4. 백로그 최우선은 여전히 **A1 서술자 dead-store 제거**(측정 62.8%).
 
 ---
 
