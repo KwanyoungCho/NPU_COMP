@@ -68,11 +68,16 @@ class StaticPlan:
         self.nbytes = {}        # var name -> byte size
         self.pool_base = {}     # storage var name -> address
         self.pool_bytes = {}    # storage var name -> byte size
+        self.tuples = {}        # tuple var name -> member var names
+        self.const_data = []    # (address, numpy array) the host must write
         self.top = 0            # total size in `unit_bytes` units
 
     def _alloc(self, nbytes):
-        if nbytes % self.unit_bytes:
-            nbytes += self.unit_bytes - nbytes % self.unit_bytes
+        # round every allocation up to a whole 32-bit cell so DMA, which moves
+        # cells, never has to touch a neighbour's storage
+        cell = 4
+        if nbytes % cell:
+            nbytes += cell - nbytes % cell
         base = self.top
         self.top += nbytes // self.unit_bytes
         return base
@@ -102,11 +107,44 @@ def assign_addresses(mod, func_name="prefill", unit_bytes=2):
             plan.address[name] = plan._alloc(nbytes)
             plan.nbytes[name] = nbytes
 
+    # graph constants (e.g. an index vector) need a home the kernels can read
+    constants = {}
     body = func.body
     blocks = body.blocks if isinstance(body, relax.SeqExpr) else []
     for block in blocks:
+        for binding in blocks and block.bindings or []:
+            value = binding.value
+            if not isinstance(value, relax.Call):
+                continue
+            for arg in value.args:
+                if isinstance(arg, relax.Constant):
+                    array = arg.data.numpy()
+                    # TVM re-wraps objects per access, so key by content
+                    key = (str(array.dtype), array.shape, array.tobytes())
+                    if key in constants:
+                        continue
+                    nbytes = array.size * array.dtype.itemsize
+                    address = plan._alloc(nbytes)
+                    constants[key] = address
+                    plan.const_data.append((address, array))
+    plan.graph_constants = constants
+    for block in blocks:
         for binding in block.bindings:
             value = binding.value
+            if isinstance(value, relax.Tuple):
+                # a multi-output kernel (split) binds its results as a tuple;
+                # remember the members so TupleGetItem can resolve them
+                plan.tuples[binding.var.name_hint] = [
+                    field.name_hint for field in value.fields
+                    if isinstance(field, relax.Var)]
+                continue
+            if isinstance(value, relax.TupleGetItem):
+                members = plan.tuples.get(value.tuple_value.name_hint)
+                if members and value.index < len(members):
+                    source = members[value.index]
+                    plan.address[binding.var.name_hint] = plan.address[source]
+                    plan.nbytes[binding.var.name_hint] = plan.nbytes[source]
+                continue
             if isinstance(value, relax.Var):
                 # an alias binding (the rewrite names a call's result); it
                 # shares the allocation it was bound from

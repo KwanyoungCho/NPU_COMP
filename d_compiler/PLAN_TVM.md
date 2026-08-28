@@ -65,7 +65,7 @@
 | **S2** | **메모리 계획을 표준 pass로** — 표준 시퀀스 뒤 storage/offset을 평면 정적 주소로 배정 (`npu_memplan.py`) | ✅ (2026-08-28) 생존구간 충돌 0, 재사용으로 footprint 감소. **`LiftTransformParams` 발견 적용** — 런타임 가중치 전치 제거로 활성 pool 1,599.7→0.7 MiB (값 보존 확인) |
 | **S3** | **인트린식·walker 재타깃** — compiler-v2의 인트린식·tensorize 스케줄·TIR walker를 **v09 ISA로 이식** | ✅ (2026-08-28, matmul) 64³·128³ 모두 backend_v09와 **bit-exact**. MAIN/PARTIAL 서술자 덕에 0710의 gather/scatter 불필요 → walker 대폭 단순화. **커널 13종 전부 bit-exact 완료** (matmul 64³·128³, binary 4, unary 3, sum/max, broadcast, transpose, slice) |
 | **S4** | **SRAM staging** — `cache_read/cache_write("global.sram")`으로 DMA 표현 | ✅ (2026-08-28) 64³·128³ 모두 backend_v09와 **bit-exact**. 연산은 SRAM만 접근, global은 DMA에만 등장 |
-| **S5** | **링크** — 커널 인스턴스를 하나의 명령 스트림으로 연결 | 🔶 진행 중 (2026-08-28): 링커·상수 풀·표현식 직렬화·일반 SRAM staging·커스텀 legalize 구현 완료. **남은 것**: ① tuple 출력(split 등) 메모리 계획 ② 64 배수 미만 matmul(패딩 또는 소형 인트린식) |
+| **S5** | **링크** — 커널 인스턴스를 하나의 명령 스트림으로 연결 | ✅ 링크 성립 (2026-08-28): 소형 1-layer Llama가 **45 커널·50,472 word**로 링크. naive 우회는 OPTIMIZATION_BACKLOG.md §D에 기록. **남은 것**: C-model 실행 검증(수치 대조) |
 | **S6** | **target 등록 + `relax.build` 통합** | `relax.build(mod, target="npu")` 산출물로 실행 |
 | **S7** | **3-모델 end-to-end** (Gemma·Qwen3 nn.Module 추가) | **HF token 일치 + logits cosine ≥ 기존 golden 수준** |
 | **S8** | **양자화를 Relax pass로** (현재 driver 실행 시 처리) | W8A16/W8A8 기존 측정치 재현 |
@@ -104,15 +104,11 @@
 
 ## 6. 보류: NPU 특화 최적화 (사용자 검토 후 별도 진행)
 
-측정은 되어 있으나 이번 전환 범위에서 제외한다.
-
-| 항목 | 측정된 기회 |
-|---|---|
-| 서술자 dead-store 제거 (peephole) | llama 층 상한 **62.8%**, proxy 층 실측 −31.4% (bit-exact 확인) |
-| 루프 순서 조정으로 weight 재적재 제거 | 행 192에서 **2.68× → 1.0×** |
-| transpose를 matmul 서술자로 흡수 | 미측정 |
-| 인접 DMA 병합 | 미측정 |
-| MetaSchedule 자동 튜닝 (비용 모델 = word·DMA·SRAM) | 미측정 |
+**→ `d_compiler/OPTIMIZATION_BACKLOG.md` 에 전부 정리했다.**
+ISA/codegen(A), 스케줄(B), 그래프(C) 계층별 항목과, 정확성을 위해 naive하게
+둔 우회들(D), 그리고 "표준 TVM으로 안 되는 것"의 정확한 구분(E)을 담았다.
+대표 측정치: 서술자 dead-store **62.8%**(proxy 층 실측 −31.4%, bit-exact),
+weight 재적재 행 192에서 **2.68×**, 상수 인덱스 take 우회로 lm_head **7배** 낭비.
 
 > 참고: v09 ISA에는 분기·반복 명령이 없어 **모든 루프가 완전히 펼쳐진다.**
 > 따라서 TIR 도입만으로 프로그램 크기는 줄지 않으며, 크기 문제는 위 보류

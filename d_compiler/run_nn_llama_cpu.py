@@ -75,7 +75,7 @@ def main():
                            plist).numpy()
     print(f"  prefill: {time.perf_counter() - started:.1f}s", flush=True)
 
-    token = int(np.argmax(logits[0]))
+    token = int(np.argmax(logits[-1]))
     text = assets.tokenizer.decode([token])
     ok = args.layers == 0 and token == args.expect
     print(json.dumps({"first_token": token, "decoded": text,

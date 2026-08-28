@@ -47,6 +47,8 @@ class Walker:
         self.constants = {}             # float value -> SRAM nibble of that scalar
         self.scratch_slots = ()         # SRAM nibbles for expression temporaries
         self.depth = 0
+        self.inner_base = 0             # offset applied to the innermost axis
+        self.stored = {}                # C tile address -> stride, once stored
 
     # ---- index evaluation (ported from tir_backend) ----
 
@@ -286,12 +288,13 @@ class Walker:
         asm.save(0)
 
     def _affine_flat(self, load, axis):
-        """(base element offset, stride) of a buffer load along one axis."""
-        self.env[axis] = 0
+        """(base address, stride) of a buffer load along one axis, taken from
+        ``inner_base`` so a row can be emitted in pieces."""
+        self.env[axis] = self.inner_base
         base = self._flat(load.buffer, load.indices, self)
-        self.env[axis] = 1
+        self.env[axis] = self.inner_base + 1
         stride = self._flat(load.buffer, load.indices, self) - base
-        self.env[axis] = 0
+        self.env[axis] = self.inner_base
         return base, stride
 
     _POINTWISE = {tir.Add: "v_add", tir.Sub: "v_sub",
@@ -311,12 +314,42 @@ class Walker:
         for position in self._outer_positions(outer, extents):
             for var, val in zip(outer, position):
                 self.env[var] = val
-            dst, dst_stride = self._affine_flat_store(store, inner)
             unit = 4 if store.buffer.data in self.sram else 1
-            if dst_stride != unit:
-                raise V09TirError(f"pointwise destination stride {dst_stride}")
-            self.depth = 0
-            self._materialize(value, inner, length, into=dst)
+            for expr, base, count in self._pieces(value, inner, length):
+                if count <= 0:
+                    continue
+                self.inner_base = base
+                dst, dst_stride = self._affine_flat_store(store, inner)
+                if dst_stride != unit:
+                    raise V09TirError(
+                        f"pointwise destination stride {dst_stride}")
+                self.depth = 0
+                self._materialize(expr, inner, count, into=dst)
+            self.inner_base = 0
+
+    def _pieces(self, value, inner, length):
+        """Split a row into (expression, start, count) pieces.
+
+        A padded copy (``if_then_else`` from ``pad_einsum``) becomes an
+        in-bounds part and a constant-fill part; anything else is one piece.
+        """
+        name = (value.op.name if isinstance(value, tir.Call)
+                and hasattr(value.op, "name") else None)
+        if name != "tir.if_then_else":
+            return [(value, 0, length)]
+        condition, taken, other = value.args
+        saved = self.env.get(inner)
+        prefix = 0
+        while prefix < length:
+            self.env[inner] = prefix
+            if not self.ev(condition):
+                break
+            prefix += 1
+        if saved is None:
+            self.env.pop(inner, None)
+        else:
+            self.env[inner] = saved
+        return [(taken, 0, prefix), (other, prefix, length - prefix)]
 
     # ---- expression materialization -------------------------------------
     # The vector unit applies one operation to a whole vector, so an
@@ -385,6 +418,8 @@ class Walker:
             call = self._CALLS.get(name)
             if call is None and name == "tir.rsqrt":
                 return self._rsqrt(expr, inner, length, into)
+            if call is None and name == "tir.sigmoid":
+                return self._sigmoid(expr, inner, length, into)
             if call is None:
                 raise V09TirError(f"unsupported intrinsic {name}")
             depth = self.depth
@@ -399,6 +434,47 @@ class Walker:
             asm.save(0)
             return target
         raise V09TirError(f"unsupported expression {type(expr)}")
+
+    def _sigmoid(self, expr, inner, length, into):
+        """1/(1+exp(-x)) from the primitives the unit provides."""
+        asm = self.a
+        depth = self.depth
+        operand = self._materialize(expr.args[0], inner, length)
+        self.depth = depth
+        negated = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, operand)
+        asm.load(0, SRC1)
+        asm.v_sign_inv()
+        self.stage.vector(DST, negated)
+        asm.save(0)
+        exponent = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, negated)
+        asm.load(0, SRC1)
+        asm.v_exp()
+        self.stage.vector(DST, exponent)
+        asm.save(0)
+        one = self._materialize(tir.FloatImm("float16", 1.0), inner, length)
+        denominator = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, exponent)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, one)
+        asm.load(0, SRC2)
+        asm.v_add(VECTOR)
+        self.stage.vector(DST, denominator)
+        asm.save(0)
+        target = into if into is not None else self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, one)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, denominator)
+        asm.load(0, SRC2)
+        asm.v_div(VECTOR)
+        self.stage.vector(DST, target)
+        asm.save(0)
+        return target
 
     def _rsqrt(self, expr, inner, length, into):
         """1/sqrt(x) via the sqrt and divide the unit provides."""
@@ -494,11 +570,11 @@ class Walker:
                 self.stage.dma_out(dst_base, src_base, length)
 
     def _affine_flat_store(self, store, axis):
-        self.env[axis] = 0
+        self.env[axis] = self.inner_base
         base = self._flat(store.buffer, store.indices, self)
-        self.env[axis] = 1
+        self.env[axis] = self.inner_base + 1
         stride = self._flat(store.buffer, store.indices, self) - base
-        self.env[axis] = 0
+        self.env[axis] = self.inner_base
         return base, stride
 
     def _bind_match(self, match):
@@ -559,14 +635,26 @@ class Walker:
         Consecutive calls to the same C tile chain through the PE accumulator
         with the MAC bit and store once, matching the Relax backend's sequence.
         """
+        asm = self.a
         first = c in self.zeroed
         if first:
             self.zeroed.discard(c)
             self.flush()
             self.pending = (c, sc)
         elif self.pending is None or self.pending[0] != c:
-            raise V09TirError(f"accumulate into unseen C tile @{c}")
-        asm = self.a
+            # the chain was interrupted (a vector op owns the PE output in
+            # between), so reload the partial sum before continuing -- the
+            # same trick the 0710 walker used
+            if c not in self.stored:
+                raise V09TirError(f"accumulate into unseen C tile @{c}")
+            if self.stored[c] != TILE:
+                raise V09TirError("cannot reload a strided partial tile")
+            self.flush()
+            asm.vlen(TILE * TILE)
+            self.stage.vector(SRC1, c)
+            asm.load(0, SRC1)
+            asm.v_copy()
+            self.pending = (c, sc)
         self.stage.region(SRC1, a, sa, TILE, TILE)
         asm.load(1, SRC1)
         self.stage.region(SRC2, b, sb, TILE, TILE)
@@ -611,6 +699,7 @@ class Walker:
         c, sc = self.pending
         self.stage.region(DST, c, sc, TILE, TILE)
         self.a.save(1)
+        self.stored[c] = sc
         self.pending = None
 
     def declare_sram(self, buffer, nibble):
@@ -671,8 +760,11 @@ class SramEmitter:
 
     @staticmethod
     def _cells(global_elem, count, sram_nibble):
-        if global_elem % 2 or count % 2:
-            raise V09TirError("DMA rows must be cell aligned (even elements)")
+        # allocations are cell-rounded, so an odd count only reaches into the
+        # tensor's own padding; an odd start would shift the SRAM image and is
+        # rejected instead
+        if global_elem % 2:
+            raise V09TirError("DMA row must start on a 32-bit cell")
         if sram_nibble % 8:
             raise V09TirError("DMA SRAM address must be 8-nibble aligned")
-        return count // 2, sram_nibble
+        return (count + 1) // 2, sram_nibble

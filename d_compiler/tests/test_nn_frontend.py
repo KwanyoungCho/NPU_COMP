@@ -57,7 +57,7 @@ def _reference(cfg, weights, x, cos, sin, mask):
         up = n2 @ w("mlp.up_proj.weight").T
         hidden = hidden + (gate / (1 + np.exp(-gate)) * up) \
             @ w("mlp.down_proj.weight").T
-    final = rms(hidden, weights["norm.weight"])[-1:]
+    final = rms(hidden, weights["norm.weight"])
     return final @ weights["lm_head.weight"].astype(np.float32).T
 
 

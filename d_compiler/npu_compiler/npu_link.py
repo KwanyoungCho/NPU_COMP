@@ -58,8 +58,9 @@ def _sram_layout(prim, cursor=0):
     if not isinstance(body, tir.BlockRealize):
         return placement, cursor
     for buffer in body.block.alloc_buffers:
-        if buffer.scope() != npu_intrin.SRAM_SCOPE:
-            continue
+        # every kernel-local temporary lives in SRAM: compute units cannot
+        # address global memory, so a buffer allocated inside a kernel has
+        # nowhere else to go (padding buffers from pad_einsum included)
         size = 1
         for dim in buffer.shape:
             size *= int(dim)
@@ -132,6 +133,15 @@ def compile_program(mod, func_name="prefill"):
             scheduled = _schedule(planned, call.op, prim)
             addresses = []
             for arg in call.args:
+                if isinstance(arg, relax.Constant):
+                    array = arg.data.numpy()
+                    key = (str(array.dtype), array.shape, array.tobytes())
+                    addresses.append(plan.graph_constants[key])
+                    continue
+                if isinstance(arg, relax.Tuple):
+                    for field in arg.fields:
+                        addresses.append(plan.address[field.name_hint])
+                    continue
                 if not isinstance(arg, relax.Var):
                     raise LinkError(f"{call.op.name_hint}: non-var argument {arg}")
                 if arg.name_hint not in plan.address:

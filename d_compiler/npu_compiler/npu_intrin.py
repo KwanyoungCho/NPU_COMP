@@ -202,9 +202,16 @@ def schedule_matmul_sram(mod, func_name, tile=64):
     i, j, k = loops[-3:]
     extents = [int(sch.get(loop).extent) for loop in (i, j, k)]
     if any(extent % tile for extent in extents):
-        raise ValueError(
-            f"matmul dims {extents} are not {tile}-multiples; sub-tile shapes "
-            "need padding or a smaller intrinsic (not implemented)")
+        # pad_einsum is the standard primitive for exactly this: grow the
+        # iteration domain to the intrinsic's factor and insert the producer /
+        # consumer padding blocks that keep accesses in bounds
+        batch = len(loops) - 3
+        sch.pad_einsum(block, [1] * batch + [tile, tile, tile])
+        # pad_einsum leaves the fill as a conditional in the producer blocks;
+        # the codegen splits each row into its in-bounds and padded parts
+        # (decompose_padding would give two writers, which blocks cache_read)
+        loops = sch.get_loops(block)
+        i, j, k = loops[-3:]
     i_o, i_i = sch.split(i, [None, tile])
     j_o, j_i = sch.split(j, [None, tile])
     k_o, k_i = sch.split(k, [None, tile])
@@ -248,6 +255,7 @@ def schedule_generic_sram(mod, func_name):
     prim = sch.mod[func_name]
     params = {prim.buffer_map[p].data for p in prim.params}
     output = prim.buffer_map[prim.params[-1]].data
+    is_output = lambda data: data.same_as(output)
 
     # intermediates the kernel allocates itself
     for block_rv in children:
@@ -255,13 +263,13 @@ def schedule_generic_sram(mod, func_name):
         if not block.writes:
             continue
         target = block.writes[0].buffer
-        if target.data not in params:
+        if not any(target.data.same_as(p) for p in params):
             sch.set_scope(block_rv, 0, SRAM_SCOPE)
 
     # the producer of the result writes SRAM, then one stage copies it out
     for block_rv in children:
         block = sch.get(block_rv)
-        if block.writes and block.writes[0].buffer.data is output:
+        if block.writes and is_output(block.writes[0].buffer.data):
             sch.cache_write(block_rv, 0, SRAM_SCOPE)
             break
 

@@ -160,11 +160,11 @@ class LlamaModel(nn.Module):
         for layer in self.layers:
             hidden = layer(hidden, cos, sin, mask)
         hidden = self.norm(hidden)
-        last = op.reshape(
-            op.take(hidden, nn.Tensor.from_const(
-                np.asarray([hidden.shape[0] - 1], dtype="int32")), axis=0),
-            [1, self.config.hidden_size])
-        return self.lm_head(last)
+        # logits for every position; the host reads the last row.  Selecting it
+        # here would need a gather, whose index the static codegen cannot
+        # evaluate -- see the optimization backlog (constant-index take ->
+        # slice) for the pass that would remove the extra work.
+        return self.lm_head(hidden)
 
     def get_default_spec(self, seq):
         hd = self.config.head_dim
