@@ -13,6 +13,8 @@ from __future__ import annotations
 import tvm.tir as tir
 from tvm.script import tir as T
 
+from . import tir_backend        # registers npu_gemm_acc / npu_fill_zero
+
 VLEN = 64          # elements per tensorized vector block
 
 BINARY_OPS = {
@@ -105,6 +107,8 @@ def register_all():
     for name in UNARY_OPS:
         desc, impl = _unary_pair(name, _UNARY_COMPUTE[name])
         _register(f"npu_v09_ew1_{name}", desc, impl)
+    _register("npu_gemm_acc_sram", _sram_gemm_desc, _sram_gemm_impl)
+    _register("npu_fill_zero_sram", _sram_fill_desc, _sram_fill_impl)
     return REGISTERED
 
 
@@ -114,6 +118,97 @@ def _register(name, desc, impl):
     except Exception:                      # already registered (re-import)
         pass
     REGISTERED.append(name)
+
+
+SRAM_SCOPE = "global.sram"
+TILE = 64
+
+
+@T.prim_func
+def _sram_fill_desc(c: T.handle):
+    sc = T.int32()
+    C = T.match_buffer(c, (TILE, TILE), "float16", strides=[sc, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    with T.block("root"):
+        T.reads()
+        T.writes(C[0:TILE, 0:TILE])
+        for i, j in T.grid(TILE, TILE):
+            with T.block("fill"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                C[vi, vj] = T.float16(0)
+
+
+@T.prim_func
+def _sram_fill_impl(c: T.handle):
+    sc = T.int32()
+    C = T.match_buffer(c, (TILE, TILE), "float16", strides=[sc, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    with T.block("root"):
+        T.reads()
+        T.writes(C[0:TILE, 0:TILE])
+        T.evaluate(T.call_extern("int32", "npu_fill_zero",
+                                 C.access_ptr("w"), sc))
+
+
+@T.prim_func
+def _sram_gemm_desc(a: T.handle, b: T.handle, c: T.handle):
+    sa = T.int32(); sb = T.int32(); sc = T.int32()
+    A = T.match_buffer(a, (TILE, TILE), "float16", strides=[sa, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    B = T.match_buffer(b, (TILE, TILE), "float16", strides=[sb, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    C = T.match_buffer(c, (TILE, TILE), "float16", strides=[sc, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    with T.block("root"):
+        T.reads(C[0:TILE, 0:TILE], A[0:TILE, 0:TILE], B[0:TILE, 0:TILE])
+        T.writes(C[0:TILE, 0:TILE])
+        for i, j, k in T.grid(TILE, TILE, TILE):
+            with T.block("update"):
+                vi, vj, vk = T.axis.remap("SSR", [i, j, k])
+                C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vk, vj]
+
+
+@T.prim_func
+def _sram_gemm_impl(a: T.handle, b: T.handle, c: T.handle):
+    sa = T.int32(); sb = T.int32(); sc = T.int32()
+    A = T.match_buffer(a, (TILE, TILE), "float16", strides=[sa, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    B = T.match_buffer(b, (TILE, TILE), "float16", strides=[sb, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    C = T.match_buffer(c, (TILE, TILE), "float16", strides=[sc, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    with T.block("root"):
+        T.reads(C[0:TILE, 0:TILE], A[0:TILE, 0:TILE], B[0:TILE, 0:TILE])
+        T.writes(C[0:TILE, 0:TILE])
+        T.evaluate(T.call_extern("int32", "npu_gemm_acc",
+                                 C.access_ptr("rw"), sc,
+                                 A.access_ptr("r"), sa,
+                                 B.access_ptr("r"), sb))
+
+
+def schedule_matmul_sram(mod, func_name, tile=64):
+    """Tile a legalized matmul and stage its operands into SRAM.
+
+    The DMA that the hand-written backend inserts by hand is expressed here as
+    ``cache_read`` into an SRAM-scoped buffer, placed by ``compute_at`` at the
+    K-tile loop so each tile is staged just before it is consumed.
+    """
+    sch = tir.Schedule(mod)
+    block = sch.get_block("matmul", func_name=func_name)
+    i, j, k = sch.get_loops(block)
+    i_o, i_i = sch.split(i, [None, tile])
+    j_o, j_i = sch.split(j, [None, tile])
+    k_o, k_i = sch.split(k, [None, tile])
+    sch.reorder(i_o, j_o, k_o, i_i, j_i, k_i)
+    write_back = sch.cache_write(block, 0, SRAM_SCOPE)
+    sch.reverse_compute_at(write_back, j_o)
+    for index in (0, 1):
+        stage = sch.cache_read(block, index, SRAM_SCOPE)
+        sch.compute_at(stage, k_o)
+    init = sch.decompose_reduction(block, k_o)
+    sch.tensorize(sch.get_loops(block)[3], "npu_gemm_acc_sram")
+    sch.tensorize(sch.get_loops(init)[2], "npu_fill_zero_sram")
+    return sch.mod
 
 
 def schedule_elementwise(mod, func_name, block_name, intrin):

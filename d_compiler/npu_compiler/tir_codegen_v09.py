@@ -19,7 +19,7 @@ import tvm.tir as tir
 from tvm import arith
 
 from .isa_0818 import DST, IMM, SRC1, SRC2, VECTOR
-from .npu_intrin import VLEN
+from .npu_intrin import SRAM_SCOPE, VLEN
 from .tir_backend import TILE, TirBackendError, _TIR_BINOPS
 
 
@@ -37,11 +37,13 @@ class Walker:
     def __init__(self, asm, bases, stage):
         self.a = asm
         self.bases = dict(bases)
-        self.stage = stage              # _Stager for SRAM residence
+        self.stage = stage              # descriptor/DMA emitter
         self.env = {}                   # tir Var -> int
         self.ana = arith.Analyzer()
-        self.pending = None             # (c, sc, k_index) chain state
+        self.pending = None             # C tile currently accumulating
         self.zeroed = set()
+        self.scopes = {}                # buffer data Var -> "global" | SRAM_SCOPE
+        self.sram = {}                  # buffer data Var -> SRAM nibble base
 
     # ---- index evaluation (ported from tir_backend) ----
 
@@ -76,6 +78,8 @@ class Walker:
                 and access.op.name == "tir.tvm_access_ptr"):
             raise V09TirError(f"expected access_ptr, got {access}")
         data, offset = access.args[1], access.args[2]
+        if data in self.sram:
+            return self.sram[data] + self.ev(offset)
         if data not in self.bases:
             raise V09TirError(f"unknown buffer {data}")
         return self.bases[data] + self.ev(offset)
@@ -136,29 +140,39 @@ class Walker:
         block = realize.block
         if block.match_buffers:
             return False                       # tensorized: handled elsewhere
-        body = block.body
-        if not isinstance(body, tir.BufferStore):
+        if not isinstance(block.body, tir.BufferStore):
             return False
+        # after compute_at the block's iter values are affine in the enclosing
+        # loops, so substitute them away and work in terms of the local loops
+        subst = {iv.var: value for iv, value
+                 in zip(block.iter_vars, realize.iter_values)}
+        body = tir.stmt_functor.substitute(block.body, subst)
+        init = (tir.stmt_functor.substitute(block.init, subst)
+                if block.init is not None else None)
+        reduce_vars = set()
         for iter_var, value in zip(block.iter_vars, realize.iter_values):
-            if not isinstance(value, tir.Var):
-                return False
-            self.env[iter_var.var] = 0
-        spatial = [v.var for v in block.iter_vars if v.iter_type == 0]
-        reduce_axes = [v.var for v in block.iter_vars if v.iter_type == 2]
-        extents = {}
-        for loop, iter_var in zip(loops, block.iter_vars):
-            extents[iter_var.var] = self.ev(loop.extent)
+            if iter_var.iter_type == 2:
+                reduce_vars |= set(tir.analysis.undefined_vars(value))
+        local = [loop.loop_var for loop in loops]
+        extents = {loop.loop_var: self.ev(loop.extent) for loop in loops}
+        spatial = [v for v in local if v not in reduce_vars]
+        reduce_axes = [v for v in local if v in reduce_vars]
+        saved = {v: self.env.get(v) for v in local}
+        for v in local:
+            self.env[v] = 0
         try:
-            if block.init is not None and len(reduce_axes) == 1:
-                self._emit_reduction(body, block.init, spatial, reduce_axes[0],
-                                     extents)
+            if init is not None and len(reduce_axes) == 1:
+                self._emit_reduction(body, init, spatial, reduce_axes[0], extents)
             elif not reduce_axes:
                 self._emit_movement(body, spatial, extents)
             else:
                 return False
         finally:
-            for iter_var in block.iter_vars:
-                self.env.pop(iter_var.var, None)
+            for v, value in saved.items():
+                if value is None:
+                    self.env.pop(v, None)
+                else:
+                    self.env[v] = value
         return True
 
     def _affine(self, expr, axis):
@@ -172,14 +186,17 @@ class Walker:
 
     @staticmethod
     def _flat(buffer, indices, walker):
-        """Absolute element offset of a buffer access, given the current env."""
-        if buffer.data not in walker.bases:
-            raise V09TirError(f"unplaced buffer {buffer.name}")
+        """Absolute address of a buffer access in that space's natural unit:
+        elements for global memory, nibbles for SRAM."""
         shape = [int(d) for d in buffer.shape]
         offset, scale = 0, 1
         for dim, index in reversed(list(zip(shape, indices))):
             offset += walker.ev(index) * scale
             scale *= dim
+        if buffer.data in walker.sram:
+            return walker.sram[buffer.data] + offset * 4
+        if buffer.data not in walker.bases:
+            raise V09TirError(f"unplaced buffer {buffer.name}")
         return walker.bases[buffer.data] + offset
 
     def _outer_positions(self, axes, extents):
@@ -215,7 +232,8 @@ class Walker:
             for var, val in zip(spatial, position):
                 self.env[var] = val
             base, stride = self._affine_flat(source, axis)
-            if stride != 1:
+            unit = 4 if source.buffer.data in self.sram else 1
+            if stride != unit:
                 raise V09TirError(f"reduction needs a contiguous axis, got {stride}")
             dst = self._flat(store.buffer, store.indices, self)
             asm = self.a
@@ -239,6 +257,14 @@ class Walker:
         value = store.value
         if not isinstance(value, tir.BufferLoad):
             raise V09TirError(f"unsupported movement value {type(value)}")
+        dst_space = self._space(store.buffer)
+        src_space = self._space(value.buffer)
+        if dst_space != src_space:
+            # a cache_read / cache_write stage: this is the DMA the hand-written
+            # backend used to insert by hand
+            self._emit_dma(store, value, spatial, extents,
+                           to_sram=dst_space == SRAM_SCOPE)
+            return
         inner = spatial[-1]
         outer = spatial[:-1]
         length = extents[inner]
@@ -248,10 +274,12 @@ class Walker:
                 self.env[var] = val
             src_base, src_stride = self._affine_flat(value, inner)
             dst_base, dst_stride = self._affine_flat_store(store, inner)
-            if dst_stride != 1:
+            src_unit = 4 if value.buffer.data in self.sram else 1
+            dst_unit = 4 if store.buffer.data in self.sram else 1
+            if dst_stride != dst_unit:
                 raise V09TirError(f"movement destination stride {dst_stride}")
             asm = self.a
-            if src_stride == 1:                      # contiguous copy / slice
+            if src_stride == src_unit:               # contiguous copy / slice
                 asm.vlen(length)
                 self.stage.vector(SRC1, src_base)
                 asm.load(0, SRC1)
@@ -263,12 +291,35 @@ class Walker:
                 # non-unit source stride (transpose): the vector load only
                 # reads contiguously, so use the matrix strided load, which
                 # gathers one column, then copy it out as a vector
-                self.stage.strided(SRC1, src_base, src_stride, length)
+                self.stage.strided(SRC1, src_base, src_stride // src_unit, length)
                 asm.load(1, SRC1, strided=1, ncols=1, start=0)
                 asm.vlen(length)
                 asm.v_copy()
             self.stage.vector(DST, dst_base)
             asm.save(0)
+
+    def _emit_dma(self, store, load, spatial, extents, to_sram):
+        """Emit one GLOAD/GSTORE per staged row of a cache block."""
+        inner = spatial[-1]
+        outer = spatial[:-1]
+        length = extents[inner]
+        if not to_sram:
+            # a write-back reads SRAM the accumulator still owns; staging an
+            # input does not touch the PE, so it must not break a MAC chain
+            self.flush()
+        for position in self._outer_positions(outer, extents):
+            for var, val in zip(outer, position):
+                self.env[var] = val
+            src_base, src_stride = self._affine_flat(load, inner)
+            dst_base, dst_stride = self._affine_flat_store(store, inner)
+            src_unit = 4 if load.buffer.data in self.sram else 1
+            dst_unit = 4 if store.buffer.data in self.sram else 1
+            if src_stride != src_unit or dst_stride != dst_unit:
+                raise V09TirError("DMA stage needs contiguous rows")
+            if to_sram:
+                self.stage.dma_in(src_base, dst_base, length)
+            else:
+                self.stage.dma_out(dst_base, src_base, length)
 
     def _affine_flat_store(self, store, axis):
         self.env[axis] = 0
@@ -284,16 +335,22 @@ class Walker:
         its symbolic stride to the parent row width."""
         source, view = match.source, match.buffer
         parent = source.buffer.data
-        if parent not in self.bases:
-            raise V09TirError(f"match_buffer source is not a known buffer: "
-                              f"{source.buffer.name}")
         row, col = source.region[0].min, source.region[1].min
         stride = int(source.buffer.shape[1])
         # a view shares the parent's data pointer; its position is carried by
         # the symbolic elem_offset that access_ptr adds
-        self.bases[view.data] = self.bases[parent]
+        if parent in self.sram:
+            self.sram[view.data] = self.sram[parent]
+            self.scopes[view.data] = self.scopes.get(parent)
+        elif parent in self.bases:
+            self.bases[view.data] = self.bases[parent]
+        else:
+            raise V09TirError(f"match_buffer source is not a known buffer: "
+                              f"{source.buffer.name}")
+        unit = 4 if parent in self.sram else 1
         if isinstance(view.elem_offset, tir.Var):
-            self.env[view.elem_offset] = self.ev(row) * stride + self.ev(col)
+            self.env[view.elem_offset] = (self.ev(row) * stride
+                                          + self.ev(col)) * unit
         for symbol, value in zip(view.strides, (stride, 1)):
             if isinstance(symbol, tir.Var):
                 self.env[symbol] = value
@@ -384,8 +441,66 @@ class Walker:
         self.a.save(1)
         self.pending = None
 
+    def declare_sram(self, buffer, nibble):
+        """Place a cache-stage buffer in SRAM (addresses are nibbles there)."""
+        self.sram[buffer.data] = nibble
+        self.scopes[buffer.data] = SRAM_SCOPE
+
+    def _space(self, buffer):
+        return self.scopes.get(buffer.data, "global")
+
     def run(self, prim_func, buffer_bases):
         self.bases.update(buffer_bases)
         self.visit(prim_func.body)
         self.flush()
         return self.a
+
+
+class SramEmitter:
+    """Descriptor and DMA emission for the SRAM-staged schedule.
+
+    Addresses arrive already in the right unit: SRAM operands as nibbles
+    (the walker converts), global operands as element offsets, which the DMA
+    turns into 32-bit cell addresses.
+    """
+
+    def __init__(self, asm):
+        self.asm = asm
+
+    # -- compute-side descriptors (SRAM nibble addresses)
+
+    def vector(self, operand, nibble):
+        self.asm.addr(operand, nibble, 1)
+
+    def broadcast(self, nibble):
+        self.asm.v_broadcast_addr(nibble)
+
+    def region(self, operand, nibble, stride, rows, cols):
+        self.asm.addr(operand, nibble, 0)
+        self.asm.shape(operand, rows, stride, 0)
+        self.asm.addr(operand, nibble, 1)
+        self.asm.shape(operand, rows, cols, 1)
+
+    def strided(self, operand, nibble, stride, count):
+        self.asm.addr(operand, nibble, 0)
+        self.asm.shape(operand, count, stride, 0)
+        self.asm.addr(operand, nibble, 1)
+        self.asm.shape(operand, count, 1, 1)
+
+    # -- DMA (global element offsets <-> SRAM nibbles)
+
+    def dma_in(self, global_elem, sram_nibble, count):
+        cells, nib = self._cells(global_elem, count, sram_nibble)
+        self.asm.gload(global_elem // 2, cells, nib, 1, cells)
+
+    def dma_out(self, global_elem, sram_nibble, count):
+        cells, nib = self._cells(global_elem, count, sram_nibble)
+        self.asm.gstore(global_elem // 2, cells, nib, 1, cells)
+
+    @staticmethod
+    def _cells(global_elem, count, sram_nibble):
+        if global_elem % 2 or count % 2:
+            raise V09TirError("DMA rows must be cell aligned (even elements)")
+        if sram_nibble % 8:
+            raise V09TirError("DMA SRAM address must be 8-nibble aligned")
+        return count // 2, sram_nibble
