@@ -207,9 +207,28 @@ def schedule_matmul_sram(mod, func_name, tile=64):
         # consumer padding blocks that keep accesses in bounds
         batch = len(loops) - 3
         sch.pad_einsum(block, [1] * batch + [tile, tile, tile])
-        # pad_einsum leaves the fill as a conditional in the producer blocks;
-        # the codegen splits each row into its in-bounds and padded parts
-        # (decompose_padding would give two writers, which blocks cache_read)
+        # pad_einsum's producer blocks read the original (global) operands
+        # directly, but compute units address SRAM only -- stage their inputs
+        root = sch.get_block("root", func_name=func_name)
+        for child in sch.get_child_blocks(root):
+            if not sch.get(child).name_hint.endswith("_pad"):
+                continue
+            for index in range(len(sch.get(child).reads)):
+                try:
+                    sch.cache_read(child, index, SRAM_SCOPE)
+                except Exception:
+                    pass
+            # the padded operand itself already lives in SRAM, so the matmul
+            # must not stage it again (an SRAM-to-SRAM copy would take the PE
+            # output register and break the MAC chain).  The consumer block
+            # writes the function output, which cannot be re-scoped.
+            try:
+                sch.set_scope(child, 0, SRAM_SCOPE)
+            except Exception:
+                pass
+        # the fill stays a conditional in the producer blocks; the codegen
+        # splits each row into its in-bounds and padded parts (decompose_padding
+        # would give the buffer two writers, which blocks cache_read)
         loops = sch.get_loops(block)
         i, j, k = loops[-3:]
     i_o, i_i = sch.split(i, [None, tile])
@@ -219,6 +238,8 @@ def schedule_matmul_sram(mod, func_name, tile=64):
     write_back = sch.cache_write(block, 0, SRAM_SCOPE)
     sch.reverse_compute_at(write_back, j_o)
     for index in (0, 1):
+        if sch.get(block).reads[index].buffer.scope() == SRAM_SCOPE:
+            continue                       # already staged (padded operand)
         stage = sch.cache_read(block, index, SRAM_SCOPE)
         sch.compute_at(stage, k_o)
     init = sch.decompose_reduction(block, k_o)

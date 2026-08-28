@@ -647,13 +647,11 @@ class Walker:
             # same trick the 0710 walker used
             if c not in self.stored:
                 raise V09TirError(f"accumulate into unseen C tile @{c}")
-            if self.stored[c] != TILE:
-                raise V09TirError("cannot reload a strided partial tile")
             self.flush()
-            asm.vlen(TILE * TILE)
-            self.stage.vector(SRC1, c)
-            asm.load(0, SRC1)
-            asm.v_copy()
+            # bring the stored partial back into the PE output register
+            self.stage.region(SRC1, c, self.stored[c], TILE, TILE)
+            asm.load(1, SRC1)
+            asm.m_add(IMM, 0)
             self.pending = (c, sc)
         self.stage.region(SRC1, a, sa, TILE, TILE)
         asm.load(1, SRC1)

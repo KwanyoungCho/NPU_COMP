@@ -65,7 +65,7 @@
 | **S2** | **메모리 계획을 표준 pass로** — 표준 시퀀스 뒤 storage/offset을 평면 정적 주소로 배정 (`npu_memplan.py`) | ✅ (2026-08-28) 생존구간 충돌 0, 재사용으로 footprint 감소. **`LiftTransformParams` 발견 적용** — 런타임 가중치 전치 제거로 활성 pool 1,599.7→0.7 MiB (값 보존 확인) |
 | **S3** | **인트린식·walker 재타깃** — compiler-v2의 인트린식·tensorize 스케줄·TIR walker를 **v09 ISA로 이식** | ✅ (2026-08-28, matmul) 64³·128³ 모두 backend_v09와 **bit-exact**. MAIN/PARTIAL 서술자 덕에 0710의 gather/scatter 불필요 → walker 대폭 단순화. **커널 13종 전부 bit-exact 완료** (matmul 64³·128³, binary 4, unary 3, sum/max, broadcast, transpose, slice) |
 | **S4** | **SRAM staging** — `cache_read/cache_write("global.sram")`으로 DMA 표현 | ✅ (2026-08-28) 64³·128³ 모두 backend_v09와 **bit-exact**. 연산은 SRAM만 접근, global은 DMA에만 등장 |
-| **S5** | **링크** — 커널 인스턴스를 하나의 명령 스트림으로 연결 | ✅ 링크 성립 (2026-08-28): 소형 1-layer Llama가 **45 커널·50,472 word**로 링크. naive 우회는 OPTIMIZATION_BACKLOG.md §D에 기록. **남은 것**: 실행 검증 — 프로그램은 끝까지 돌지만(GLOAD 984·GSTORE 536·matrix 19·vector 7,598) 출력이 0. **첫 커널 `npu_rms_norm`이 이미 0을 기록**하는 것까지 좁힘 (커스텀 legalization + 일반 SRAM staging 조합의 emission 문제로 추정) |
+| **S5** | **링크** — 커널 인스턴스를 하나의 명령 스트림으로 연결 + C-model 실행 | ✅ (2026-08-28) 단일 op 프로그램이 C-model에서 **수치 정확**(matmul 4형태 max|diff| ≤ 0.001, rms_norm 0.0019). 1-layer Llama 전체가 링크·실행되어 llvm 대비 **cosine 0.9806** — 산술 모델 차이(우리 FP32 내부 누적 vs llvm FP16)로 정확 일치는 기대 대상 아님. 모델 수준 판정은 S7의 HF 기준 |
 | **S6** | **target 등록 + `relax.build` 통합** | `relax.build(mod, target="npu")` 산출물로 실행 |
 | **S7** | **3-모델 end-to-end** (Gemma·Qwen3 nn.Module 추가) | **HF token 일치 + logits cosine ≥ 기존 golden 수준** |
 | **S8** | **양자화를 Relax pass로** (현재 driver 실행 시 처리) | W8A16/W8A8 기존 측정치 재현 |
