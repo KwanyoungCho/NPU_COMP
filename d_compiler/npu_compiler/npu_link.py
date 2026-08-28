@@ -159,3 +159,54 @@ def compile_program(mod, func_name="prefill"):
     asm.halt()
     asm.kernel_count = kernels
     return asm, plan
+
+
+def build_image(plan, func, values):
+    """Assemble the initial global memory image the program expects.
+
+    ``values`` maps parameter name -> array, in the planned function's own
+    parameter names (after LiftTransformParams these are the transformed
+    weights, not the checkpoint tensors).
+    """
+    import numpy as np
+
+    image = np.zeros(plan.top, dtype="<f2")
+    raw = image.view(np.uint8)
+
+    def place(address, array):
+        data = np.ascontiguousarray(array).view(np.uint8).reshape(-1)
+        start = address * 2
+        raw[start:start + data.size] = data
+
+    for param in func.params:
+        name = param.name_hint
+        if name not in values:
+            raise LinkError(f"missing value for parameter {name}")
+        place(plan.address[name], values[name])
+    for address, array in plan.const_data:
+        place(address, array)
+    if getattr(plan, "constant_values", None):
+        place(plan.constant_base,
+              np.asarray(plan.constant_values, dtype="<f2"))
+    return image
+
+
+def output_var(func):
+    body = func.body
+    return body.body.name_hint if hasattr(body.body, "name_hint") else None
+
+
+def run_program(asm, plan, func, values, output_shape):
+    """Execute a linked program on the v09 C-model and return its output."""
+    import numpy as np
+
+    from .v09_runtime import run as run_v09
+
+    image = build_image(plan, func, values)
+    if image.size % 2:
+        image = np.concatenate([image, np.zeros(1, dtype="<f2")])
+    images, counters = run_v09(asm.words, image.view("<u4"))
+    final = np.ascontiguousarray(images[-1]).view("<f2")
+    address = plan.address[output_var(func)]
+    count = int(np.prod(output_shape))
+    return final[address:address + count].reshape(output_shape), counters
