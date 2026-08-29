@@ -101,6 +101,29 @@ def _sram_layout(prim, cursor=0):
     return placement, cursor
 
 
+def _scratch_row(prim):
+    """Longest row an expression temporary in this kernel may have to hold.
+
+    ``_materialize`` serializes an expression over a whole row at a time, so a
+    slot has to be at least as wide as the widest row the kernel touches.  A
+    fixed size silently corrupted the neighbouring slot for anything wider --
+    Qwen3's 9728-wide FFN against 8192-element slots, where Llama's 8192-wide
+    one happened to fit exactly.
+    """
+    widest = 1
+    buffers = list(prim.buffer_map.values())
+
+    def visit(node):
+        if isinstance(node, tir.Block):
+            buffers.extend(node.alloc_buffers)
+
+    tir.stmt_functor.post_order_visit(prim.body, visit)
+    for buffer in buffers:
+        if len(buffer.shape):
+            widest = max(widest, int(buffer.shape[-1]))
+    return widest
+
+
 def _collect_constants(prim):
     """Scalar literals a pointwise block needs materialized in memory."""
     values = set()
@@ -116,10 +139,15 @@ def _collect_constants(prim):
     return values
 
 
-def compile_program(mod, func_name="prefill"):
+def compile_program(mod, func_name="prefill", snapshot_at=None):
     """Lowered IRModule -> (assembler, StaticPlan).
 
     ``mod`` must already have gone through the graph pipeline with fusion off.
+
+    ``snapshot_at`` is a set of kernel indices after which to emit SNAPSHOT.
+    Each one appends the whole memory image at that point, which is how a
+    divergence is traced back to the kernel that caused it; the captured
+    outputs are listed in ``plan.snapshots`` as (index, var name, struct info).
     """
     planned, plan = npu_memplan.assign_addresses(mod, func_name)
 
@@ -142,13 +170,10 @@ def compile_program(mod, func_name="prefill"):
         emitter.dma_in(plan.constant_base, const_nib, len(constants))
     const_addr = {value: const_nib + index * 4
                   for index, value in enumerate(constants)}
-    # temporaries for serializing expression trees into vector steps
-    scratch_elems = 8192
+    # temporaries for serializing expression trees into vector steps; each
+    # kernel gets slots wide enough for its own longest row (see _scratch_row)
     slot_count = 6
     scratch_base = (len(constants) * 4 + 7) // 8 * 8
-    scratch_slots = tuple(scratch_base + i * scratch_elems * 4
-                          for i in range(slot_count))
-    sram_start = scratch_base + slot_count * scratch_elems * 4
     kernels = 0
     for block in planned[func_name].body.blocks:
         for binding in block.bindings:
@@ -176,6 +201,10 @@ def compile_program(mod, func_name="prefill"):
                 if arg.name_hint not in plan.address:
                     raise LinkError(f"{call.op.name_hint}: unplaced {arg.name_hint}")
                 addresses.append(plan.address[arg.name_hint])
+            scratch_elems = _scratch_row(scheduled)
+            scratch_slots = tuple(scratch_base + index * scratch_elems * 4
+                                  for index in range(slot_count))
+            sram_start = scratch_base + slot_count * scratch_elems * 4
             walker = Walker(asm, {}, emitter)
             walker.constants = const_addr
             walker.scratch_slots = scratch_slots
@@ -184,6 +213,12 @@ def compile_program(mod, func_name="prefill"):
             for buffer, nibble in _sram_layout(scheduled, sram_start)[0].items():
                 walker.declare_sram(buffer, nibble)
             walker.run(scheduled, {})
+            if snapshot_at is not None and kernels in snapshot_at:
+                asm.snapshot()
+                target = call.args[-1]
+                plan.snapshots.append(
+                    (kernels, getattr(target, "name_hint", None),
+                     target.struct_info))
             kernels += 1
     asm.halt()
     asm.kernel_count = kernels

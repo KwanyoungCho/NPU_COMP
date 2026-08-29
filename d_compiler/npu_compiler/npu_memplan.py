@@ -71,6 +71,7 @@ class StaticPlan:
         self.tuples = {}        # tuple var name -> member var names
         self.const_data = []    # (address, numpy array) the host must write
         self.top = 0            # total size in `unit_bytes` units
+        self.snapshots = []     # (kernel index, var name, struct info) captured
 
     def _alloc(self, nbytes):
         # round every allocation up to a whole 32-bit cell so DMA, which moves

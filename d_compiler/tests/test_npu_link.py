@@ -189,6 +189,23 @@ def test_odd_row_lengths_transfer_correctly():
           f"max|diff|={error:.5f} ({words:,} words)")
 
 
+def test_rows_wider_than_a_scratch_slot():
+    """An expression is serialized a whole row at a time, so a row wider than
+    one temporary slot used to run into the next one.  8192 fit exactly, which
+    is why Llama's FFN never showed it and Qwen3's 9728-wide one did."""
+    rng = np.random.default_rng(0)
+    for width in (8192, 8193, 9728):
+        # centred negative so sigmoid's exp(-x) reaches the top of fp16 range,
+        # where a corrupted temporary turns into inf rather than a small error
+        x = rng.normal(-3.0, 4.0, (4, width)).astype(np.float16)
+        got, _, _ = _run([x.shape], relax.op.nn.silu, [x], x.shape)
+        ref = x.astype(np.float32) / (1 + np.exp(-x.astype(np.float32)))
+        assert np.isfinite(got.astype(np.float32)).all(), width
+        error = float(np.abs(got.astype(np.float32) - ref).max())
+        assert error < 0.02, (width, error)
+        print(f"  [PASS] silu row of {width:5d} max|diff|={error:.5f}")
+
+
 def test_whole_layer_matches_the_cpu_build():
     """A one-layer model, linked and run on the C-model, against the llvm build
     of the same lowered module."""
@@ -238,5 +255,6 @@ if __name__ == "__main__":
     test_padded_matmul_stages_its_inputs()
     test_tile_staging_uses_one_2d_transfer()
     test_odd_row_lengths_transfer_correctly()
+    test_rows_wider_than_a_scratch_slot()
     test_whole_layer_matches_the_cpu_build()
     print("ALL NPU LINK (S5) TESTS PASSED")
