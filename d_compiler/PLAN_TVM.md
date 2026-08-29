@@ -74,7 +74,7 @@ cosine 1.000000 / max|diff| 0.00008, llvm이 0.999965 / 0.00260이었고
 | **S4** | **SRAM staging** — `cache_read/cache_write("global.sram")`으로 DMA 표현 | ✅ (2026-08-28) 64³·128³ 모두 backend_v09와 **bit-exact**. 연산은 SRAM만 접근, global은 DMA에만 등장 |
 | **S5** | **링크** — 커널 인스턴스를 하나의 명령 스트림으로 연결 + C-model 실행 | ✅ (2026-08-28) 1-layer Llama가 C-model에서 llvm 빌드 대비 **cosine 0.999999, argmax 일치**. 층에 쓰이는 연산 13종 + matmul 4형태 전부 numpy와 일치. **실모델 차원(3B: hidden 3072 / ffn 8192 / head 24·8×128, seq 7)도 링크 성공 — 1,032,615 word, 45 kernel, image 194.4 MiB, 498초** (백로그 C5·C6 해소 후) |
 | **S6** | **target 등록 + `relax.build` 통합** | `relax.build(mod, target="npu")` 산출물로 실행 |
-| **S7** | **3-모델 end-to-end** (Gemma·Qwen3 nn.Module 추가) | 🟡 (2026-08-28) **Llama 3.2 3B 전체 28층이 C-model에서 golden token 358 일치** — 31,222,473 word · 1,206 kernel · image 6,130 MiB, 링크 10,268초, 실행 462초, 실행된 word 28,793,514. Qwen3 nn.Module 추가 완료(1층 C-model에서 float32 대비 cosine 1.000000), 전체 깊이 게이트는 대기. Gemma 미착수 |
+| **S7** | **3-모델 end-to-end** (Gemma·Qwen3 nn.Module 추가) | 🟡 (2026-08-29) **Llama 3.2 3B 28층**: C-model에서 golden token 358 일치 — 31,222,473 word · 1,206 kernel · image 6,130 MiB, 링크 10,268초, 실행 462초. **Qwen3-4B 36층**: C-model에서 golden token 358 일치 — 42,899,225 word · 1,622 kernel · image 7,675 MiB, 링크 8,589초, 실행 505초. Gemma 미착수 |
 | **S8** | **양자화를 Relax pass로** (현재 driver 실행 시 처리) | W8A16/W8A8 기존 측정치 재현 |
 
 **S0~S1은 NPU와 무관하게 CPU에서 검증**되므로 리스크가 낮고, 여기서 프론트엔드
