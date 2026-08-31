@@ -132,20 +132,25 @@
 | 커널 로컬 임시 | 전부 SRAM에 bump 할당 | 생존구간 기반 재사용 |
 | 표현식 임시 슬롯 폭 | 커널이 다루는 **가장 긴 행**으로 슬롯 6개를 잡는다 (`_scratch_row`) | 실제 `_materialize` 최대 길이만 계산해 더 좁게 |
 
-## F. S8 양자화 codegen (2026-08-31 시점 남은 작업)
+## F. S8 양자화 codegen — **해결됨 (2026-08-31)**
 
-그래프 pass(`npu_quantize.QuantizeWeightsW8A16`)는 동작한다. NPU에서 돌리려면:
+세 가지 차단 항목이 모두 풀렸고 방식이 예상과 조금 달랐다:
 
-1. **스케줄** — `qmatmul`은 리덕션 뒤에 dequant(`* scale[n]`) 블록이 하나 더 붙는다.
-   `schedule_matmul_sram`이 `cache_write` 대상 블록을 못 찾아
-   `BlockNode write buffers do not match`로 실패한다. unpad와 같은 방식으로
-   `reverse_compute_at` 하면 될 가능성이 높다
-2. **혼재 폭 SRAM** — `_flat`/staging이 **원소당 4 nibble**을 가정한다.
-   INT8은 2, FP32(scale 벡터)는 8이 필요하다. 버퍼별 폭을 dtype에서 받아
-   주소 계산·`_sram_layout` 크기·DMA 원소↔셀 환산에 반영해야 한다
-   (`npu_memplan`도 원소당 2바이트를 가정한다)
-3. **서술자** — 가중치 피연산자에 `dtype=INT8`, 열 타일마다 `wscale(...)` 발행.
-   oracle(`backend_v09`)에 검증된 구현이 있으니 그대로 옮기면 된다
+1. **스케줄** — dequant를 matmul 뒤가 아니라 **앞**으로 옮겼다: weight를 SRAM에서
+   FP16으로 풀고(VDEQUANT + scale row 곱) 검증된 FP16 gemm을 그대로 쓴다.
+   `schedule_matmul_sram`의 producer 처리(pad 블록용)를 일반화해서 `w_dequant`도
+   같은 취급을 받는다 → 스케줄 수정 자체가 거의 없었다
+2. **혼재 폭 SRAM** — 전역 주소를 **byte 단위**로 통일했다(DMA만 전역 주소를
+   소비하므로 안전). SRAM은 버퍼별 nibble 폭(fp16=4, int8=2, fp32=8).
+   부산물: byte 단위 병합이 더 잘 되어 홀수 행 테스트가 5,057→3,474 word
+3. **서술자** — wscale 불필요(위 방식이라서). VDEQUANT는 SRC1에 dtype=INT8을
+   싣고 fp32 상수 1.0을 ascale로 가리켜 **순수 변환**으로 쓰고, per-channel
+   scale은 뒤따르는 벡터곱이 적용한다. 변환 후 dtype을 FP16으로 복원(sticky)
+
+**주의해서 남겨두는 것**: `w_dequant` 버퍼는 지금 weight 전체 크기로 SRAM에
+잡힌다(타일 규모에서만 안전). 실모델 양자화 실행은 `w_dequant`를 타일 루프로
+`compute_at` 해야 한다 — B1(weight 재적재)과 같은 성질의 문제
+(테스트: tests/test_npu_quantize.py의 c-model 케이스 2종)
 
 ## E. 참고: "표준 TVM으로 안 되는 것"의 정확한 구분
 

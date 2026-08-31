@@ -202,23 +202,40 @@ def schedule_matmul_sram(mod, func_name, tile=64):
     i, j, k = loops[-3:]
     extents = [int(sch.get(loop).extent) for loop in (i, j, k)]
     unpad = None
+    output = sch.get(block).writes[0].buffer
+    # a producer block ahead of the matmul (pad_einsum's fills, or the
+    # w_dequant of a quantized weight) computes in SRAM: stage its inputs and
+    # re-scope its output, and the matmul then reads that operand in place
+    root = sch.get_block("root", func_name=func_name)
+    for child in sch.get_child_blocks(root):
+        info = sch.get(child)
+        if info.name_hint == "matmul" or info.writes[0].buffer.same_as(output):
+            continue
+        for index in range(len(info.reads)):
+            try:
+                sch.cache_read(child, index, SRAM_SCOPE)
+            except Exception:
+                pass
+        try:
+            sch.set_scope(child, 0, SRAM_SCOPE)
+        except Exception:
+            pass
     if any(extent % tile for extent in extents):
-        output = sch.get(block).writes[0].buffer
         # pad_einsum is the standard primitive for exactly this: grow the
         # iteration domain to the intrinsic's factor and insert the producer /
         # consumer padding blocks that keep accesses in bounds
         batch = len(loops) - 3
         sch.pad_einsum(block, [1] * batch + [tile, tile, tile])
-        # pad_einsum's producer blocks read the original (global) operands
-        # directly, but compute units address SRAM only -- stage their inputs
-        root = sch.get_block("root", func_name=func_name)
+        # pad_einsum has just added its own producer and consumer blocks; the
+        # producers get the same staging treatment as above
         for child in sch.get_child_blocks(root):
-            if sch.get(child).writes[0].buffer.same_as(output):
+            info = sch.get(child)
+            if info.writes[0].buffer.same_as(output):
                 unpad = child          # copies the padded result back out
                 continue
-            if not sch.get(child).name_hint.endswith("_pad"):
+            if not info.name_hint.endswith("_pad"):
                 continue
-            for index in range(len(sch.get(child).reads)):
+            for index in range(len(info.reads)):
                 try:
                     sch.cache_read(child, index, SRAM_SCOPE)
                 except Exception:

@@ -41,22 +41,25 @@ class _SramView:
     def __init__(self, asm, stager, bases):
         self.asm = asm
         self.stager = stager
-        self.nib = bases          # element offset -> SRAM nibble of that tensor base
+        # the walker addresses global memory in BYTES; tensor bases arrive as
+        # fp16 element offsets, so owners are keyed by their byte offset
+        self.nib = {elem * 2: (nib, size * 2)
+                    for elem, (nib, size) in bases.items()}
 
     def vector(self, operand, elem_off):
         """Address a contiguous vector run (no shape words needed)."""
         base_elem, base_nib = self._owner(elem_off)
-        self.asm.addr(operand, base_nib + (elem_off - base_elem) * 4, 1)
+        self.asm.addr(operand, base_nib + (elem_off - base_elem) * 2, 1)
 
     def broadcast(self, elem_off):
         base_elem, base_nib = self._owner(elem_off)
-        self.asm.v_broadcast_addr(base_nib + (elem_off - base_elem) * 4)
+        self.asm.v_broadcast_addr(base_nib + (elem_off - base_elem) * 2)
 
     def strided(self, operand, elem_off, stride, count):
         """A column of `count` elements spaced `stride` apart: MAIN carries the
         row width, PARTIAL selects a single column."""
         base_elem, base_nib = self._owner(elem_off)
-        nib = base_nib + (elem_off - base_elem) * 4
+        nib = base_nib + (elem_off - base_elem) * 2
         self.asm.addr(operand, nib, 0)
         self.asm.shape(operand, count, stride, 0)
         self.asm.addr(operand, nib, 1)
@@ -64,8 +67,8 @@ class _SramView:
 
     def region(self, operand, elem_off, stride, rows, cols):
         base_elem, base_nib = self._owner(elem_off)
-        nib = base_nib + (elem_off - base_elem) * 4
-        self.asm.addr(operand, nib - (elem_off - base_elem) * 4, 0)
+        nib = base_nib + (elem_off - base_elem) * 2
+        self.asm.addr(operand, nib - (elem_off - base_elem) * 2, 0)
         self.asm.shape(operand, rows, stride, 0)
         self.asm.addr(operand, nib, 1)
         self.asm.shape(operand, rows, cols, 1)

@@ -48,24 +48,36 @@ def _quantize_te(weight, scale):
         name="w_quant")
 
 
-def _qmatmul_te(x, weight, scale):
-    """FP16 [M, K] against INT8 [K, N] with FP32 [N] scales -> FP16 [M, N].
+def _scale16_te(scale):
+    """FP32 [N] -> FP16 [N], the dequant multiplier the device keeps."""
+    return te.compute(scale.shape, lambda j: scale[j].astype("float16"),
+                      name="w_scale16")
 
-    The scale multiplies the accumulated sum, which is where the machine
-    applies it -- as each K-tile's product enters the FP32 accumulator.  It is
-    constant along K, so the two orders agree.
+
+def _qmatmul_te(x, weight, scale16):
+    """FP16 [M, K] against INT8 [K, N] with FP16 [N] scales -> FP16 [M, N].
+
+    The weight is dequantized to FP16 rows first and the matmul is the
+    ordinary FP16 one -- which is what the machine does: VDEQUANT expands an
+    INT8 row, one vector multiply applies the per-channel scale, and the
+    validated FP16 gemm chain runs unchanged.  Both steps live in this one
+    PrimFunc so LiftTransformParams cannot hoist the dequant and put an FP16
+    weight back in global memory, which would undo the halved DMA traffic.
     """
     m = x.shape[0]
     k = te.reduce_axis((0, x.shape[1]), name="k")
     n = weight.shape[1]
-    product = te.compute(
+    dequantized = te.compute(
+        weight.shape,
+        lambda i, j: weight[i, j].astype("float16") * scale16[j],
+        name="w_dequant")
+    # written like the standard FP16 matmul lowering -- fp16 accumulation in
+    # the TIR -- so the existing tensorized schedule applies; the machine's
+    # gemm supplies the FP32 internal accumulation either way
+    return te.compute(
         (m, n),
-        lambda i, j: te.sum(x[i, k].astype("float32")
-                            * weight[k, j].astype("float32"), axis=k),
+        lambda i, j: te.sum(x[i, k] * dequantized[k, j], axis=k),
         name="matmul")
-    return te.compute((m, n),
-                      lambda i, j: (product[i, j] * scale[j]).astype(x.dtype),
-                      name="dequant")
 
 
 def _weight_source(value, lookup, weights):
@@ -143,8 +155,10 @@ class _Quantizer(PyExprMutator):
         quantized = block.emit(
             block.call_te(_quantize_te, right, scale,
                           primfunc_name_hint="npu_w_quantize"))
+        scale16 = block.emit(
+            block.call_te(_scale16_te, scale, primfunc_name_hint="npu_w_scale16"))
         self.count += 1
-        return block.call_te(_qmatmul_te, left, quantized, scale,
+        return block.call_te(_qmatmul_te, left, quantized, scale16,
                              primfunc_name_hint="npu_qmatmul")
 
 
@@ -183,5 +197,8 @@ def reference_w8a16(x, weight):
     w = np.asarray(weight, np.float16).astype(np.float32)
     scale = np.maximum(np.abs(w).max(axis=0), TINY) / INT8_MAX
     quantized = np.clip(np.rint(w / scale[None, :]), -INT8_MAX, INT8_MAX)
-    product = np.asarray(x, np.float16).astype(np.float32) @ quantized
-    return (product * scale[None, :]).astype(np.float16)
+    dequantized = (quantized * scale[None, :].astype(np.float16)
+                   .astype(np.float32)).astype(np.float16)
+    product = (np.asarray(x, np.float16).astype(np.float32)
+               @ dequantized.astype(np.float32))
+    return product.astype(np.float16)

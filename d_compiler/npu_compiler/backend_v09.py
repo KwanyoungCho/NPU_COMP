@@ -30,8 +30,8 @@ from .backend_0818 import CodegenError, _numel, _opname, plan
 from .isa_0818 import ACT_GELU, ACT_SILU, DST, IMM, SRC1, SRC2, VECTOR, Asm
 from .isa_v09 import (
     DT_FP16, DT_FP32, DT_INT8, SRAM_NIBBLES, enc_ascale, enc_gload,
-    enc_gstore, enc_halt, enc_mcols, enc_mrows, enc_snapshot, enc_vquant,
-    enc_wscale)
+    enc_gstore, enc_halt, enc_mcols, enc_mrows, enc_snapshot, enc_vdequant,
+    enc_vquant, enc_wscale)
 from .quantize import packed_layout
 
 VLEN = 0xFFFF          # full 16-bit vlen; the 256-lane datapath strip-mines
@@ -75,6 +75,9 @@ class V09Asm(Asm):
 
     def vquant(self):
         return self._emit(enc_vquant())
+
+    def vdequant(self):
+        return self._emit(enc_vdequant())
 
 
 class _Stager:

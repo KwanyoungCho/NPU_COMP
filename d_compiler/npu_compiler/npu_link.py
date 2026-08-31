@@ -88,6 +88,7 @@ def _sram_layout(prim, cursor=0, capacity=None):
                     buffers.append(buffer)
 
     tir.stmt_functor.post_order_visit(prim.body, visit)
+    widths = {"float16": 4, "int8": 2, "float32": 8}
     for buffer in buffers:
         # every kernel-local temporary lives in SRAM: compute units cannot
         # address global memory, so a buffer allocated inside a kernel has
@@ -96,7 +97,7 @@ def _sram_layout(prim, cursor=0, capacity=None):
         for dim in buffer.shape:
             size *= int(dim)
         placement[buffer] = cursor
-        cursor += size * 4
+        cursor += size * widths[str(buffer.dtype)]
         cursor = (cursor + 7) // 8 * 8
         if capacity is not None and cursor > capacity:
             raise LinkError("kernel exceeds SRAM capacity")
@@ -159,10 +160,20 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
     planned, plan = npu_memplan.assign_addresses(mod, func_name)
 
     # scalar literals used by pointwise kernels live in a small pool that the
-    # host fills; the program stages it into SRAM once, before any kernel
+    # host fills; the program stages it into SRAM once, before any kernel.
+    # Only kernels the device function actually calls contribute -- lifted
+    # parameter transforms run on the host and their literals (reduce
+    # identities among them) may not even fit FP16.
+    called = set()
+    for block in planned[func_name].body.blocks:
+        for binding in block.bindings:
+            value = binding.value
+            if isinstance(value, relax.Call) and isinstance(
+                    value.op, relax.GlobalVar):
+                called.add(value.op)
     constants = sorted(set().union(*[
-        _collect_constants(fn) for _, fn in planned.functions.items()
-        if isinstance(fn, tir.PrimFunc)] or [set()]))
+        _collect_constants(planned[gv]) for gv in called
+        if isinstance(planned[gv], tir.PrimFunc)] or [set()]))
     # rsqrt and tanh need literal 1 and 2 whether or not the TIR mentions them
     constants = sorted(set(constants) | {1.0, 2.0})
     if len(constants) % 2:
@@ -171,17 +182,22 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
     plan.constant_base = plan.top
     plan.top += len(constants)
 
+    # one fp32 literal 1.0 rides just after the fp16 pool: VDEQUANT's scale
+    # read is fp32, and pointing it at 1.0 makes the conversion pure
+    plan.one_fp32_base = plan.top
+    plan.top += 2
     asm = V09Asm()
     emitter = SramEmitter(asm)
     const_nib = 0
-    if constants:
-        emitter.dma_in(plan.constant_base, const_nib, len(constants))
+    pool_bytes = len(constants) * 2 + 4
+    emitter.dma_in(plan.constant_base * 2, const_nib, pool_bytes)
     const_addr = {value: const_nib + index * 4
                   for index, value in enumerate(constants)}
+    one_fp32_nib = len(constants) * 4
     # temporaries for serializing expression trees into vector steps; each
     # kernel gets slots wide enough for its own longest row (see _scratch_row)
     slot_count = profile.scratch_slots
-    scratch_base = (len(constants) * 4 + 7) // 8 * 8
+    scratch_base = (len(constants) * 4 + 8 + 7) // 8 * 8
     kernels = 0
     for block in planned[func_name].body.blocks:
         for binding in block.bindings:
@@ -215,9 +231,14 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
             sram_start = scratch_base + slot_count * scratch_elems * 4
             walker = Walker(asm, {}, emitter)
             walker.constants = const_addr
+            walker.one_fp32 = one_fp32_nib
             walker.scratch_slots = scratch_slots
-            for buffer, address in zip(scheduled.buffer_map.values(), addresses):
+            # bind by parameter order -- buffer_map is a map, and its
+            # iteration order is not the signature's
+            for param, address in zip(scheduled.params, addresses):
+                buffer = scheduled.buffer_map[param]
                 walker.bases[buffer.data] = address
+                walker.dtypes[buffer.data] = str(buffer.dtype)
             for buffer, nibble in _sram_layout(
                     scheduled, sram_start, profile.sram_nibbles)[0].items():
                 walker.declare_sram(buffer, nibble)
@@ -263,6 +284,8 @@ def build_image(plan, func, values):
     if getattr(plan, "constant_values", None):
         place(plan.constant_base,
               np.asarray(plan.constant_values, dtype="<f2"))
+    if getattr(plan, "one_fp32_base", None) is not None:
+        place(plan.one_fp32_base, np.asarray([1.0], dtype="<f4"))
     return image
 
 

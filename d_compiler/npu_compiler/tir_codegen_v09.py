@@ -19,6 +19,7 @@ import tvm.tir as tir
 from tvm import arith
 
 from .isa_0818 import DST, IMM, SRC1, SRC2, VECTOR
+from .isa_v09 import DT_FP16, DT_INT8
 from .npu_intrin import SRAM_SCOPE, VLEN
 from .tir_backend import TILE, TirBackendError, _TIR_BINOPS
 
@@ -59,9 +60,22 @@ class Walker:
         self.depth = 0
         self.inner_base = 0             # offset applied to the innermost axis
         self._match_plans = {}          # match_buffer node -> what it binds
+        self.dtypes = {}                # buffer data Var -> dtype string
+        self.one_fp32 = None            # SRAM nibble of a literal fp32 1.0
         self.stored = {}                # C tile address -> stride, once stored
 
     # ---- index evaluation (ported from tir_backend) ----
+
+    _SRAM_WIDTH = {"float16": 4, "int8": 2, "float32": 8, "int4": 1}
+    _ITEMSIZE = {"float16": 2, "int8": 1, "float32": 4, "int4": 1}
+
+    def width(self, data):
+        """SRAM nibbles per element of the buffer behind ``data``."""
+        return self._SRAM_WIDTH[self.dtypes.get(data, "float16")]
+
+    def itemsize(self, data):
+        """Bytes per element in global memory."""
+        return self._ITEMSIZE[self.dtypes.get(data, "float16")]
 
     def ev(self, expr):
         value = self._ev_fast(expr)
@@ -98,7 +112,9 @@ class Walker:
             return self.sram[data] + self.ev(offset)
         if data not in self.bases:
             raise V09TirError(f"unknown buffer {data}")
-        return self.bases[data] + self.ev(offset)
+        # bytes, like every other global address (only the S3-scope harness
+        # ever reaches this branch -- staged kernels compute out of SRAM)
+        return self.bases[data] * 2 + self.ev(offset) * self.itemsize(data)
 
     # ---- statement walk ----
 
@@ -232,10 +248,13 @@ class Walker:
             offset += walker.ev(index) * scale
             scale *= dim
         if buffer.data in walker.sram:
-            return walker.sram[buffer.data] + offset * 4
+            return walker.sram[buffer.data] + offset * walker.width(buffer.data)
         if buffer.data not in walker.bases:
             raise V09TirError(f"unplaced buffer {buffer.name}")
-        return walker.bases[buffer.data] + offset
+        # global addresses are byte-based: the DMA is their only consumer, and
+        # bytes are the one unit int8, fp16 and fp32 tensors share
+        return walker.bases[buffer.data] * 2 \
+            + offset * walker.itemsize(buffer.data)
 
     def _outer_positions(self, axes, extents):
         """Iterate concrete values for every axis except the innermost."""
@@ -277,7 +296,9 @@ class Walker:
             asm = self.a
             if isinstance(summand, tir.BufferLoad):
                 base, stride = self._affine_flat(summand, axis)
-                unit = 4 if summand.buffer.data in self.sram else 1
+                data = summand.buffer.data
+                unit = (self.width(data) if data in self.sram
+                        else self.itemsize(data))
                 if stride != unit:
                     raise V09TirError(
                         f"reduction needs a contiguous axis, got {stride}")
@@ -440,7 +461,9 @@ class Walker:
         asm = self.a
         if isinstance(expr, tir.BufferLoad):
             base, stride = self._affine_flat(expr, inner)
-            unit = 4 if expr.buffer.data in self.sram else 1
+            data = expr.buffer.data
+            unit = (self.width(data) if data in self.sram
+                    else self.itemsize(data))
             if stride == 0:
                 # a per-row scalar (e.g. the reciprocal norm): broadcast it
                 target = into if into is not None else self._slot()
@@ -486,6 +509,8 @@ class Walker:
             self.stage.vector(DST, target)
             asm.save(0)
             return target
+        if isinstance(expr, tir.Cast):
+            return self._cast(expr, inner, length, into)
         if isinstance(expr, tir.Call):
             name = expr.op.name if hasattr(expr.op, "name") else str(expr.op)
             call = self._CALLS.get(name)
@@ -549,6 +574,36 @@ class Walker:
         asm.v_div(VECTOR)
         self.stage.vector(DST, target)
         asm.save(0)
+        return target
+
+    def _cast(self, expr, inner, length, into):
+        """int8 -> float16 via VDEQUANT; anything else has no instruction."""
+        source = expr.value
+        if not (expr.dtype == "float16" and isinstance(source, tir.BufferLoad)
+                and source.buffer.dtype == "int8"):
+            raise V09TirError(f"unsupported cast {source} -> {expr.dtype}")
+        base, stride = self._affine_flat(source, inner)
+        if stride != self.width(source.buffer.data):
+            raise V09TirError(f"vdequant needs a contiguous int8 row, "
+                              f"got stride {stride}")
+        if self.one_fp32 is None:
+            raise V09TirError("no fp32 1.0 was staged for vdequant")
+        asm = self.a
+        target = into if into is not None else self._slot()
+        asm.vlen(length)
+        # VDEQUANT reads SRC1's partial address with the descriptor dtype and
+        # multiplies by the one scalar at the activation-scale address; a
+        # literal 1.0 there leaves the conversion pure, and the per-channel
+        # scale is applied by the vector multiply that follows in the TIR
+        asm.addr(SRC1, base, 1)
+        asm.shape_dt(SRC1, 1, length, 1, DT_INT8)
+        asm.ascale(self.one_fp32)
+        asm.vdequant()
+        self.stage.vector(DST, target)
+        asm.save(0)
+        # the INT8 dtype is sticky descriptor state: restore FP16 so the next
+        # consumer of SRC1 is not misread
+        asm.shape_dt(SRC1, 1, length, 1, DT_FP16)
         return target
 
     def _tanh(self, expr, inner, length, into):
@@ -654,8 +709,12 @@ class Walker:
         self.flush()
         source = self._addresser(value, inner, outer)
         target = self._addresser(store, inner, outer, store=True)
-        src_unit = 4 if value.buffer.data in self.sram else 1
-        dst_unit = 4 if store.buffer.data in self.sram else 1
+        src_unit = (self.width(value.buffer.data)
+                    if value.buffer.data in self.sram
+                    else self.itemsize(value.buffer.data))
+        dst_unit = (self.width(store.buffer.data)
+                    if store.buffer.data in self.sram
+                    else self.itemsize(store.buffer.data))
         for position in self._outer_positions(outer, extents):
             src_base, src_stride = source(position)
             dst_base, dst_stride = target(position)
@@ -699,8 +758,13 @@ class Walker:
             self.flush()
         source = self._addresser(load, inner, outer)
         target = self._addresser(store, inner, outer, store=True)
-        src_unit = 4 if load.buffer.data in self.sram else 1
-        dst_unit = 4 if store.buffer.data in self.sram else 1
+        # DMA: the global side counts bytes, the SRAM side counts nibbles
+        src_unit = (self.width(load.buffer.data)
+                    if load.buffer.data in self.sram
+                    else self.itemsize(load.buffer.data))
+        dst_unit = (self.width(store.buffer.data)
+                    if store.buffer.data in self.sram
+                    else self.itemsize(store.buffer.data))
         segments = []
         for position in self._outer_positions(outer, extents):
             src_base, src_stride = source(position)
@@ -709,11 +773,15 @@ class Walker:
                 raise V09TirError("DMA stage needs contiguous rows")
             glob, sram = ((src_base, dst_base) if to_sram
                           else (dst_base, src_base))
+            data = (load if to_sram else store).buffer.data
+            nbytes = length * self.itemsize(data)
+            # segment lengths are bytes; every dtype packs SRAM at two nibbles
+            # per byte, so the SRAM side advances at exactly twice the bytes
             if segments and glob == segments[-1][0] + segments[-1][2] \
-                    and sram == segments[-1][1] + segments[-1][2] * 4:
-                segments[-1][2] += length     # one contiguous run on both sides
+                    and sram == segments[-1][1] + segments[-1][2] * 2:
+                segments[-1][2] += nbytes     # one contiguous run on both sides
             else:
-                segments.append([glob, sram, length])
+                segments.append([glob, sram, nbytes])
         self._emit_segments(segments, to_sram)
 
     def _compile(self, expr):
@@ -764,9 +832,9 @@ class Walker:
             return None, False
         data = buffer.data
         if data in self.sram:
-            base, unit = self.sram[data], 4
+            base, unit = self.sram[data], self.width(data)
         elif data in self.bases:
-            base, unit = self.bases[data], 1
+            base, unit = self.bases[data] * 2, self.itemsize(data)
         else:
             raise V09TirError(f"unplaced buffer {buffer.name}")
         pairs = list(zip(indices, scales))
@@ -831,10 +899,10 @@ class Walker:
                 continue
             if index >= group:
                 group = self._contiguous_group(segments, index)
-                aligned = all(g % 2 == 0 and n % 2 == 0
+                aligned = all(g % 4 == 0 and n % 4 == 0
                               for g, _, n in segments[index:group])
             if aligned or group == index + 1:
-                if glob % 2:
+                if glob % 4:
                     raise V09TirError("DMA region must start on a 32-bit cell")
                 if to_sram:
                     self.stage.dma_in(glob, sram, count)
@@ -860,19 +928,19 @@ class Walker:
         """Length and global row stride of a 2D block starting at ``index``.
 
         A transfer addresses global memory in cells and packs SRAM rows, so a
-        block needs an even base, an even row length, and an even stride.
+        block needs base, row length and stride on whole 4-byte cells.
         """
         glob, sram, count = segments[index]
-        if index + 1 >= len(segments) or glob % 2 or count % 2:
+        if index + 1 >= len(segments) or glob % 4 or count % 4:
             return 1, 0
         stride = segments[index + 1][0] - glob
-        if stride % 2 or stride < count:
+        if stride % 4 or stride < count:
             return 1, 0
         rows = 1
         while index + rows < len(segments):
             next_glob, next_sram, next_count = segments[index + rows]
             if next_count != count or next_glob != glob + rows * stride \
-                    or next_sram != sram + rows * count * 4:
+                    or next_sram != sram + rows * count * 2:
                 break
             rows += 1
         return rows, stride
@@ -887,42 +955,44 @@ class Walker:
         """
         self.flush()                    # the copies below take the PE output
         scratch = self.scratch_slots[0]
-        lead = glob % 2       # a region starting mid-cell shares its first cell
+        lead = glob % 4       # bytes sharing the first cell with someone else
         glob -= lead
         chunk, total = [], 0
         for piece in pieces:
             chunk.append(piece)
             total += piece[1]
-            if total + lead >= self.BOUNCE_ELEMS and (total + lead) % 2 == 0:
+            if total + lead >= self.BOUNCE_BYTES and (total + lead) % 4 == 0:
                 glob = self._bounce_chunk(glob, chunk, total, scratch, to_sram,
                                           lead)
                 chunk, total, lead = [], 0, 0
         if chunk:
             self._bounce_chunk(glob, chunk, total, scratch, to_sram, lead)
 
-    BOUNCE_ELEMS = 4096
+    BOUNCE_BYTES = 8192
 
     def _bounce_chunk(self, glob, pieces, total, scratch, to_sram, lead):
         span = total + lead
-        if span > 2 * self.BOUNCE_ELEMS:
+        if span > 2 * self.BOUNCE_BYTES:
             raise V09TirError(f"bounce chunk of {span} exceeds the scratch slot")
         if to_sram:
             self.stage.dma_in(glob, scratch, span)
         elif lead:
-            # the element sharing the first cell belongs to someone else, so
-            # read it back before the cell is written
+            # the bytes sharing the first cell belong to someone else, so read
+            # them back before the cell is written
             self.stage.dma_in(glob, scratch, lead)
         offset = lead
-        for sram, count in pieces:
-            src, dst = ((scratch + offset * 4, sram) if to_sram
-                        else (sram, scratch + offset * 4))
-            self.a.vlen(count)
+        for sram, nbytes in pieces:
+            if nbytes % 2 or offset % 2:
+                raise V09TirError("bounce pieces must be fp16-aligned")
+            src, dst = ((scratch + offset * 2, sram) if to_sram
+                        else (sram, scratch + offset * 2))
+            self.a.vlen(nbytes // 2)      # the gather copies move fp16 lanes
             self.stage.vector(SRC1, src)
             self.a.load(0, SRC1)
             self.a.v_copy()
             self.stage.vector(DST, dst)
             self.a.save(0)
-            offset += count
+            offset += nbytes
         if not to_sram:
             self.stage.dma_out(glob, scratch, span)
         return glob + span
@@ -973,7 +1043,9 @@ class Walker:
             self.bases[data] = self.bases[parent]
         else:
             raise V09TirError(f"match_buffer source is not a known buffer: {name}")
-        unit = 4 if parent in self.sram else 1
+        # SRAM views carry their position in nibbles; global views stay in
+        # elements, because ptr() applies the byte scaling itself
+        unit = self.width(parent) if parent in self.sram else 1
         if elem_offset is not None:
             self.env[elem_offset] = offset * unit
         for symbol, value in zip(strides, (stride, 1)):
@@ -1081,6 +1153,7 @@ class Walker:
         """Place a cache-stage buffer in SRAM (addresses are nibbles there)."""
         self.sram[buffer.data] = nibble
         self.scopes[buffer.data] = SRAM_SCOPE
+        self.dtypes[buffer.data] = str(buffer.dtype)
 
     def _space(self, buffer):
         return self.scopes.get(buffer.data, "global")
@@ -1123,31 +1196,31 @@ class SramEmitter:
         self.asm.addr(operand, nibble, 1)
         self.asm.shape(operand, count, 1, 1)
 
-    # -- DMA (global element offsets <-> SRAM nibbles)
+    # -- DMA (global byte offsets <-> SRAM nibbles)
 
-    def dma_in(self, global_elem, sram_nibble, count):
-        cells, nib = self._cells(global_elem, count, sram_nibble)
-        self.asm.gload(global_elem // 2, cells, nib, 1, cells)
+    def dma_in(self, global_byte, sram_nibble, nbytes):
+        cells, nib = self._cells(global_byte, nbytes, sram_nibble)
+        self.asm.gload(global_byte // 4, cells, nib, 1, cells)
 
-    def dma_out(self, global_elem, sram_nibble, count):
-        cells, nib = self._cells(global_elem, count, sram_nibble)
-        self.asm.gstore(global_elem // 2, cells, nib, 1, cells)
+    def dma_out(self, global_byte, sram_nibble, nbytes):
+        cells, nib = self._cells(global_byte, nbytes, sram_nibble)
+        self.asm.gstore(global_byte // 4, cells, nib, 1, cells)
 
-    def dma_2d(self, global_elem, global_stride, sram_nibble, rows, count,
+    def dma_2d(self, global_byte, global_stride, sram_nibble, rows, nbytes,
                to_sram):
-        """Move ``rows`` rows of ``count`` elements spaced ``global_stride``
-        apart in global memory to or from a packed SRAM block."""
-        cells, nib = self._cells(global_elem, count, sram_nibble)
+        """Move ``rows`` rows of ``nbytes`` bytes spaced ``global_stride``
+        bytes apart in global memory to or from a packed SRAM block."""
+        cells, nib = self._cells(global_byte, nbytes, sram_nibble)
         move = self.asm.gload if to_sram else self.asm.gstore
-        move(global_elem // 2, global_stride // 2, nib, rows, cells)
+        move(global_byte // 4, global_stride // 4, nib, rows, cells)
 
     @staticmethod
-    def _cells(global_elem, count, sram_nibble):
-        # allocations are cell-rounded, so an odd count only reaches into the
-        # tensor's own padding; an odd start would shift the SRAM image and is
-        # rejected instead
-        if global_elem % 2:
+    def _cells(global_byte, nbytes, sram_nibble):
+        # allocations are cell-rounded, so a short tail only reaches into the
+        # tensor's own padding; an unaligned start would shift the SRAM image
+        # and is rejected instead
+        if global_byte % 4:
             raise V09TirError("DMA row must start on a 32-bit cell")
         if sram_nibble % 8:
             raise V09TirError("DMA SRAM address must be 8-nibble aligned")
-        return (count + 1) // 2, sram_nibble
+        return (nbytes + 3) // 4, sram_nibble
