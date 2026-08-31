@@ -28,6 +28,12 @@ from npu_compiler import tvm_pipeline as pipeline
 os.environ.setdefault("NPU_V09_TMPDIR", "/data2/chokwans99/npu_tmp")
 
 
+REFERENCES = {
+    "llama": "v3_reference_generate_hello_3.npz",
+    "qwen3": "qwen3_reference_generate_hello_3.npz",
+}
+
+
 def load_family(name):
     """-> (frontend module, checkpoint assets) for one model family."""
     if name == "llama":
@@ -49,6 +55,9 @@ def parse_args():
                         help="0 = all layers; smaller values truncate for a fast check")
     parser.add_argument("--expect", type=int, default=358,
                         help="known first generated token id for the default prompt")
+    parser.add_argument("--reference", default=None,
+                        help="npz of HF logits to score against (defaults to "
+                             "this family's recorded generation reference)")
     parser.add_argument("--skip-llvm", action="store_true",
                         help="skip the CPU build (saves memory on the full model)")
     return parser.parse_args()
@@ -130,6 +139,16 @@ def main():
     if args.layers == 0:
         result["expected"] = args.expect
         result["match"] = token == args.expect
+        # HF logits are the gate; score them off the NPU result, not the CPU
+        # build, which accumulates float16 matmuls in float16
+        path = Path(args.reference or
+                    Path(__file__).resolve().parent / "build"
+                    / REFERENCES[args.model])
+        if path.exists():
+            hf = np.load(path)["logits"][0].astype(np.float64)
+            ours = logits[-1].astype(np.float64)
+            result["hf_logits_cosine"] = round(float(
+                ours @ hf / (np.linalg.norm(ours) * np.linalg.norm(hf))), 7)
     print(json.dumps(result))
     if isinstance(counters, dict):
         print("counters:", json.dumps(counters))

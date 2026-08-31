@@ -19,6 +19,7 @@ from tvm import relax, tir
 
 from . import npu_intrin, npu_memplan
 from .backend_v09 import V09Asm
+from .peephole import eliminate_dead_stores
 from .tir_codegen_v09 import SramEmitter, V09TirError, Walker
 
 SRAM_NIBBLES = 8 * 1024 * 1024 * 2
@@ -139,10 +140,14 @@ def _collect_constants(prim):
     return values
 
 
-def compile_program(mod, func_name="prefill", snapshot_at=None):
+def compile_program(mod, func_name="prefill", snapshot_at=None,
+                    peephole=True):
     """Lowered IRModule -> (assembler, StaticPlan).
 
     ``mod`` must already have gone through the graph pipeline with fusion off.
+
+    ``peephole`` drops descriptor writes that store the value the register
+    already holds, which the straight-line stream makes decidable exactly.
 
     ``snapshot_at`` is a set of kernel indices after which to emit SNAPSHOT.
     Each one appends the whole memory image at that point, which is how a
@@ -221,6 +226,8 @@ def compile_program(mod, func_name="prefill", snapshot_at=None):
                      target.struct_info))
             kernels += 1
     asm.halt()
+    if peephole:
+        asm.words[:] = eliminate_dead_stores(asm.words)
     asm.kernel_count = kernels
     return asm, plan
 
