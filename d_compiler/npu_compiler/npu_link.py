@@ -19,10 +19,11 @@ from tvm import relax, tir
 
 from . import npu_intrin, npu_memplan
 from .backend_v09 import V09Asm
+from .device import PROFILES
 from .peephole import eliminate_dead_stores
 from .tir_codegen_v09 import SramEmitter, V09TirError, Walker
 
-SRAM_NIBBLES = 8 * 1024 * 1024 * 2
+
 
 
 class LinkError(RuntimeError):
@@ -40,12 +41,12 @@ def _is_matmul(prim):
     return bool(found)
 
 
-def _schedule(module, gvar, prim):
+def _schedule(module, gvar, prim, tile=64):
     """Apply the NPU schedule this kernel needs; every kernel ends up staged."""
     name = gvar.name_hint
     try:
         if _is_matmul(prim):
-            scheduled = npu_intrin.schedule_matmul_sram(module, name)
+            scheduled = npu_intrin.schedule_matmul_sram(module, name, tile)
         else:
             scheduled = npu_intrin.schedule_generic_sram(module, name)
     except Exception as error:
@@ -68,7 +69,7 @@ def _schedule(module, gvar, prim):
     return single[gvar]
 
 
-def _sram_layout(prim, cursor=0):
+def _sram_layout(prim, cursor=0, capacity=None):
     """Bump-allocate the kernel's cache buffers in SRAM.
 
     Buffers may be allocated at any block after
@@ -97,7 +98,7 @@ def _sram_layout(prim, cursor=0):
         placement[buffer] = cursor
         cursor += size * 4
         cursor = (cursor + 7) // 8 * 8
-        if cursor > SRAM_NIBBLES:
+        if capacity is not None and cursor > capacity:
             raise LinkError("kernel exceeds SRAM capacity")
     return placement, cursor
 
@@ -141,7 +142,7 @@ def _collect_constants(prim):
 
 
 def compile_program(mod, func_name="prefill", snapshot_at=None,
-                    peephole=True):
+                    peephole=True, profile=None):
     """Lowered IRModule -> (assembler, StaticPlan).
 
     ``mod`` must already have gone through the graph pipeline with fusion off.
@@ -154,6 +155,7 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
     divergence is traced back to the kernel that caused it; the captured
     outputs are listed in ``plan.snapshots`` as (index, var name, struct info).
     """
+    profile = profile or PROFILES["v09"]
     planned, plan = npu_memplan.assign_addresses(mod, func_name)
 
     # scalar literals used by pointwise kernels live in a small pool that the
@@ -177,7 +179,7 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
                   for index, value in enumerate(constants)}
     # temporaries for serializing expression trees into vector steps; each
     # kernel gets slots wide enough for its own longest row (see _scratch_row)
-    slot_count = 6
+    slot_count = profile.scratch_slots
     scratch_base = (len(constants) * 4 + 7) // 8 * 8
     kernels = 0
     for block in planned[func_name].body.blocks:
@@ -189,7 +191,7 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
             prim = planned[call.op]
             if not isinstance(prim, tir.PrimFunc):
                 continue
-            scheduled = _schedule(planned, call.op, prim)
+            scheduled = _schedule(planned, call.op, prim, profile.tile)
             addresses = []
             for arg in call.args:
                 if isinstance(arg, relax.Constant):
@@ -215,7 +217,8 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
             walker.scratch_slots = scratch_slots
             for buffer, address in zip(scheduled.buffer_map.values(), addresses):
                 walker.bases[buffer.data] = address
-            for buffer, nibble in _sram_layout(scheduled, sram_start)[0].items():
+            for buffer, nibble in _sram_layout(
+                    scheduled, sram_start, profile.sram_nibbles)[0].items():
                 walker.declare_sram(buffer, nibble)
             walker.run(scheduled, {})
             if snapshot_at is not None and kernels in snapshot_at:
@@ -268,7 +271,10 @@ def output_var(func):
 
 
 def run_program(asm, plan, func, values, output_shape):
-    """Execute a linked program on the v09 C-model and return its output."""
+    """Execute a linked program on the v09 C-model and return its output.
+
+    ``asm`` may be an assembler or the word list itself.
+    """
     import numpy as np
 
     from .v09_runtime import run as run_v09
@@ -276,7 +282,7 @@ def run_program(asm, plan, func, values, output_shape):
     image = build_image(plan, func, values)
     if image.size % 2:
         image = np.concatenate([image, np.zeros(1, dtype="<f2")])
-    images, counters = run_v09(asm.words, image.view("<u4"))
+    images, counters = run_v09(getattr(asm, "words", asm), image.view("<u4"))
     final = np.ascontiguousarray(images[-1]).view("<f2")
     address = plan.address[output_var(func)]
     count = int(np.prod(output_shape))
