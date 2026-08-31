@@ -132,6 +132,21 @@
 | 커널 로컬 임시 | 전부 SRAM에 bump 할당 | 생존구간 기반 재사용 |
 | 표현식 임시 슬롯 폭 | 커널이 다루는 **가장 긴 행**으로 슬롯 6개를 잡는다 (`_scratch_row`) | 실제 `_materialize` 최대 길이만 계산해 더 좁게 |
 
+## F. S8 양자화 codegen (2026-08-31 시점 남은 작업)
+
+그래프 pass(`npu_quantize.QuantizeWeightsW8A16`)는 동작한다. NPU에서 돌리려면:
+
+1. **스케줄** — `qmatmul`은 리덕션 뒤에 dequant(`* scale[n]`) 블록이 하나 더 붙는다.
+   `schedule_matmul_sram`이 `cache_write` 대상 블록을 못 찾아
+   `BlockNode write buffers do not match`로 실패한다. unpad와 같은 방식으로
+   `reverse_compute_at` 하면 될 가능성이 높다
+2. **혼재 폭 SRAM** — `_flat`/staging이 **원소당 4 nibble**을 가정한다.
+   INT8은 2, FP32(scale 벡터)는 8이 필요하다. 버퍼별 폭을 dtype에서 받아
+   주소 계산·`_sram_layout` 크기·DMA 원소↔셀 환산에 반영해야 한다
+   (`npu_memplan`도 원소당 2바이트를 가정한다)
+3. **서술자** — 가중치 피연산자에 `dtype=INT8`, 열 타일마다 `wscale(...)` 발행.
+   oracle(`backend_v09`)에 검증된 구현이 있으니 그대로 옮기면 된다
+
 ## E. 참고: "표준 TVM으로 안 되는 것"의 정확한 구분
 
 | 구분 | 내용 |
