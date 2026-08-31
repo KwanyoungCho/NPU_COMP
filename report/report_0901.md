@@ -37,7 +37,7 @@ HF 체크포인트           우리가 정의한 모델 구조
 
 | 모델 | 결과 | 규모 |
 |---|---|---|
-| Llama 3.2 3B (28층) | **HF golden token 358 일치** | 31.2M word · 6.1 GiB image (A1 전) |
+| Llama 3.2 3B (28층) | **HF golden token 358 일치 + HF logits cosine 0.9999927** (기존 golden 0.9999881 상회) | A1 적용 **15.3M word** (전 31.2M, −51.0%) · 6.1 GiB image |
 | Qwen3-4B (36층) | **HF golden token 358 일치 + HF logits cosine 0.9999922** | A1 적용 **21.5M word** (전 42.9M, −49.8%) · 7.7 GiB image |
 | Gemma 4 E2B (35층) | llvm에선 token 108 일치·NPU에서 **디버깅 중** (§8) | 13.7M word · 4.3 GiB image |
 | W8A16 양자화 | 타일 규모에서 **numpy mirror와 bit-exact**, tiny 모델 cosine 0.999998 | — |
@@ -352,9 +352,11 @@ C타일로의 연속 호출은 **MAC 비트로 누산기에 체인**되고, 다�
 
 ## 11. 대표 측정치
 
-- **전체 Llama 28층**: 31,222,473 word · 1,206 kernel · image 6,130 MiB ·
-  링크 10,268s · 실행 462s. DMA 적재 1.62G cell(≈6.5 GB — S=7이라 weight를
-  사실상 한 번씩만 읽음). token 358 = HF golden.
+- **전체 Llama 28층**: A1 적용 **15,285,893 word**(적용 전 31,222,473 · −51.0%) ·
+  1,206 kernel · image 6,130 MiB · 실행 376s. DMA 적재 1.62G cell(≈6.5 GB —
+  S=7이라 weight를 사실상 한 번씩만 읽음). token 358 = HF golden,
+  **HF logits cosine 0.9999927** — 손작성 경로의 golden(0.9999881)을 표준
+  경로가 상회한다.
 - **전체 Qwen3 36층**: A1 적용 **21,540,580 word**(적용 전 42,899,225 · −49.8%) ·
   1,622 kernel · 7,675 MiB · 실행 397s. token 358 = HF golden,
   **HF logits cosine 0.9999922**(NPU logits 기준 — 기존 golden 수준을 표준
@@ -363,8 +365,9 @@ C타일로의 연속 호출은 **MAC 비트로 누산기에 체인**되고, 다�
   bit-exact.
 - **2D DMA**: staged 128³ matmul 5,313 → 273 word (19.5×).
 - **W8A16**: mirror와 bit-exact(64³·패딩), tiny 모델 cosine 0.999998.
-- 손작성 oracle 대비 전체 word 수는 약 1.8× (A1 이전 측정; backlog에 후속
-  최적화 항목들 정리됨).
+- 손작성 oracle 대비 전체 word 수: A1 이전 약 1.8×였으나 **A1 적용 후 약
+  0.89×** — 표준 경로가 손작성 경로보다 짧아졌다 (oracle 층당 615,462 word
+  × 28층 ≈ 17.2M vs 우리 15.3M). backlog에 후속 최적화 항목들 정리됨.
 
 ## 12. 겪은 버그와 교훈 (같은 함정을 다시 밟지 않기 위해)
 
