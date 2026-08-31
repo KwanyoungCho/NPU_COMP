@@ -163,7 +163,8 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
     constants = sorted(set().union(*[
         _collect_constants(fn) for _, fn in planned.functions.items()
         if isinstance(fn, tir.PrimFunc)] or [set()]))
-    constants = sorted(set(constants) | {1.0})     # rsqrt needs a literal one
+    # rsqrt and tanh need literal 1 and 2 whether or not the TIR mentions them
+    constants = sorted(set(constants) | {1.0, 2.0})
     if len(constants) % 2:
         constants.append(0.0)
     plan.constant_values = constants

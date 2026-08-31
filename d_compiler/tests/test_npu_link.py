@@ -206,6 +206,21 @@ def test_rows_wider_than_a_scratch_slot():
         print(f"  [PASS] silu row of {width:5d} max|diff|={error:.5f}")
 
 
+def test_gelu_tanh_saturates_instead_of_dividing_infinities():
+    """Gemma's MLP needs tanh, which is expanded as 1 - 2/(exp(2x)+1) so that
+    an overflowed exponential gives exactly 1 rather than inf/inf."""
+    x = np.array([[-40, -20, -12, -6, -3, -1, 0, 1, 3, 6, 12, 20, 40, 2]],
+                 dtype=np.float16).repeat(4, axis=0)
+    got, _, _ = _run([x.shape], relax.op.nn.gelu_tanh, [x], x.shape)
+    xf = x.astype(np.float32)
+    ref = 0.5 * xf * (1 + np.tanh(np.sqrt(2 / np.pi)
+                                  * (xf + 0.044715 * xf ** 3)))
+    assert np.isfinite(got.astype(np.float32)).all()
+    error = float(np.abs(got.astype(np.float32) - ref).max())
+    assert error < 0.01, error
+    print(f"  [PASS] gelu_tanh over +-40 max|diff|={error:.5f}")
+
+
 def test_whole_layer_matches_the_cpu_build():
     """A one-layer model, linked and run on the C-model, against the llvm build
     of the same lowered module."""
@@ -256,5 +271,6 @@ if __name__ == "__main__":
     test_tile_staging_uses_one_2d_transfer()
     test_odd_row_lengths_transfer_correctly()
     test_rows_wider_than_a_scratch_slot()
+    test_gelu_tanh_saturates_instead_of_dividing_infinities()
     test_whole_layer_matches_the_cpu_build()
     print("ALL NPU LINK (S5) TESTS PASSED")

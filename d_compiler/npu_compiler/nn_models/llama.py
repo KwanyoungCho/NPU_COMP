@@ -205,6 +205,41 @@ def causal_mask(num_heads, seq, dtype=np.float16):
     return np.broadcast_to(m, (num_heads, seq, seq)).astype(dtype).copy()
 
 
+def model_config(assets, layers=0):
+    """The config ``build_prefill`` wants, optionally truncated in depth."""
+    config = dict(assets.config)
+    if layers:
+        config["num_hidden_layers"] = layers
+    return config
+
+
+def runtime_inputs(assets, config, token_ids):
+    """The non-parameter inputs of ``prefill``, by name."""
+    seq = len(token_ids)
+    cos, sin = rope_inputs(config, np.arange(seq))
+    return {
+        "input_embeds": assets.embedding(
+            [int(i) for i in token_ids]).astype(np.float16),
+        "cos": cos, "sin": sin,
+        "mask": causal_mask(config.num_heads, seq),
+    }
+
+
+def load_params(assets, params, config):
+    """Checkpoint arrays in the module's parameter order."""
+    values = []
+    for name, parameter in params:
+        key = hf_param_map(name, config.num_layers)
+        if key == "lm_head.weight" and key not in assets.weight_map:
+            key = "model.embed_tokens.weight"          # tied embeddings
+        value = assets._slice(key, (slice(None),) * len(parameter.shape))
+        shape = tuple(int(d) for d in parameter.shape)
+        if value.shape != shape:
+            raise ValueError(f"{name}: checkpoint {value.shape} != {shape}")
+        values.append(np.ascontiguousarray(value, np.float16))
+    return values
+
+
 def hf_param_map(name, num_layers):
     """nn.Module parameter name -> HF checkpoint tensor name."""
     if name == "norm.weight":

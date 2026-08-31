@@ -31,7 +31,9 @@ os.environ.setdefault("NPU_V09_TMPDIR", "/data2/chokwans99/npu_tmp")
 REFERENCES = {
     "llama": "v3_reference_generate_hello_3.npz",
     "qwen3": "qwen3_reference_generate_hello_3.npz",
+    "gemma": "gemma4_reference_generate_hello_3.npz",
 }
+GOLDEN_TOKEN = {"llama": 358, "qwen3": 358, "gemma": 108}
 
 
 def load_family(name):
@@ -44,17 +46,23 @@ def load_family(name):
         from npu_compiler.nn_models import qwen3
         from npu_compiler.qwen3_model import Qwen3Assets
         return qwen3, Qwen3Assets()
+    if name == "gemma":
+        from npu_compiler.nn_models import gemma
+        from npu_compiler.gemma4_model import Gemma4Assets
+        return gemma, Gemma4Assets()
     raise SystemExit(f"unknown model family {name!r}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="llama", choices=("llama", "qwen3"))
+    parser.add_argument("--model", default="llama",
+                        choices=("llama", "qwen3", "gemma"))
     parser.add_argument("--prompt", default="Hello, NPU compiler!")
     parser.add_argument("--layers", type=int, default=0,
                         help="0 = all layers; smaller values truncate for a fast check")
-    parser.add_argument("--expect", type=int, default=358,
-                        help="known first generated token id for the default prompt")
+    parser.add_argument("--expect", type=int, default=None,
+                        help="known first generated token id for the default "
+                             "prompt (defaults to this family's golden)")
     parser.add_argument("--reference", default=None,
                         help="npz of HF logits to score against (defaults to "
                              "this family's recorded generation reference)")
@@ -65,35 +73,34 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.expect is None:
+        args.expect = GOLDEN_TOKEN[args.model]
     family, assets = load_family(args.model)
-    config = dict(assets.config)
-    if args.layers:
-        config["num_hidden_layers"] = args.layers
+    config = family.model_config(assets, args.layers)
     input_ids = np.asarray(
         assets.tokenizer(args.prompt, return_tensors="np")["input_ids"][0],
         dtype=np.int64)
     seq = int(input_ids.size)
-    print(f"prompt {args.prompt!r} -> {seq} tokens, "
-          f"{config['num_hidden_layers']} layers", flush=True)
-
     mod, params, cfg = family.build_prefill(config, seq)
+    print(f"prompt {args.prompt!r} -> {seq} tokens, "
+          f"{cfg.num_layers} layers", flush=True)
+
     lowered = pipeline.graph_pipeline(
         custom_legalize=npu_legalize.legalize_map(),
         fuse=False, lift_params=True)(mod)
 
     started = time.perf_counter()
-    weights = []
-    for name, param in params:
-        key = family.hf_param_map(name, cfg.num_layers)
-        if key == "lm_head.weight" and key not in assets.weight_map:
-            key = "model.embed_tokens.weight"       # tied embeddings
-        value = assets._slice(key, (slice(None),) * len(param.shape))
-        weights.append(tvm.nd.array(np.ascontiguousarray(value, np.float16)))
+    weights = [tvm.nd.array(value)
+               for value in family.load_params(assets, params, cfg)]
     print(f"  weights loaded: {time.perf_counter() - started:.1f}s", flush=True)
 
-    embeds = assets.embedding([int(i) for i in input_ids]).astype(np.float16)
-    cos, sin = family.rope_inputs(cfg, np.arange(seq))
-    mask = family.causal_mask(cfg.num_heads, seq)
+    graph_inputs = family.runtime_inputs(assets, cfg, input_ids)
+    # take the order from the function signature, not the dict
+    order = [param.name_hint for param in lowered["prefill"].params
+             if param.name_hint in graph_inputs]
+    if len(order) != len(graph_inputs):
+        raise SystemExit(f"inputs {sorted(graph_inputs)} do not match "
+                         f"{[p.name_hint for p in lowered['prefill'].params]}")
 
     started = time.perf_counter()
     vm = relax.VirtualMachine(relax.build(lowered, "llvm"), tvm.cpu())
@@ -103,9 +110,9 @@ def main():
     reference = None
     if not args.skip_llvm:
         started = time.perf_counter()
-        reference = vm["prefill"](*[tvm.nd.array(v)
-                                    for v in (embeds, cos, sin, mask)],
-                                  *transformed).numpy()
+        reference = vm["prefill"](
+            *[tvm.nd.array(graph_inputs[name]) for name in order],
+            *transformed).numpy()
         print(f"  llvm prefill: {time.perf_counter() - started:.1f}s "
               f"-> token {int(np.argmax(reference[-1]))}", flush=True)
 
@@ -118,7 +125,7 @@ def main():
     planned, _ = npu_memplan.assign_addresses(lowered)
     func = planned["prefill"]
     values = dict(zip([p.name_hint for p in func.params],
-                      [embeds, cos, sin, mask]
+                      [graph_inputs[name] for name in order]
                       + [t.numpy() for t in transformed]))
     started = time.perf_counter()
     logits, counters = npu_link.run_program(

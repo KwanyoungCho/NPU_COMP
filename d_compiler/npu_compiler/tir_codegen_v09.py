@@ -493,6 +493,8 @@ class Walker:
                 return self._rsqrt(expr, inner, length, into)
             if call is None and name == "tir.sigmoid":
                 return self._sigmoid(expr, inner, length, into)
+            if call is None and name == "tir.tanh":
+                return self._tanh(expr, inner, length, into)
             if call is None:
                 raise V09TirError(f"unsupported intrinsic {name}")
             depth = self.depth
@@ -545,6 +547,66 @@ class Walker:
         self.stage.vector(SRC2, denominator)
         asm.load(0, SRC2)
         asm.v_div(VECTOR)
+        self.stage.vector(DST, target)
+        asm.save(0)
+        return target
+
+    def _tanh(self, expr, inner, length, into):
+        """1 - 2/(exp(2x)+1), from the primitives the unit provides.
+
+        Written this way rather than (e^2x - 1)/(e^2x + 1) because it
+        saturates correctly: once exp(2x) overflows FP16 the quotient is 0 and
+        the result is exactly 1, where the difference form would divide
+        infinity by infinity.  Large negative x needs no special case either --
+        exp(2x) underflows to 0 and the result is -1.
+        """
+        asm = self.a
+        depth = self.depth
+        operand = self._materialize(expr.args[0], inner, length)
+        self.depth = depth
+        two = self._materialize(tir.FloatImm("float16", 2.0), inner, length)
+        doubled = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, operand)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, two)
+        asm.load(0, SRC2)
+        asm.v_mul(VECTOR)
+        self.stage.vector(DST, doubled)
+        asm.save(0)
+        exponent = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, doubled)
+        asm.load(0, SRC1)
+        asm.v_exp()
+        self.stage.vector(DST, exponent)
+        asm.save(0)
+        one = self._materialize(tir.FloatImm("float16", 1.0), inner, length)
+        denominator = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, exponent)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, one)
+        asm.load(0, SRC2)
+        asm.v_add(VECTOR)
+        self.stage.vector(DST, denominator)
+        asm.save(0)
+        quotient = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, two)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, denominator)
+        asm.load(0, SRC2)
+        asm.v_div(VECTOR)
+        self.stage.vector(DST, quotient)
+        asm.save(0)
+        target = into if into is not None else self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, one)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, quotient)
+        asm.load(0, SRC2)
+        asm.v_sub(VECTOR)
         self.stage.vector(DST, target)
         asm.save(0)
         return target
