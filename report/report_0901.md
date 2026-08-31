@@ -39,7 +39,7 @@ HF 체크포인트           우리가 정의한 모델 구조
 |---|---|---|
 | Llama 3.2 3B (28층) | **HF golden token 358 일치 + HF logits cosine 0.9999927** (기존 golden 0.9999881 상회) | A1 적용 **15.3M word** (전 31.2M, −51.0%) · 6.1 GiB image |
 | Qwen3-4B (36층) | **HF golden token 358 일치 + HF logits cosine 0.9999922** | A1 적용 **21.5M word** (전 42.9M, −49.8%) · 7.7 GiB image |
-| Gemma 4 E2B (35층) | llvm에선 token 108 일치·NPU에서 **디버깅 중** (§8) | 13.7M word · 4.3 GiB image |
+| Gemma 4 E2B (35층) | **HF golden token 108 일치 + HF logits cosine 0.9997845** | 13.7M word · 4.3 GiB image · 실행 247s |
 | W8A16 양자화 | 타일 규모에서 **numpy mirror와 bit-exact**, tiny 모델 cosine 0.999998 | — |
 
 ---
@@ -388,11 +388,6 @@ codegen을 가른다 → (2) 깊이·차원 이분으로 최소 재현을 만든
 
 ## 13. 남은 것
 
-- **Gemma NPU 전체 깊이** — llvm은 token 108로 HF와 일치(frontend 검증 완료).
-  전체 35층 NPU 실패는 **binding-order 버그 수정 전 코드**로 돈 실행으로
-  판명되는 중이다: 수정된 HEAD에서 2/5/16층이 HF hidden state와
-  cosine 0.999999/0.999999/0.999996으로 일치(full-attention·공유 KV 포함).
-  HEAD 기준 전체 35층 재실행 결과는 §14에 추기.
 - **실모델 양자화 실행** — `w_dequant` 버퍼가 아직 weight 전체 크기로 SRAM에
   잡힘(타일 규모까지만 안전). 타일 루프로의 `compute_at`이 필요 — B1(weight
   재적재)과 같은 성질.
@@ -402,6 +397,24 @@ codegen을 가른다 → (2) 깊이·차원 이분으로 최소 재현을 만든
 - **decode 경로** — 현재는 prefill만. KV cache를 든 decode는 기존 손작성
   경로에 검증본이 있고, 표준 경로로의 이식이 다음 큰 단계다.
 
-## 14. (추기) 전체 깊이 게이트 최종 결과
+## 14. 전체 깊이 게이트 최종 결과 (2026-09-01 확정)
 
-*게이트 실행이 끝나는 대로 이 절에 기록한다.*
+세 family 모두, 실제 체크포인트 전체 깊이가 C-model에서 HF golden token과
+일치하고, **NPU logits 기준** HF logits cosine이 golden 수준에 도달했다.
+
+| 모델 | word 수 (A1 후) | token | HF logits cosine | 실행 |
+|---|---|---|---|---|
+| Llama 3.2 3B (28층) | 15,285,893 (−51.0%) | **358 ✓** | **0.9999927** (기존 golden 0.9999881 상회) | 376s |
+| Qwen3-4B (36층) | 21,540,580 (−49.8%) | **358 ✓** | **0.9999922** | 397s |
+| Gemma 4 E2B (35층) | 13,665,154 | **108 ✓** | **0.9997845** | 247s |
+
+Gemma 이야기는 §12의 수순이 실제로 작동한 사례다. 첫 전체 실행이 token
+236761로 실패했을 때: (1) 같은 lowered IR을 llvm으로 돌려 token 108 확인 →
+frontend 무죄. (2) 깊이 이분 — 수정된 HEAD에서 2/5/16층이 HF hidden state와
+cosine 0.999999/0.999999/0.999996 → full-attention과 공유 KV 포함 층 본체
+무죄. (3) 원인은 실패 실행이 **buffer binding-order 버그 수정 전 코드**로
+돌았던 것 (같은 word 수 13,665,154 — 프로그램 크기는 같고 주소만 틀렸었다).
+HEAD 재실행으로 통과.
+
+이로써 PLAN_TVM.md의 S0~S8 전 단계가 완료 상태다. 남은 것은 §13의 백로그
+(성능 최적화)와 decode 경로의 표준화다.
