@@ -1,0 +1,129 @@
+[
+  {
+    "seq": 7,
+    "layers": 1,
+    "vocab": 256,
+    "fits": true,
+    "words": 495386,
+    "link_seconds": 4.5,
+    "load": {
+      "other": 20,
+      "weight": 203013424,
+      "activation": 1930480
+    },
+    "store": {
+      "activation": 1704688
+    },
+    "transfers": {
+      "load": 24843,
+      "store": 767
+    },
+    "sram_peak_bytes": 1286164,
+    "sram_peak_kernel": "matmul5"
+  },
+  {
+    "seq": 32,
+    "layers": 1,
+    "vocab": 256,
+    "fits": true,
+    "words": 604568,
+    "link_seconds": 4.7,
+    "load": {
+      "other": 20,
+      "weight": 203393024,
+      "activation": 8978432
+    },
+    "store": {
+      "activation": 7946240
+    },
+    "transfers": {
+      "load": 24839,
+      "store": 2315
+    },
+    "sram_peak_bytes": 1695764,
+    "sram_peak_kernel": "matmul5"
+  },
+  {
+    "seq": 64,
+    "layers": 1,
+    "vocab": 256,
+    "fits": true,
+    "words": 576307,
+    "link_seconds": 6.6,
+    "load": {
+      "other": 20,
+      "weight": 203966464,
+      "activation": 217645056
+    },
+    "store": {
+      "activation": 16285696
+    },
+    "transfers": {
+      "load": 49812,
+      "store": 2619
+    },
+    "sram_peak_bytes": 3244052,
+    "sram_peak_kernel": "silu"
+  },
+  {
+    "seq": 128,
+    "layers": 1,
+    "vocab": 256,
+    "fits": true,
+    "words": 1137274,
+    "link_seconds": 13.9,
+    "load": {
+      "other": 20,
+      "weight": 408307712,
+      "activation": 439615488
+    },
+    "store": {
+      "activation": 34144256
+    },
+    "transfers": {
+      "load": 100002,
+      "store": 5288
+    },
+    "sram_peak_bytes": 6389780,
+    "sram_peak_kernel": "silu"
+  },
+  {
+    "seq": 256,
+    "layers": 1,
+    "vocab": 256,
+    "fits": false,
+    "error": "kernel exceeds SRAM capacity: mask_global.sram [24, 256, 256] float16 takes it to 9.00 MiB of 8.00 MiB",
+    "link_seconds": 5.2
+  },
+  {
+    "seq": 512,
+    "layers": 1,
+    "vocab": 256,
+    "fits": false,
+    "error": "kernel exceeds SRAM capacity: rms_norm_global.sram [512, 3072] float16 takes it to 9.04 MiB of 8.00 MiB",
+    "link_seconds": 0.1
+  },
+  {
+    "seq": 7,
+    "layers": 28,
+    "vocab": 128256,
+    "fits": true,
+    "words": 15285893,
+    "link_seconds": 126.7,
+    "load": {
+      "other": 20,
+      "weight": 6425852224,
+      "activation": 54053440
+    },
+    "store": {
+      "activation": 48265280
+    },
+    "transfers": {
+      "load": 786312,
+      "store": 23341
+    },
+    "sram_peak_bytes": 1999892,
+    "sram_peak_kernel": "matmul6",
+    "label": "verify"
+  }
+]

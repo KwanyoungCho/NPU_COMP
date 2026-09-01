@@ -109,7 +109,11 @@ def _place_sram(buffers, cursor=0, capacity=None):
         cursor += size * widths[str(buffer.dtype)]
         cursor = (cursor + 7) // 8 * 8
         if capacity is not None and cursor > capacity:
-            raise LinkError("kernel exceeds SRAM capacity")
+            raise LinkError(
+                f"kernel exceeds SRAM capacity: {buffer.name} "
+                f"{[int(d) for d in buffer.shape]} {buffer.dtype} takes it to "
+                f"{cursor / 2 / 1024 / 1024:.2f} MiB of "
+                f"{capacity / 2 / 1024 / 1024:.2f} MiB")
     return placement, cursor
 
 
@@ -297,8 +301,12 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
             scratch_slots = tuple(scratch_base + index * scratch_elems * 4
                                   for index in range(slot_count))
             sram_start = scratch_base + slot_count * scratch_elems * 4
-            sram_map = _place_sram(sram_buffers, sram_start,
-                                   profile.sram_nibbles)[0]
+            sram_map, sram_top = _place_sram(sram_buffers, sram_start,
+                                             profile.sram_nibbles)
+            # what this kernel actually occupies, scratch slots included --
+            # the headroom question (SRAM is 8 MiB; how much is idle?) is
+            # answered from here
+            plan.sram_peak[call.op.name_hint] = sram_top
             native_words = None
             if native_mode:
                 native_words = native.codegen_kernel(

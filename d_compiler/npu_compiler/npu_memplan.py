@@ -73,6 +73,7 @@ class StaticPlan:
         self.top = 0            # total size in `unit_bytes` units
         self.snapshots = []     # (kernel index, var name, struct info) captured
         self.native = {}        # kernel name -> did the native walker cover it
+        self.sram_peak = {}     # kernel name -> SRAM nibbles it needs
 
     def _alloc(self, nbytes):
         # round every allocation up to a whole 32-bit cell so DMA, which moves
