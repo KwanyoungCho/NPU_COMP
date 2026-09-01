@@ -667,3 +667,110 @@ logits + 초기 cache 반환)와 `decode`(capacity 고정). 런타임
 | tiny 3-token 생성 (mask 경로 포함) | **NPU == llvm == float32 전체 재계산** (`[0,1,27]`) — cache가 의미 변경 없는 최적화임을 매 step 증명 |
 | 실 체크포인트 2층 절단 | NPU == llvm (`[0,0,0]`) |
 | 전체 28층 golden `[358,1184,311]` | **게이트 진행 중** (프로그램 2개 링크, ~4h) — 완료 시 여기에 추기 |
+
+
+---
+
+## 19. 부록: v09 전체 ISA 표
+
+모든 명령은 32-bit word이고 **opcode는 최하위 바이트 [7:0]**이다. 아래 표의
+비트 필드는 인코더(`isa_0818.py`/`isa_v09.py`)와 C-model(`mysim_v09.cpp`)
+디스패치에서 그대로 옮긴 구현 진실이다.
+
+### 19.0 공통 코드 (범례)
+
+| 코드 | 값 |
+|---|---|
+| 피연산자(operand) | 0=SRC1, 1=SRC2, 2=DST (3=무시) |
+| 주소 종류 | 0=MAIN(부모 영역), 1=PARTIAL(타일 위치) |
+| mode | 0=IMM(즉값), 1=SCALAR, 2=VECTOR |
+| dtype | 00=FP16, 01=FP32, 10=INT8, 11=INT4 |
+| activation | 0=off, 1=표준 tanh-GELU, 2=SiLU, 3=legacy GELU |
+
+### 19.1 제어
+
+| op | 이름 | word 구성 | 동작 |
+|---|---|---|---|
+| 0x00 | NOP | 전체 0 (예약 비트 0 강제) | 없음 |
+| 0xF0 | SNAPSHOT | [7:0]만 사용 | 전체 global 이미지를 snapshot 파일에 append (디버깅 계측; §8) |
+| 0xFF | HALT | [7:0]만 사용 | 최종 이미지 기록 후 정지 — 유일한 정상 종료 |
+
+### 19.2 서술자(descriptor) 설정 — sticky 상태
+
+| op | 이름 | word 구성 | 동작 |
+|---|---|---|---|
+| 0x80 | ADDR half | [31:30] operand, [29] high, [28] partial, [23:8] 16-bit half | 피연산자의 MAIN/PARTIAL **SRAM nibble 주소**의 상/하위 16-bit 갱신 (24-bit 초과 시 오류) |
+| 0x82 | VLEN | [23:8] 길이 | 벡터 길이 설정 (16-bit; 256-lane이 내부 strip-mine). **초과분은 인코더가 즉시 거부** (§12 버그의 교훈) |
+| 0x88 | MROWS | [31:30] operand, [29] partial, **[26:25] dtype(v09)**, [23:8] rows | 행 수 + **서술자 dtype** 설정. ver.08 word에 dtype 2-bit만 추가 — 기존 프로그램은 dtype=00(FP16)으로 그대로 유효 |
+| 0x89 | MCOLS | 0x88과 동일 구성, [23:8] cols(MAIN에서는 stride) | 열 수/stride + dtype |
+| 0x8A | ASCALE half | [29] high, [23:8] half | activation-scale **FP32 벡터**의 SRAM nibble 주소 (2-word: lo+hi). matmul이 행 index로, VQUANT/VDEQUANT가 스칼라로 읽음 |
+| 0x8B | WSCALE half | 0x8A와 동일 | weight-scale FP32 벡터 주소. matmul이 열 index로 읽음 |
+
+### 19.3 load / save (SRAM ↔ 연산 유닛 레지스터)
+
+| op | 이름 | word 구성 | 동작 |
+|---|---|---|---|
+| 0x90 | LOAD | [31] matrix, [30] operand(SRC1/2), [29] strided, [23:16] ncols, [15:8] start | matrix=0: 벡터 load(FP16만 — INT는 VDEQUANT로만 진입). matrix=1: 행렬 타일 load — 서술자 dtype이 INT8/4이면 packed 정수 해석. strided는 열 gather |
+| 0x98 | SAVE | [31] matrix, [29] strided, [23:16] ncols, [15:8] start | PE/벡터 출력 레지스터를 DST 서술자 위치에 저장. 벡터 save의 목적지 dtype은 FP16/**FP32**(서술자 dtype) — FP32 저장이 별도 플래그 없이 dtype으로 표현됨(W8A8의 a_scale 저장이 이 경로) |
+
+### 19.4 벡터 유닛 (연산 하나/명령, vlen 원소)
+
+공통 word 구성: [31:30] mode, [23:8] imm(signed 16-bit; V3-030), [7:0] op.
+피연산자는 SRC1/SRC2 서술자, 결과는 출력 레지스터(이어서 SAVE).
+
+| op | 이름 | 비고 |
+|---|---|---|
+| 0x01 | ADD | |
+| 0x02 | SUB | |
+| 0x08 | LOGICAL | [29:27] sub-op (and/or/xor/…) |
+| 0x09 | SHIFT | imm=양, 주로 IMM mode |
+| 0x0A | MUL | |
+| 0x0B | DIV | IMM mode면 즉값으로 나눔 (÷127이 이 경로) |
+| 0x0C | MULADD | out += a·b |
+| 0x0D | MOVE | |
+| 0x0E | SQRT | 단항 |
+| 0x0F | EXP | 단항 |
+| 0x11 | COMPARE | a==b → 1/0 |
+| 0x12 | MIN/MAX | [28] 1=max — W8A8의 절댓값 `max(x,−x)`가 이 명령 |
+| 0x13 | CONVERT | [31] 방향, float↔int |
+| 0x14 | REDUCE_SUM | 행 전체 → 스칼라 (flat FP32 순서) |
+| 0x15 | BROADCAST | [31:30] mode(1=SCALAR: 주소에서 읽음), [29] high — 주소 half 갱신 **겸 실행** (유일하게 설정+실행 동시; A1 peephole이 이 op를 후보에서 제외하는 이유) |
+| 0x16 | SIGN_INV | −x |
+| 0x17 | COPY | |
+| 0x18 | COS/SIN | [27] 1=sin |
+| 0x19 | REDUCE_MAX | seeded(V3-003 수정) — 아무 부호에서나 정확 |
+| 0x1A | **VQUANT** (v09) | SRC1 FP16 행 → DST 서술자 dtype(INT8/4)로 RNE+포화 저장, scale=ASCALE 주소의 FP32 스칼라 |
+| 0x1B | **VDEQUANT** (v09) | SRC1 서술자 dtype(INT8/4) 행 × ASCALE 스칼라 → FP16 출력 레지스터 (scale=1.0이면 순수 변환 — W8A16이 이 용법) |
+
+### 19.5 행렬 유닛 (64×64 타일, 내부 FP32 누적)
+
+공통 word 구성: [31:30] mode, **[29:28] activation**, **[27] MAC**, [23:8] imm, [7:0] op.
+
+| op | 이름 | 동작 |
+|---|---|---|
+| 0x40 | M_ADD | 타일 + (스칼라/타일) |
+| 0x41 | M_SUB | |
+| 0x42 | M_MUL | **행렬곱**. MAC=1이면 누산기에 합산(K-타일 체인). 서술자 dtype이 INT8이면 INT8×INT8이고, 부분합이 누산기에 들어갈 때 `w_scale[col]`(WSCALE), `a_scale[row]`(ASCALE)를 곱함 — **dequant가 matmul 내부에서** 일어나는 지점 |
+| 0x43 | M_MOVE | 타일 이동(+activation) — activation 적용 통로 |
+
+### 19.6 DMA (global ↔ SRAM; **4-word**, dtype 무관, 32-bit 셀 단위)
+
+| word | 구성 |
+|---|---|
+| w0 | [31:8] **SRAM nibble 주소**(24-bit, 8-nibble 정렬), [7:0] op (0xA0 GLOAD / 0xA8 GSTORE) |
+| w1 | global **셀** 주소 (32-bit) |
+| w2 | global 행 간격 (셀) |
+| w3 | [31:16] rows, [15:0] cols (셀) |
+
+동작: `rows`개 행을, global에서는 `g_addr + r·stride`부터 `cols`셀씩,
+SRAM에서는 빈틈없이 연속으로 이동. 2차원이라 큰 행렬의 타일 하나가 명령
+하나다(§15.3의 19.5× 절감이 이 필드에서 나옴). rows/cols가 16-bit이므로
+emitter가 초과 전송을 자동 분할한다(§12).
+
+### 19.7 우리 컴파일러가 쓰지 않는/조건부로 쓰는 것
+
+- 0x08 LOGICAL, 0x09 SHIFT, 0x11 COMPARE, 0x13 CONVERT — 현재 LLM 경로에서
+  미사용(ISA에는 존재).
+- activation 코드(0x40대의 [29:28]) — 현재 codegen은 SiLU/GELU를 벡터
+  조합으로 전개(§7b)하고 네이티브 activation은 백로그 D의 최적화 후보.
+- INT4(dtype=11) — VQUANT/VDEQUANT/행렬 load가 지원하나 pass 미구현.
