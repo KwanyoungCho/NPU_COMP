@@ -109,7 +109,39 @@ llvm으로 빌드해 CPU에서 돌릴 수 있고**, 우리는 이것을 검증�
 각 family는 같은 모양의 인터페이스를 내놓는다: `model_config`(체크포인트
 config → 빌드 인자), `build_prefill`(IRModule 생성), `load_params`(체크포인트
 텐서를 파라미터 순서대로), `runtime_inputs`(위의 호스트 입력들). 덕분에 실행
-스크립트 `run_nn_npu.py --model {llama,qwen3,gemma}` 하나가 세 모델을 다룬다.
+스크립트 `run_nn_npu.py --model {llama,qwen3,gemma,hf}` 하나가 전부를 다룬다.
+
+### 2.5 네 번째 프론트엔드 — HF 모델 자체가 입력 (`nn_models/hf.py`)
+
+위의 세 frontend는 구조를 우리가 다시 쓰고 가중치만 HF에서 가져온다. 네 번째는
+**HF 모델 자체를 입력으로 쓴다**: `transformers`가 모델을 만들고, HF의
+`forward`를 `torch.export`가 그대로 추적하고, TVM 표준 torch 프론트엔드
+(`from_exported_program`)가 그 추적을 Relax로 바꾼다. 구조도 수치도 HF가
+원본이며, 아키텍처를 손으로 다시 쓰는 부분이 없다.
+
+추적과 표준 파이프라인 사이에 필요한 처리(전부 이유가 있다):
+
+1. **mask·position을 입력으로 뺀 뒤 상수로 bind** — HF는 forward 안에서
+   mask/position을 만드는데 그 코드는 데이터 의존이라 기계가 못 돌린다.
+   4D additive mask를 넘기면 HF가 그대로 통과시키고, position을 상수로
+   bind하면 `FoldConstant`가 **rotary cos/sin 표 전체를 컴파일타임에 계산**해
+   int64가 기계에 들어가지 않는다.
+2. **가중치도 상수로 bind** — 어차피 프로그램 이미지에 박히는 기계다.
+   덕분에 nn.Linear의 전치도 컴파일타임에 접힌다(LiftTransformParams가 주던
+   이득을, 그 pass의 파라미터 장부 정리와 싸우지 않고 얻는다).
+3. **추적된 RMSNorm을 op으로 복원** — HF는 fp32에서 "제곱→평균"으로
+   정규화하는데 이를 fp16으로 내리면 실모델 폭(3072)에서 합이 넘친다.
+   패턴 재작성으로 `relax.nn.rms_norm`을 복원하면 우리 legalize의 안전 전개
+   (제곱 전에 1/√D)가 그대로 적용된다.
+4. **잔여 fp32 섬 강등** — softmax/rotary의 fp32 upcast를 fp16으로. 손으로
+   모델을 쓸 때 내렸던 결정을 pass로 옮긴 것이다.
+5. **matmul의 unit batch 제거** — 추적본은 모든 텐서에 선두 1 차원을 달고
+   다니는데, matmul 스케줄은 마지막 세 루프를 타일링하므로 벗겨 준다
+   (reshape는 view가 되어 무비용).
+
+검증: tiny HF Llama가 **HF torch 자신의 출력과** llvm 0.999999 / NPU
+1.000000으로 일치, 실 체크포인트 1층이 llvm 대비 **0.99856** — 손작성
+frontend의 1층 수치와 동일하다.
 
 ---
 
@@ -379,6 +411,9 @@ C타일로의 연속 호출은 **MAC 비트로 누산기에 체인**되고, 다�
 | 상수 풀 fp16 overflow | 호스트로 lift된 PrimFunc의 리터럴(−3.4e38)까지 수집 | 기계가 호출하는 커널만 수집 |
 | Gemma 층 대조가 cosine 0.018 | 참조 파일의 `hidden_NN`은 층 NN에 **들어가는** 상태 (off-by-one) | 참조 데이터의 인덱스 관례를 코드에 주석으로 박음 |
 | 융합 켜면 결과 오류 | 융합 본문 직렬화 미검증 + 이득 없음 | 융합은 정확성부터; 현재 기본 off |
+| HF 추적 경로가 실차원에서 전부 0 | 추적 모듈이 `lv` 같은 **바인딩 이름을 재사용** — 계획/링커가 name_hint로 키를 잡아 마지막 것이 덮어씀 | 계획 전에 이름 유일화 (tiny 모델도 조용히 영향: 0.9995→1.0000) |
+| [7,128256] 복사가 45,696개만 이동 | vlen 필드가 16-bit인데 인코더가 **조용히 마스킹** | movement 경로에서 긴 행 분할 + 인코더는 초과 시 즉시 에러 |
+| lm_head 전체 DMA가 인코딩 실패 | rows/cols 16-bit 필드 초과 | emitter가 필드 한계로 자동 분할 |
 | INT8 dtype이 다음 연산에 누출 | 서술자 dtype은 sticky | 변환 후 FP16 복원을 방출 |
 
 디버깅의 표준 수순도 정립됐다: (1) 같은 lowered IR을 llvm으로 돌려 그래프/
