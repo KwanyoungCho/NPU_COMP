@@ -60,6 +60,7 @@ class Walker:
         self.depth = 0
         self.inner_base = 0             # offset applied to the innermost axis
         self._match_plans = {}          # match_buffer node -> what it binds
+        self._flat_cache = {}           # buffer access node -> its addresser
         self.dtypes = {}                # buffer data Var -> dtype string
         self.one_fp32 = None            # SRAM nibble of a literal fp32 1.0
         self.stored = {}                # C tile address -> stride, once stored
@@ -93,7 +94,10 @@ class Walker:
             return self.env.get(e)
         if kind is tir.IntImm:
             return int(e.value)
-        op = _TIR_BINOPS.get(kind)
+        # comparisons belong here too: guards are evaluated per element, and
+        # leaving them to the substitute/simplify path made them 68% of a real
+        # layer's link time
+        op = _TIR_BINOPS.get(kind) or _COMPARISONS.get(kind)
         if op is not None:
             left = self._ev_fast(e.a)
             if left is None:
@@ -421,27 +425,65 @@ class Walker:
         A conditional select (``if_then_else`` from concat or from
         ``pad_einsum``'s fill) becomes one piece per run of the condition; the
         condition is not assumed to hold on a prefix, since concat's holds on
-        the tail.
+        the tail.  The split recurses, because an N-way concat lowers to
+        N-1 NESTED selects -- a 28-layer cache stack is a 27-deep chain, and
+        each surviving branch may itself be another select.
         """
+        saved = self.env.get(inner)
+        try:
+            pieces = self._split_row(value, inner, 0, length)
+        finally:
+            if saved is None:
+                self.env.pop(inner, None)
+            else:
+                self.env[inner] = saved
+        return pieces
+
+    def _scanner(self, expr, var):
+        """Compile ``expr`` into a plain function of one loop variable's value.
+
+        A select's condition is tested once per element of the row, so reading
+        its TIR nodes there dominated link time.  Every other variable is fixed
+        while one row is scanned, so it folds to a constant now and nothing but
+        integer arithmetic is left in the scan -- no FFI, and no dictionary
+        keyed by TIR objects (whose hash is itself an FFI call).
+        """
+        kind = type(expr)
+        if kind is tir.IntImm:
+            value = int(expr.value)
+            return lambda _: value
+        if kind is tir.Var or kind is tir.SizeVar:
+            if expr.same_as(var):
+                return lambda index: index
+            fixed = self.env.get(expr)
+            return None if fixed is None else (lambda _: fixed)
+        operator = _TIR_BINOPS.get(kind) or _COMPARISONS.get(kind)
+        if operator is None:
+            return None
+        left = self._scanner(expr.a, var)
+        right = self._scanner(expr.b, var)
+        if left is None or right is None:
+            return None
+        return lambda index: operator(left(index), right(index))
+
+    def _split_row(self, value, inner, lo, count):
         name = (value.op.name if isinstance(value, tir.Call)
                 and hasattr(value.op, "name") else None)
         if name != "tir.if_then_else":
-            return [(value, 0, length)]
+            return [(value, lo, count)]
         condition, taken, other = value.args
-        saved = self.env.get(inner)
-        flags = []
-        for index in range(length):
-            self.env[inner] = index
-            flags.append(bool(self.ev(condition)))
-        if saved is None:
-            self.env.pop(inner, None)
-        else:
-            self.env[inner] = saved
+        guard = self._scanner(condition, inner)
+        if guard is None:
+            def guard(index, _condition=condition):
+                self.env[inner] = index
+                return self.ev(_condition)
+        flags = [bool(guard(index)) for index in range(lo, lo + count)]
         pieces, start = [], 0
-        for index in range(1, length + 1):
-            if index == length or flags[index] != flags[start]:
-                pieces.append((taken if flags[start] else other,
-                               start, index - start))
+        for index in range(1, count + 1):
+            if index == count or flags[index] != flags[start]:
+                branch = taken if flags[start] else other
+                pieces.extend(self._split_row(branch, inner, lo + start,
+                                              index - start))
                 start = index
         return pieces
 
@@ -778,6 +820,11 @@ class Walker:
         dst_unit = (self.width(store.buffer.data)
                     if store.buffer.data in self.sram
                     else self.itemsize(store.buffer.data))
+        # every row transfers the same number of bytes, and finding that out
+        # costs two FFI attribute reads plus a hash of a TIR object -- which a
+        # weight stage would pay tens of thousands of times over
+        nbytes = length * self.itemsize(
+            (load if to_sram else store).buffer.data)
         segments = []
         for position in self._outer_positions(outer, extents):
             src_base, src_stride = source(position)
@@ -786,8 +833,6 @@ class Walker:
                 raise V09TirError("DMA stage needs contiguous rows")
             glob, sram = ((src_base, dst_base) if to_sram
                           else (dst_base, src_base))
-            data = (load if to_sram else store).buffer.data
-            nbytes = length * self.itemsize(data)
             # segment lengths are bytes; every dtype packs SRAM at two nibbles
             # per byte, so the SRAM side advances at exactly twice the bytes
             if segments and glob == segments[-1][0] + segments[-1][2] \
@@ -831,7 +876,19 @@ class Walker:
 
         The address function is None when some index needs the walker's
         general evaluator.
+
+        Building one reads the access node's whole structure across the FFI,
+        and a tiled loop nest reaches the same node once per tile -- a staged
+        weight does so tens of thousands of times -- so the result is cached
+        by node address.  The entry holds the node itself, which is what stops
+        that address from being reused; the same trick keys ``_match_plans``.
+        The cached closure reads the environment when called, so only the
+        buffer's base is frozen here, and a buffer's base does not move once
+        the kernel's SRAM layout is declared.
         """
+        cached = self._flat_cache.get(access.handle.value)
+        if cached is not None:
+            return cached[1], cached[2]
         buffer = access.buffer
         shape = [int(dim) for dim in buffer.shape]
         scales, scale = [1] * len(shape), 1
@@ -842,6 +899,7 @@ class Walker:
         indices = [self._compile(index) for index in access.indices]
         linear = self._linear
         if any(index is None for index in indices):
+            self._flat_cache[access.handle.value] = (access, None, False)
             return None, False
         data = buffer.data
         if data in self.sram:
@@ -851,8 +909,10 @@ class Walker:
         else:
             raise V09TirError(f"unplaced buffer {buffer.name}")
         pairs = list(zip(indices, scales))
-        return (lambda env: base + unit * sum(
-            index(env) * scale for index, scale in pairs)), linear
+        function = lambda env: base + unit * sum(
+            index(env) * scale for index, scale in pairs)
+        self._flat_cache[access.handle.value] = (access, function, linear)
+        return function, linear
 
     def _addresser(self, access, inner, outer, store=False):
         """A function from an outer loop position to (address, inner stride).

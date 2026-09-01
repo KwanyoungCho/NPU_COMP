@@ -10,17 +10,35 @@
 ## 0. 한 장 요약
 
 ```
-HF 체크포인트           우리가 정의한 모델 구조
-     │                        │
-     ▼                        ▼
-[1] 프론트엔드   relax.frontend.nn.Module  ──export──▶  Relax IRModule
-[2] 그래프 pass  (전부 TVM 표준; 양자화 pass는 우리 것 하나)
-[3] 메모리 계획  StaticPlanBlockMemory ──▶ 평면 정적 주소
+ HF 체크포인트          우리가 정의한 모델 구조
+ (torch.export)         (relax.frontend.nn)
+      │                        │
+      └────────────┬───────────┘
+                   ▼
+[1] 프론트엔드   Relax IRModule  (고수준 그래프: matmul, rms_norm, …)
+                   │
+[2] 그래프 pass  전부 TVM 표준.  LiftTransformParams 가 weight 전용 계산을
+                 떼어내고, LegalizeOps 가 그래프 op을 TIR 루프 프로그램으로 만든다
+                   │
+                   ├──────────────▶ transform_params  →  host(LLVM)에서 1회 실행
+                   │                (weight 전치·양자화 → 디스크 캐시)
+                   │
+                   ├──────────────▶ relax.build(…,"llvm")  →  CPU 참조 실행 (정답 대조)
+                   ▼
+[3] 메모리 계획  CallTIRRewrite → StaticPlanBlockMemory  ──▶  평면 정적 주소
 [4] 스케줄       tir.Schedule (타일링 + SRAM staging + tensorize)
-[5] codegen      TIR을 걸어가며 v09 명령어 word 방출
+[5] codegen      스케줄된 TIR을 해석하며 v09 명령어 word 방출
 [6] 링크         커널들을 하나의 직선 명령 스트림으로 연결 + peephole
 [7] 실행         v09 C-model (시뮬레이터)
 ```
+
+**기기용 경로는 LLVM을 거치지 않는다.** LLVM이 쓰이는 곳은 두 군데뿐이다 —
+host가 실제로 실행하는 `transform_params`, 그리고 같은 IR을 CPU로 돌리는 대조용
+참조. [5]~[6]이 표준 TVM에서 LLVM/CUDA codegen이 붙는 자리이고, v09 백엔드가
+없으므로 그 자리를 우리 codegen이 채운다.
+
+배포 단위는 **모델당 프로그램 2개**다: 프롬프트 길이의 `prefill_cache` 하나와
+고정 capacity의 `decode` 하나(§18). 토큰마다 다시 링크하지 않는다.
 
 핵심 설계 원칙 두 가지:
 
@@ -40,7 +58,10 @@ HF 체크포인트           우리가 정의한 모델 구조
 | Llama 3.2 3B (28층) | **HF golden token 358 일치 + HF logits cosine 0.9999927** (기존 golden 0.9999881 상회) | A1 적용 **15.3M word** (전 31.2M, −51.0%) · 6.1 GiB image |
 | Qwen3-4B (36층) | **HF golden token 358 일치 + HF logits cosine 0.9999922** | A1 적용 **21.5M word** (전 42.9M, −49.8%) · 7.7 GiB image |
 | Gemma 4 E2B (35층) | **HF golden token 108 일치 + HF logits cosine 0.9997845** | 13.7M word · 4.3 GiB image · 실행 247s |
-| W8A16 양자화 | 타일 규모에서 **numpy mirror와 bit-exact**, tiny 모델 cosine 0.999998 | — |
+| HF 추적 Llama (28층) | **HF golden token 358 일치 + cosine 0.9999927** — HF 모델 자체가 입력 (§2.5) | 16.0M word |
+| W8A16 양자화 | 타일 규모에서 **numpy mirror와 bit-exact**, tiny 모델 cosine 0.999998. 실차원 양자화 matmul cosine 0.999964 (§16.3) | — |
+| W8A8 (activation 양자화) | 단일 커널은 **모든 시험 폭에서 bit-exact**, tiny 전체 모델 0.999998. **실차원 전체 모델은 미해결** (§18.2b) | — |
+| decode (생성) | tiny에서 **NPU == llvm == float32 전체 재계산**, 실 체크포인트 2층 절단에서 NPU == llvm. 28층 golden은 §18.3 | 모델당 프로그램 2개 |
 
 ---
 
@@ -327,10 +348,18 @@ C타일로의 연속 호출은 **MAC 비트로 누산기에 체인**되고, 다�
 공유하는 유일한 단위; DMA만 전역 주소를 소비하므로 안전), SRAM=**nibble**
 (버퍼 dtype별 폭: fp16=4, int8=2, fp32=8).
 
-**(e) 속도.** 인덱스 식을 행마다 TVM FFI로 재평가하면 링크가 수 시간
-단위로 느려진다. 그래서 각 버퍼 접근을 **파이썬 함수로 한 번 컴파일**해 두고
-(affine이면 origin+step 곱셈-덧셈으로, 아니면 행마다 평가) 루프에서는 순수
-산술만 돈다. match_buffer 노드도 처음 본 것만 FFI로 읽고 캐시한다.
+**(e) 속도.** 이 단계가 컴파일 시간의 대부분을 쓴다. 원인은 언롤 자체가 아니라
+**루프 안에서 TVM 객체를 만지는 비용**이다 — TIR 노드는 자식 속성을 읽는 것
+(`e.a`)도, dict 키로 해시하는 것도 전부 C++ 경계를 넘는 FFI 호출이다. 그래서
+방출 지점마다 "TIR을 한 번만 읽고, 나머지는 순수 파이썬 산술"이 되도록 만든다:
+버퍼 접근은 파이썬 함수로 컴파일해 접근 노드 주소로 캐시하고(affine이면
+origin+step 곱셈-덧셈), select 조건은 원소마다 평가하되 스캔 전에 한 번
+컴파일하며(`_scanner`), 행 루프의 불변식은 밖으로 뺀다. match_buffer 노드도
+처음 본 것만 FFI로 읽고 캐시한다.
+
+이 원칙을 실제로 적용한 결과가 §11.1이다(실차원 1층 **246.1s → 41.3s, 5.96배**,
+전 구간 bit-exact). 남은 파이썬 수준 항목과 최종 목표(codegen의 C++ 이식)는
+백로그 A5·A6에 있다.
 
 ---
 
@@ -403,6 +432,58 @@ C타일로의 연속 호출은 **MAC 비트로 누산기에 체인**되고, 다�
   0.89×** — 표준 경로가 손작성 경로보다 짧아졌다 (oracle 층당 615,462 word
   × 28층 ≈ 17.2M vs 우리 15.3M). backlog에 후속 최적화 항목들 정리됨.
 
+### 11.1 컴파일 시간 — 어느 단계가 얼마나 쓰나 (2026-09-01 실측)
+
+"오래 걸린다"의 정체를 단계별로 분리해 재면 이렇다 (Llama 28층):
+
+| 단계 | FP16 | W8A8 |
+|---|---|---|
+| TVM 그래프 pass + llvm 빌드 | 48.7s | 171.1s |
+| **링크 (스케줄 + codegen)** | **8,147s** | **1,872s** |
+| C-model 실행 | 376s | 65s |
+
+**TVM도 실행도 아니고 링크가 94%다.** W8A8이 오히려 빠른 이유는 그 matmul
+커널을 TIR에서 걷지 않고 직접 방출하기 때문인데(§18.2b), 이게 원인을 그대로
+가리킨다 — 비용은 방출하는 word 수가 아니라 **TIR을 걷는 방식**에 있다.
+
+결정적인 대조군은 손작성 `backend_v09`다. 같은 파이썬으로, 같은 완전 언롤을,
+같은 Llama 층에 대해 **613,558 word를 0.8초(816k word/s)** 에 만든다. 즉
+파이썬도 언롤도 원인이 아니다.
+
+프로파일이 진짜 원인을 지목했다 — 시간의 대부분이 명령을 계산하는 일이 아니라
+**TVM 객체를 만지는 일**이었다(FFI 호출 3,968만 회, TIR 속성 읽기 1,525만 회,
+dict 해시 1,414만 회). 진단은 `ev()`를 감싸 느린 경로의 노드 종류와 호출자를
+세는 식으로 했고, "전부 `_split_row`, 전부 비교 연산"이라는 답이 바로 나왔다.
+
+고친 뒤 (실차원 1층, 495,386 word, **전 구간 bit-exact**):
+
+| 조치 | 링크 시간 | 처리율 |
+|---|---|---|
+| (기준) | 246.1s | 2,013 word/s |
+| select 조건을 스캔 전에 한 번 컴파일 (`_scanner`) | 77.3s | 6,405 word/s |
+| DMA 행 루프의 불변식을 밖으로 | 57.8s | 8,572 word/s |
+| 주소 함수를 접근 노드 주소로 캐시 | **41.3s** | **11,987 word/s** |
+
+**누적 5.96배.** 남은 파이썬 수준 항목(`env`가 TIR 객체로 키잉되어 조회마다 FFI
+해시)과 최종 목표(codegen의 C++ 이식)는 백로그 A5·A6.
+
+### 11.2 host 파라미터 변환 캐시
+
+`LiftTransformParams`가 떼어낸 weight 전치·양자화는 **IR로 표현된 변환**이라,
+그 IR을 그대로 실행하는 것이 프로그램 이미지가 기대하는 값을 얻는 유일하게
+안전한 방법이다(numpy로 다시 짜면 규칙이 둘로 갈라진다 — W8A8에서 host
+`w_scale`이 fp32 1 ULP 달라 725개 weight의 tie-break가 뒤집힌 적이 있다).
+
+그러나 그 결과는 실행마다 바뀌지 않는다. 그래서 한 번 계산해 디스크에 두고
+이후에는 memmap으로 되읽는다(`generate(..., params_cache=…)`,
+`run_nn_generate.py --params-cache`). 캐시 항목의 키는 **변환 함수 자신의 IR**
+이라, 그래프나 양자화 모드가 바뀌면 낡은 weight를 재사용하는 대신 캐시를
+빗나간다. 체크포인트의 동일성은 캐시 디렉터리를 지정하는 호출자가 책임진다.
+
+검증: 캐시 없이 계산한 값과 **디스크에서 되읽은 값이 bit-identical**, 그래프를
+바꾸면 별도 항목이 생성됨. tiny 모델에서 4.88s → 0.018s. 실모델에서 이 단계는
+위 표의 첫 줄(FP16 48.7s / W8A8 171.1s)이다.
+
 ## 12. 겪은 버그와 교훈 (같은 함정을 다시 밟지 않기 위해)
 
 | 버그 | 원인 | 교훈 |
@@ -425,11 +506,13 @@ codegen을 가른다 → (2) 깊이·차원 이분으로 최소 재현을 만든
 
 ## 13. 남은 것
 
-- **실모델 양자화 실행** — `w_dequant` 버퍼가 아직 weight 전체 크기로 SRAM에
-  잡힘(타일 규모까지만 안전). 타일 루프로의 `compute_at`이 필요 — B1(weight
-  재적재)과 같은 성질.
-- **백로그** (`d_compiler/OPTIMIZATION_BACKLOG.md`) — 커널 경계 넘는 DMA 병합,
-  weight 재적재(B1), 상수 index `take`→slice(lm_head 낭비 S배), transpose의
+- ~~실모델 양자화의 `w_dequant` SRAM 폭발~~ → **해결 (§16.3)**. dequant를 K
+  타일 루프로 `compute_at` 하여 타일 단위로 만든다(실차원 cosine 0.999964).
+  남은 것은 전체 모델 W8A16 게이트 **실행**.
+- **W8A8 실차원** — 미해결. §17의 3b 참조.
+- **백로그** (`d_compiler/OPTIMIZATION_BACKLOG.md`) — codegen의 C++ 이식(A6,
+  **최종 목표**), 링크 시간 잔여분(A5), 커널 경계 넘는 DMA 병합, weight
+  재적재(B1), 상수 index `take`→slice(lm_head 낭비 S배), transpose의
   matmul 흡수, layout 전파, MetaSchedule 튜닝, 비동기 DMA 등.
 - ~~decode 경로~~ → **완료 (§18)**. 모델당 프로그램 2개(prefill_cache +
   고정 capacity decode)로 구현, tiny에서 float32 전체 재계산과 일치.
@@ -584,10 +667,21 @@ quantized [7,3072]×[3072,3072]  → 링크 성공, C-model 실행
 2. **B1: weight 재적재** — 실측 행 128에서 1.89×, 192에서 2.68× 외부 트래픽.
    15.2의 **86% 노는 SRAM**이 해법 공간: 열 타일을 바깥으로 돌리거나
    weight 패널 상주. 양자화와 결합하면(§16.2의 −31%와 곱) 효과가 복리다.
-3. **링크 시간** — 전체 모델 2~3시간. decode의 context별 재링크는 §18의
-   고정-capacity 설계로 **해소**(모델당 링크 2회, step 재링크 0회). 남는
-   것은 최초 링크 자체의 시간 — 커널 인스턴스 간 word가 거의 같으므로
-   "커널 템플릿 + 주소 패치" 캐시로 크게 줄일 수 있다.
+3. ~~링크 시간~~ → **1차 완료 (§11.1), 5.96배**. decode의 context별 재링크는
+   §18의 고정-capacity 설계로 해소(모델당 링크 2회, step 재링크 0회)했고,
+   최초 링크 자체도 실차원 1층 기준 246.1s → 41.3s가 됐다. 원인은 언롤이
+   아니라 루프 안의 FFI 왕복이었다. 남은 것은 백로그 **A5**(`env`가 TIR
+   객체로 키잉 — 층당 FFI 해시 380만 회)와 **A6**(codegen의 C++ 이식, 최종
+   목표). 손작성 backend가 같은 파이썬으로 816k word/s를 내므로 목표치는
+   분명하다.
+
+3b. **W8A8 실차원 미해결** — 단일 커널은 모든 시험 폭에서 bit-exact이고 tiny
+   전체 모델도 0.999998인데, 실 체크포인트에서는 28층이 token 0 / cosine NaN,
+   1층 절단이 llvm 대비 cosine 0.111이다. 커널 단독은 맞으므로 **커널 간
+   상호작용**(sticky 서술자 상태 또는 SRAM 겹침)이 의심된다. SNAPSHOT 추적을
+   붙였으나 참조 하네스 자체에 버그가 있어(참조가 일부 텐서를 0으로 읽음)
+   아직 신뢰할 수 없다 — 하네스부터 고쳐야 한다. 1층 재현이 41s 링크로
+   가능해졌으므로(§11.1) 사이클은 짧다.
 4. **A2 잔여: 커널 경계를 넘는 DMA 병합** — 층 출력 store 직후 다음 커널이
    같은 텐서를 다시 load하는 왕복이 남아 있다.
 5. **C2: 상수 index take → slice** — prefill lm_head가 전체 seq에 대해
@@ -666,7 +760,11 @@ logits + 초기 cache 반환)와 `decode`(capacity 고정). 런타임
 |---|---|
 | tiny 3-token 생성 (mask 경로 포함) | **NPU == llvm == float32 전체 재계산** (`[0,1,27]`) — cache가 의미 변경 없는 최적화임을 매 step 증명 |
 | 실 체크포인트 2층 절단 | NPU == llvm (`[0,0,0]`) |
-| 전체 28층 golden `[358,1184,311]` | **게이트 진행 중** (프로그램 2개 링크, ~4h) — 완료 시 여기에 추기 |
+| 전체 28층 golden `[358,1184,311]` | **미실행.** 프로그램 2개를 링크해야 하는데, 링크가 §11.1 이전에는 프로그램당 2시간대였다. 5.96배 개선과 params 캐시(§11.2)를 반영해 다시 돌릴 것 |
+
+prefill 단계의 첫 토큰이 golden 358과 일치하는 것은 §14에서 이미 확인됐으므로,
+이 게이트가 새로 검증하는 것은 **decode 두 step**(고정 capacity + 길이 mask +
+host의 KV 기록)이다.
 
 
 ---

@@ -206,6 +206,19 @@ def test_rows_wider_than_a_scratch_slot():
         print(f"  [PASS] silu row of {width:5d} max|diff|={error:.5f}")
 
 
+def test_deep_concat_splits_recursively():
+    """An N-way concat lowers to N-1 NESTED selects; the 28-layer KV-cache
+    stack is a 27-deep chain, which a single-level splitter mis-read."""
+    rng = np.random.default_rng(3)
+    parts = [rng.normal(0, 0.5, (3, 16)).astype(np.float16) for _ in range(6)]
+    got, _, _ = _run([(3, 16)] * 6,
+                     lambda *a: relax.op.concat(list(a), axis=1),
+                     parts, (3, 96))
+    ref = np.concatenate(parts, axis=1)
+    assert np.array_equal(got.view(np.uint16), ref.view(np.uint16))
+    print("  [PASS] 6-way concat (5 nested selects) bit-exact")
+
+
 def test_gelu_tanh_saturates_instead_of_dividing_infinities():
     """Gemma's MLP needs tanh, which is expanded as 1 - 2/(exp(2x)+1) so that
     an overflowed exponential gives exactly 1 rather than inf/inf."""
@@ -271,6 +284,7 @@ if __name__ == "__main__":
     test_tile_staging_uses_one_2d_transfer()
     test_odd_row_lengths_transfer_correctly()
     test_rows_wider_than_a_scratch_slot()
+    test_deep_concat_splits_recursively()
     test_gelu_tanh_saturates_instead_of_dividing_infinities()
     test_whole_layer_matches_the_cpu_build()
     print("ALL NPU LINK (S5) TESTS PASSED")

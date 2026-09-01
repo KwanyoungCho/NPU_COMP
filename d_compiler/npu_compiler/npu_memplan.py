@@ -125,10 +125,10 @@ def _unique_names(func):
         def visit_dataflow_var_def_(self, var):
             return self._fresh(var)
 
-    renamer = Rename()
-    for param in func.params:
-        renamer.seen.add(param.name_hint)
-    return renamer.visit_expr(func)
+    # params are visited as definitions first, so they claim their own names;
+    # pre-seeding them would make the renamer collide with itself and append
+    # an underscore to every parameter
+    return Rename().visit_expr(func)
 
 
 def assign_addresses(mod, func_name="prefill", unit_bytes=2):

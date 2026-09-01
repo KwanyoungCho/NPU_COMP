@@ -36,6 +36,9 @@ def parse_args():
     parser.add_argument("--llvm", action="store_true",
                         help="run the identical programs on the llvm build "
                              "instead of the C-model")
+    parser.add_argument("--params-cache", default=None,
+                        help="directory holding this checkpoint's transformed "
+                             "weights; computed on first use and reused after")
     return parser.parse_args()
 
 
@@ -60,7 +63,8 @@ def main():
     generated = npu_generate.generate(family, config, assets, input_ids,
                                       args.tokens,
                                       capacity=args.capacity or None,
-                                      runner=runner, progress=report)
+                                      runner=runner, progress=report,
+                                      params_cache=args.params_cache)
     result = {"model": args.model, "backend": "llvm" if args.llvm else "npu",
               "generated": generated,
               "decoded": assets.tokenizer.decode(generated),

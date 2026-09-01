@@ -11,6 +11,9 @@ the next slot.  No per-step re-linking.
 """
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import numpy as np
 
 from . import npu_legalize, npu_link, npu_memplan
@@ -23,7 +26,16 @@ def _lower(mod):
         fuse=False, lift_params=True)(mod)
 
 
-def _transform(lowered, entry, weights):
+def _run_transform(lowered, entry, weights):
+    """Execute the lifted parameter transform on the host.
+
+    ``LiftTransformParams`` expresses the transform as IR (the weight
+    transposes, and the scale/quantize of a quantized build), so running that
+    IR is the only way to get exactly the values the linked program's image
+    expects -- reimplementing it in numpy would put the same rule in two
+    places, and a 1-ULP disagreement in a scale is enough to flip quantized
+    weights.
+    """
     import tvm
     from tvm import relax
 
@@ -31,14 +43,46 @@ def _transform(lowered, entry, weights):
     return [t.numpy() for t in vm[entry + "_transform_params"]([weights])]
 
 
-def run_tuple_program(lowered, entry, inputs, weights, cached=None):
+def _transform(lowered, entry, weights, cache=None):
+    """The host-side transform, computed once and reused from disk.
+
+    The transform does not change between runs of the same model, but running
+    it means building the whole module for CPU and recomputing several GiB of
+    weights every time.  ``cache`` is a directory the caller makes specific to
+    the checkpoint; within it the entries are keyed by the transform
+    function's own IR, so changing the graph or the quantization mode misses
+    the cache rather than reusing stale weights.
+
+    Cached arrays come back as read-only memmaps: ``build_image`` only copies
+    them into the image, so they never need to be resident.
+    """
+    if cache is None:
+        return _run_transform(lowered, entry, weights)
+    name = entry + "_transform_params"
+    key = hashlib.sha256(lowered[name].script().encode()).hexdigest()[:16]
+    directory = Path(cache) / f"{entry}-{key}"
+    marker = directory / "COMPLETE"
+    if marker.exists():
+        count = int(marker.read_text())
+        return [np.load(directory / f"{index}.npy", mmap_mode="r")
+                for index in range(count)]
+    transformed = _run_transform(lowered, entry, weights)
+    directory.mkdir(parents=True, exist_ok=True)
+    for index, array in enumerate(transformed):
+        np.save(directory / f"{index}.npy", array)
+    marker.write_text(str(len(transformed)))   # written last: a partial dump
+    return transformed                         # must not look complete
+
+
+def run_tuple_program(lowered, entry, inputs, weights, cached=None,
+                      params_cache=None):
     """Link ``entry`` once and run it on the C-model; -> (outputs, words,
     program).  Passing the returned program back as ``cached`` reuses the
     linked words and plan with only the inputs changed -- the decode loop's
     whole point.
     """
     if cached is None:
-        transformed = _transform(lowered, entry, weights)
+        transformed = _transform(lowered, entry, weights, params_cache)
         asm, plan = npu_link.compile_program(lowered, entry)
         planned, _ = npu_memplan.assign_addresses(lowered, entry)
         func = planned[entry]
@@ -79,7 +123,7 @@ def length_mask(capacity, length, dtype=np.float16):
 
 
 def generate(family, config, assets, token_ids, steps, capacity=None,
-             runner=None, progress=None):
+             runner=None, progress=None, params_cache=None):
     """Greedy generation: prompt ``token_ids`` -> ``steps`` new tokens.
 
     Links two programs once -- prefill_cache and decode at ``capacity``
@@ -87,6 +131,9 @@ def generate(family, config, assets, token_ids, steps, capacity=None,
     the decode program with only its inputs changing.  ``runner`` defaults
     to the C-model; the llvm runner reruns the identical programs on CPU,
     which is how the tests cross-check each step.
+
+    ``params_cache`` is a directory holding this checkpoint's transformed
+    weights; see :func:`_transform`.
     """
     runner = runner or run_tuple_program
     seq = len(token_ids)
@@ -104,7 +151,8 @@ def generate(family, config, assets, token_ids, steps, capacity=None,
     prefill_inputs = {"input_embeds": inputs["input_embeds"],
                       "cos": cos, "sin": sin, "mask": inputs["mask"]}
     (logits, k_rows, v_rows), words, _ = _run3(
-        runner, lowered, "prefill_cache", prefill_inputs, weights)
+        runner, lowered, "prefill_cache", prefill_inputs, weights,
+        params_cache=params_cache)
     generated = [int(np.argmax(logits[-1].astype(np.float32)))]
     if progress:
         progress("prefill", seq, generated[-1], words)
@@ -127,7 +175,8 @@ def generate(family, config, assets, token_ids, steps, capacity=None,
             "mask": length_mask(capacity, position),
         }
         (logits, k_new, v_new), words, decode = _run3(
-            runner, lowered, "decode", step_inputs, weights, cached=decode)
+            runner, lowered, "decode", step_inputs, weights, cached=decode,
+            params_cache=params_cache)
         k_cache[:, :, :, position] = k_new[:, :, :, 0]
         v_cache[:, :, position, :] = v_new[:, :, 0, :]
         generated.append(int(np.argmax(logits[-1].astype(np.float32))))
@@ -136,9 +185,10 @@ def generate(family, config, assets, token_ids, steps, capacity=None,
     return generated
 
 
-def _run3(runner, lowered, entry, inputs, weights, cached=None):
+def _run3(runner, lowered, entry, inputs, weights, cached=None,
+          params_cache=None):
     outputs, words, cached = runner(lowered, entry, inputs, weights,
-                                    cached=cached)
+                                    cached=cached, params_cache=params_cache)
     if len(outputs) != 3:
         raise RuntimeError(f"{entry}: expected 3 outputs, got {len(outputs)}")
     return tuple(outputs), words, cached
@@ -150,8 +200,12 @@ def _nd(value):
     return tvm.nd.array(value)
 
 
-def llvm_runner(lowered, entry, inputs, weights, cached=None):
-    """The same programs on the llvm build -- the per-step cross-check."""
+def llvm_runner(lowered, entry, inputs, weights, cached=None,
+                params_cache=None):
+    """The same programs on the llvm build -- the per-step cross-check.
+
+    The transform runs inside this build, so the disk cache does not apply.
+    """
     import tvm
     from tvm import relax
 
