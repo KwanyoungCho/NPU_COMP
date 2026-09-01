@@ -914,13 +914,15 @@ class Walker:
                 group = self._contiguous_group(segments, index)
                 aligned = all(g % 4 == 0 and n % 4 == 0
                               for g, _, n in segments[index:group])
-            if aligned or group == index + 1:
-                if glob % 4:
-                    raise V09TirError("DMA region must start on a 32-bit cell")
+            if (aligned or group == index + 1) and glob % 4 == 0:
                 if to_sram:
                     self.stage.dma_in(glob, sram, count)
                 else:
                     self.stage.dma_out(glob, sram, count)
+                index += 1
+                continue
+            if group == index + 1:           # single mis-aligned row: gather
+                self._bounce_dma(glob, [(sram, count)], to_sram)
                 index += 1
                 continue
             self._bounce_dma(glob, [(s, n) for _, s, n in segments[index:group]],

@@ -84,7 +84,7 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(config.num_heads * config.head_dim,
                                 config.hidden_size, bias=False)
 
-    def forward(self, hidden, cos, sin, mask):
+    def forward(self, hidden, cos, sin, mask, with_cache=False):
         seq = hidden.shape[0]
         h, kv, hd = self.num_heads, self.num_kv_heads, self.head_dim
         q = op.reshape(self.q_proj(hidden), [seq, h, hd])
@@ -93,6 +93,7 @@ class Attention(nn.Module):
         # cos/sin are [seq, 1, hd] and broadcast over heads
         q = _apply_rope(q, cos, sin, hd)
         k = _apply_rope(k, cos, sin, hd)
+        cache = (k, v) if with_cache else None
         # grouped-query attention: repeat each kv head h//kv times
         group = h // kv
         k = op.reshape(op.repeat(k, group, axis=1), [seq, h, hd])
@@ -111,7 +112,34 @@ class Attention(nn.Module):
         probs = op.softmax(scores, axis=-1)
         out = op.matmul(probs, v)                       # [h, seq, hd]
         out = op.reshape(op.permute_dims(out, [1, 0, 2]), [seq, h * hd])
-        return self.o_proj(out)
+        out = self.o_proj(out)
+        return (out, cache) if with_cache else out
+
+    def decode(self, hidden, cos, sin, k_prev, v_prev):
+        """One token against a cache: K arrives transposed [kv, hd, prev] and
+        V as [kv, prev, hd]; this token's K/V are appended in-graph and also
+        returned so the host can extend the cache once per step."""
+        h, kv, hd = self.num_heads, self.num_kv_heads, self.head_dim
+        q = op.reshape(self.q_proj(hidden), [1, h, hd])
+        k = op.reshape(self.k_proj(hidden), [1, kv, hd])
+        v = op.reshape(self.v_proj(hidden), [1, kv, hd])
+        q = _apply_rope(q, cos, sin, hd)
+        k = _apply_rope(k, cos, sin, hd)
+        k_new = op.permute_dims(k, [1, 2, 0])           # [kv, hd, 1]
+        v_new = op.permute_dims(v, [1, 0, 2])           # [kv, 1, hd]
+        keys = op.concat([k_prev, k_new], dim=2)        # [kv, hd, ctx]
+        values = op.concat([v_prev, v_new], dim=1)      # [kv, ctx, hd]
+        group = h // kv
+        keys = op.repeat(keys, group, axis=0)           # [h, hd, ctx]
+        values = op.repeat(values, group, axis=0)       # [h, ctx, hd]
+        q = op.permute_dims(q, [1, 0, 2])               # [h, 1, hd]
+        scores = op.matmul(q, keys)                     # [h, 1, ctx]
+        scores = op.multiply(scores, nn.Tensor.from_scalar(
+            1.0 / np.sqrt(hd), dtype=scores.dtype))
+        # no mask: a decode step attends to the whole context
+        out = op.matmul(op.softmax(scores, axis=-1), values)   # [h, 1, hd]
+        out = op.reshape(op.permute_dims(out, [1, 0, 2]), [1, h * hd])
+        return self.o_proj(out), k_new, v_new
 
 
 class MLP(nn.Module):
@@ -137,10 +165,22 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm = nn.RMSNorm(config.hidden_size, -1,
                                                    config.rms_eps, bias=False)
 
-    def forward(self, hidden, cos, sin, mask):
-        hidden = op.add(hidden, self.self_attn(
-            self.input_layernorm(hidden), cos, sin, mask))
-        return op.add(hidden, self.mlp(self.post_attention_layernorm(hidden)))
+    def forward(self, hidden, cos, sin, mask, with_cache=False):
+        attended = self.self_attn(self.input_layernorm(hidden), cos, sin,
+                                  mask, with_cache)
+        cache = None
+        if with_cache:
+            attended, cache = attended
+        hidden = op.add(hidden, attended)
+        hidden = op.add(hidden, self.mlp(self.post_attention_layernorm(hidden)))
+        return (hidden, cache) if with_cache else hidden
+
+    def decode(self, hidden, cos, sin, k_prev, v_prev):
+        attended, k_new, v_new = self.self_attn.decode(
+            self.input_layernorm(hidden), cos, sin, k_prev, v_prev)
+        hidden = op.add(hidden, attended)
+        hidden = op.add(hidden, self.mlp(self.post_attention_layernorm(hidden)))
+        return hidden, k_new, v_new
 
 
 class LlamaModel(nn.Module):
@@ -166,19 +206,71 @@ class LlamaModel(nn.Module):
         # slice) for the pass that would remove the extra work.
         return self.lm_head(hidden)
 
-    def get_default_spec(self, seq):
+    def prefill_cache(self, input_embeds: nn.Tensor, cos: nn.Tensor,
+                      sin: nn.Tensor, mask: nn.Tensor):
+        """Prefill that also returns the stacked KV cache: the keys already
+        transposed to [L, kv, hd, S] (what the decode score matmul reads) and
+        the values as [L, kv, S, hd]."""
+        hidden = input_embeds
+        keys, values = [], []
+        for layer in self.layers:
+            hidden, (k, v) = layer(hidden, cos, sin, mask, with_cache=True)
+            keys.append(op.unsqueeze(op.permute_dims(k, [1, 2, 0]), 0))
+            values.append(op.unsqueeze(op.permute_dims(v, [1, 0, 2]), 0))
+        logits = self.lm_head(self.norm(hidden))
+        return logits, op.concat(keys, dim=0), op.concat(values, dim=0)
+
+    def decode(self, input_embeds: nn.Tensor, cos: nn.Tensor, sin: nn.Tensor,
+               k_cache: nn.Tensor, v_cache: nn.Tensor):
+        """One token; -> (logits, this step's K rows [L,kv,hd,1] and V rows
+        [L,kv,1,hd]) for the host to append."""
+        layers = len(self.layers)
+        kv = self.config.num_kv_heads
+        hd = self.config.head_dim
+        prev = k_cache.shape[3]
+        k_split = op.split(k_cache, layers, axis=0) if layers > 1 else [k_cache]
+        v_split = op.split(v_cache, layers, axis=0) if layers > 1 else [v_cache]
+        hidden = input_embeds
+        new_keys, new_values = [], []
+        for index, layer in enumerate(self.layers):
+            k_prev = op.reshape(k_split[index], [kv, hd, prev])
+            v_prev = op.reshape(v_split[index], [kv, prev, hd])
+            hidden, k_new, v_new = layer.decode(hidden, cos, sin,
+                                                k_prev, v_prev)
+            new_keys.append(op.unsqueeze(k_new, 0))
+            new_values.append(op.unsqueeze(v_new, 0))
+        logits = self.lm_head(self.norm(hidden))
+        return (logits, op.concat(new_keys, dim=0),
+                op.concat(new_values, dim=0))
+
+    def get_default_spec(self, seq, decode_context=0):
         hd = self.config.head_dim
         d = self.config.hidden_size
         h = self.config.num_heads
-        return nn.spec.ModuleSpec.from_raw({
+        kv = self.config.num_kv_heads
+        layers = self.config.num_layers
+        dtype = self.config.dtype
+        spec = {
             "prefill": {
-                "input_embeds": nn.spec.Tensor([seq, d], self.config.dtype),
-                "cos": nn.spec.Tensor([seq, 1, hd], self.config.dtype),
-                "sin": nn.spec.Tensor([seq, 1, hd], self.config.dtype),
-                "mask": nn.spec.Tensor([h, seq, seq], self.config.dtype),
+                "input_embeds": nn.spec.Tensor([seq, d], dtype),
+                "cos": nn.spec.Tensor([seq, 1, hd], dtype),
+                "sin": nn.spec.Tensor([seq, 1, hd], dtype),
+                "mask": nn.spec.Tensor([h, seq, seq], dtype),
+                "$": {"param_mode": "packed", "effect_mode": "none"},
+            },
+        }
+        if decode_context:
+            prev = decode_context - 1
+            spec["prefill_cache"] = dict(spec["prefill"])
+            spec["decode"] = {
+                "input_embeds": nn.spec.Tensor([1, d], dtype),
+                "cos": nn.spec.Tensor([1, 1, hd], dtype),
+                "sin": nn.spec.Tensor([1, 1, hd], dtype),
+                "k_cache": nn.spec.Tensor([layers, kv, hd, prev], dtype),
+                "v_cache": nn.spec.Tensor([layers, kv, prev, hd], dtype),
                 "$": {"param_mode": "packed", "effect_mode": "none"},
             }
-        }, self)
+        return nn.spec.ModuleSpec.from_raw(spec, self)
 
 
 def build_prefill(hf_config, seq):
@@ -187,6 +279,20 @@ def build_prefill(hf_config, seq):
     model = LlamaModel(config)
     model.to(config.dtype)
     mod, params = model.export_tvm(spec=model.get_default_spec(seq))
+    return mod, params, config
+
+
+def build_generate(hf_config, seq, context):
+    """prefill_cache at ``seq`` plus decode at one exact ``context``.
+
+    Every shape is static on this machine, so each context length is its own
+    decode program; the caller builds one module per step.
+    """
+    config = LlamaConfig(hf_config)
+    model = LlamaModel(config)
+    model.to(config.dtype)
+    mod, params = model.export_tvm(
+        spec=model.get_default_spec(seq, decode_context=context))
     return mod, params, config
 
 
