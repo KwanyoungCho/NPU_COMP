@@ -456,3 +456,137 @@ HEAD 재실행으로 통과.
 
 이로써 PLAN_TVM.md의 S0~S8 전 단계가 완료 상태다. 남은 것은 §13의 백로그
 (성능 최적화)와 decode 경로의 표준화다.
+
+
+---
+
+# 부록: 메모리 계층·양자화 관점의 최적화 (2026-09-01 실측 포함)
+
+## 15. 한정된 SRAM(8 MiB)을 어떻게 쓰고 있나
+
+### 15.1 원칙: "상주"가 아니라 "타일 통과"
+
+가중치 하나([3072,3072] = 18 MiB)가 SRAM보다 크므로, 이 컴파일러의 SRAM 전략은
+**무엇을 상주시킬지 고르는 문제가 아니라, 모든 것을 타일 단위로 통과시키는
+문제**다. 세 장치가 이를 만든다:
+
+1. **`cache_read` + `compute_at`(k_o)** — matmul의 각 피연산자 타일이
+   **소비 직전** K-타일 루프에서 DMA로 올라오고, 다음 타일이 같은 자리를
+   재사용한다. 결과 타일은 `cache_write` 후 j_o에서 즉시 되쓴다.
+2. **`CompactBufferAllocation`(표준 pass)** — `cache_read`가 잡는 버퍼를
+   "생산자 전체 shape"에서 **실제 접근 영역**으로 줄인다. 이게 없으면
+   실모델 커널당 18~48 MiB를 요구해 링크가 불가능했다(§6).
+3. **커널 단위 bump 할당 + 함수 단위 storage 재사용** — 커널 로컬 버퍼는
+   커널마다 0부터 bump 할당(커널 사이 재사용은 자동), 커널 결과 텐서들은
+   `StaticPlanBlockMemory`가 생존구간으로 전역 storage를 재사용한다
+   (소형 모델 실측 −6.7%; lift와 결합해 활성 풀 1,599.7 MiB → 0.7 MiB).
+
+### 15.2 실측: 실모델 차원(3B, seq=7)에서 커널별 SRAM 사용량
+
+기계가 실제 호출하는 32개 커널 중 상위:
+
+| 커널 | SRAM | 내용 |
+|---|---|---|
+| `matmul5` (FFN down [7,8192]×[8192,3072]) | **1,160 KiB** | 최대 — A타일+B타일+C타일+패딩 버퍼 |
+| `matmul2` (QK^T batched) | 868 KiB | |
+| `matmul3` (probs×V) | 636 KiB | |
+| q/k/v/o/gate/up proj | 450 KiB | |
+| `silu` / `multiply` [7,8192] | 336 KiB | 행 단위 + scratch slot 6개 |
+| `npu_rms_norm` | 174 KiB | |
+
+**peak 1.13 MiB / 8 MiB = 14%.** 정확성 관점에서는 충분히 안전하고, 성능
+관점에서는 **86%가 노는 공간**이다 — §17의 B1(weight 상주/재적재 제거)과
+double-buffering이 정확히 이 공간을 쓰라고 있는 항목이다.
+
+### 15.3 DMA를 아끼는 세 가지 emitter 최적화 (모두 실측)
+
+| 기법 | 무엇 | 효과 |
+|---|---|---|
+| **2D 전송** | 넓은 텐서의 타일(행 n개, 일정 간격)을 명령 하나로 | staged 128³ matmul **5,313 → 273 word (19.5×)** |
+| **byte 단위 인접 병합** | 전역·SRAM 양쪽이 이어지는 행들을 한 전송으로 | 홀수 행 테스트 5,057 → 3,474 word |
+| **bounce(산집합 모음)** | 전역만 연속이고 SRAM이 흩어진/비정렬 행을 scratch에 모아 셀 정렬 전송 | 홀수 길이·비정렬 시작을 정확히 처리 (KV cache 행 10바이트 간격이 이 경로) |
+
+여기에 **A1 peephole**(§8)이 서술자 중복 설정을 지워 전체 프로그램을
+−35~51% 줄인다(전부 bit-exact 확인).
+
+## 16. 양자화(W8A16): Q/DQ 그래프는 어떻게 처리되나
+
+### 16.1 구조로 해결한 Q/DQ — "fusion pass"가 필요 없게 설계
+
+일반적인 양자화 그래프는 weight마다 Q(quantize)/DQ(dequantize) 노드가 붙어
+커널 수가 불어나고, 이를 fusion pass로 이웃 연산에 접는 것이 통례다.
+이 컴파일러는 **배치(placement)로 같은 결과를 얻는다**:
+
+1. **Q는 기계에 아예 없다.** `scale`·`quantize` 계산은 파라미터만의 함수라서
+   `LiftTransformParams`가 **호스트 1회 실행**으로 hoist한다.
+2. **DQ는 matmul과 한 PrimFunc다.** dequant(VDEQUANT + scale row 곱)와
+   matmul을 한 커널로 내보내므로, lift가 둘을 갈라 FP16 weight를 전역에
+   되돌릴 수 없고(→ DMA 절감 유지), 그래프에 독립 DQ 노드가 생기지 않는다.
+
+**실측 census (tiny Llama 1층, W8A16):**
+
+```
+DEVICE(매 토큰): 45 calls — npu_qmatmul×5, matmul×5(좁은 k/v proj·어텐션·lm_head는 dense 유지),
+                 나머지는 비양자화와 동일.  독립 Q/DQ 커널: 0개
+HOST(1회):       npu_w_quantize×5, npu_w_scale(fp32+fp16)×10, transpose×8
+```
+
+즉 **일반 FuseOps 없이도 Q/DQ가 전부 접혀 있다.** 참고로 일반 융합은 측정
+결과 이 기계에서 무익하다(§3): 벡터 유닛이 한 번에 연산 하나라 융합 본문을
+다시 풀면 같은 일이 되고(word 29,970 vs 29,946), 현재 codegen으로는 결과도
+틀린다(cosine 0.1749) — 그래서 기본 off다.
+
+### 16.2 실측: 양자화의 실제 이득 (같은 모델, 같은 입력, C-model 카운터)
+
+| | FP16 | W8A16 | Δ |
+|---|---|---|---|
+| DMA 적재 (cells) | 25,701 | **17,733** | **−31.0%** |
+| weight bytes (lifted) | 78,208 | 46,336 | −40.8% |
+| 프로그램 word | 19,321 | 24,525 | +26.9% (in-SRAM dequant 작업) |
+| float32 대비 cosine | 1.000000 | 0.999998 | 양자화 오차뿐 |
+
+weight가 정확히 절반이 안 되는 이유: norm/좁은 proj는 FP16 유지 +
+채널당 FP16 scale이 추가되기 때문. word 증가는 **SRAM 내부 작업**(VDEQUANT
++ 곱)이라 외부 메모리 트래픽과 무관하다 — 이 기계의 병목 가정(DMA)에서
+올바른 교환이다. 커널 수준으로는 numpy mirror와 **bit-exact**(64³·패딩
+7×128×96)까지 확인되어 있다.
+
+### 16.3 실측: 양자화가 지금 막히는 지점 (실모델 차원)
+
+```
+quantized [7,3072]×[3072,3072] 링크 시도:
+  LinkError: kernel exceeds SRAM capacity
+    w_dequant_global.sram  18.00 MiB (float16)   <- 원인
+    lv1_global.sram         9.00 MiB (int8)
+```
+
+`w_dequant` 버퍼가 **weight 전체 크기**로 SRAM에 잡힌다 — dequant가 아직
+타일 루프 안으로 `compute_at` 되지 않아서다. 15.1의 세 장치 중 (1)이
+이 커널에는 미적용인 상태다. **따라서 W8A16은 현재 타일 규모까지 검증,
+실모델 규모는 §17-1이 선행 조건이다.**
+
+## 17. 남은 이슈와 최적화 항목 (우선순위순, 측정치 포함)
+
+1. **양자화 dequant의 타일화** — §16.3 실측(18 MiB)이 근거. `w_dequant`를
+   k/j 타일로 `compute_at`하면 타일당 몇백 KiB로 내려간다. 트레이드오프:
+   행 타일마다 재-dequant(B1과 동형의 재계산 비용) ↔ SRAM 상주. 이게 풀려야
+   실모델 W8A16 게이트(oracle의 cosine 0.9994~0.9998 재현)가 가능하다.
+2. **B1: weight 재적재** — 실측 행 128에서 1.89×, 192에서 2.68× 외부 트래픽.
+   15.2의 **86% 노는 SRAM**이 해법 공간: 열 타일을 바깥으로 돌리거나
+   weight 패널 상주. 양자화와 결합하면(§16.2의 −31%와 곱) 효과가 복리다.
+3. **링크 시간** — 전체 모델 2~3시간, decode는 **context마다 재링크**.
+   직선 ISA라 프로그램이 크지만, 커널 인스턴스 간 word가 거의 같으므로
+   "커널 템플릿 + 주소 패치" 방식의 캐시로 크게 줄일 수 있다. decode
+   상용화의 실질 병목.
+4. **A2 잔여: 커널 경계를 넘는 DMA 병합** — 층 출력 store 직후 다음 커널이
+   같은 텐서를 다시 load하는 왕복이 남아 있다.
+5. **C2: 상수 index take → slice** — prefill lm_head가 전체 seq에 대해
+   계산됨(마지막 행만 필요) → **×seq 낭비**(seq=7이면 7배). decode 경로는
+   1행이라 이미 낭비가 없다.
+6. **비동기 DMA/double buffering** — ISA에 barrier가 없어 전송·연산 중첩
+   불가(ISA 확장 보류 항목). 15.2의 SRAM 여유가 이중 버퍼 공간이다.
+7. **정밀도 관찰** — 실데이터 RMSNorm에서 `(x/√D)²`가 fp16 subnormal에
+   닿아 상대오차 0.55%(스케일 10배 시 0.10%) 실측. 현재 cosine 게이트에는
+   무해하나, scale-aware 전개(입력 크기에 따라 사전 스케일 선택)가 후보.
+8. **MetaSchedule 타일 튜닝 / layout 전파(C4) / transpose 흡수(C3)** —
+   미측정 백로그 유지.
