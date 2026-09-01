@@ -431,8 +431,9 @@ codegen을 가른다 → (2) 깊이·차원 이분으로 최소 재현을 만든
 - **백로그** (`d_compiler/OPTIMIZATION_BACKLOG.md`) — 커널 경계 넘는 DMA 병합,
   weight 재적재(B1), 상수 index `take`→slice(lm_head 낭비 S배), transpose의
   matmul 흡수, layout 전파, MetaSchedule 튜닝, 비동기 DMA 등.
-- **decode 경로** — 현재는 prefill만. KV cache를 든 decode는 기존 손작성
-  경로에 검증본이 있고, 표준 경로로의 이식이 다음 큰 단계다.
+- ~~decode 경로~~ → **완료 (§18)**. 모델당 프로그램 2개(prefill_cache +
+  고정 capacity decode)로 구현, tiny에서 float32 전체 재계산과 일치.
+  전체 28층 golden 게이트는 §18.3 참조.
 
 ## 14. 전체 깊이 게이트 최종 결과 (2026-09-01 확정)
 
@@ -560,24 +561,33 @@ quantized [7,3072]×[3072,3072] 링크 시도:
     lv1_global.sram         9.00 MiB (int8)
 ```
 
-`w_dequant` 버퍼가 **weight 전체 크기**로 SRAM에 잡힌다 — dequant가 아직
-타일 루프 안으로 `compute_at` 되지 않아서다. 15.1의 세 장치 중 (1)이
-이 커널에는 미적용인 상태다. **따라서 W8A16은 현재 타일 규모까지 검증,
-실모델 규모는 §17-1이 선행 조건이다.**
+`w_dequant` 버퍼가 **weight 전체 크기**로 SRAM에 잡혀 있었다 — dequant가
+타일 루프 안으로 `compute_at` 되지 않아서였다.
+
+**해결(2026-09-01)**: `w_dequant`와 그 뒤의 int8/scale stage를
+`compute_at(k_o)`로 K-타일 루프에 넣었다. dequant된 weight가 타일 하나씩만
+존재하고 `CompactBufferAllocation`이 타일 크기로 줄인다. 실측:
+
+```
+quantized [7,3072]×[3072,3072]  → 링크 성공, C-model 실행
+  fp32 dense 대비 cosine 0.999964   (순수 INT8 오차 수준)
+  numpy mirror 대비 max|diff| 0.04
+```
+
+트레이드오프는 행 타일마다 재-dequant(B1의 재적재와 동형). 남은 것은 전체
+모델 W8A16 게이트(oracle의 cosine 0.9994~0.9998 재현)뿐이다.
 
 ## 17. 남은 이슈와 최적화 항목 (우선순위순, 측정치 포함)
 
-1. **양자화 dequant의 타일화** — §16.3 실측(18 MiB)이 근거. `w_dequant`를
-   k/j 타일로 `compute_at`하면 타일당 몇백 KiB로 내려간다. 트레이드오프:
-   행 타일마다 재-dequant(B1과 동형의 재계산 비용) ↔ SRAM 상주. 이게 풀려야
-   실모델 W8A16 게이트(oracle의 cosine 0.9994~0.9998 재현)가 가능하다.
+1. ~~양자화 dequant의 타일화~~ → **완료 (§16.3)**. 남은 것은 전체 모델
+   W8A16 게이트 실행뿐.
 2. **B1: weight 재적재** — 실측 행 128에서 1.89×, 192에서 2.68× 외부 트래픽.
    15.2의 **86% 노는 SRAM**이 해법 공간: 열 타일을 바깥으로 돌리거나
    weight 패널 상주. 양자화와 결합하면(§16.2의 −31%와 곱) 효과가 복리다.
-3. **링크 시간** — 전체 모델 2~3시간, decode는 **context마다 재링크**.
-   직선 ISA라 프로그램이 크지만, 커널 인스턴스 간 word가 거의 같으므로
-   "커널 템플릿 + 주소 패치" 방식의 캐시로 크게 줄일 수 있다. decode
-   상용화의 실질 병목.
+3. **링크 시간** — 전체 모델 2~3시간. decode의 context별 재링크는 §18의
+   고정-capacity 설계로 **해소**(모델당 링크 2회, step 재링크 0회). 남는
+   것은 최초 링크 자체의 시간 — 커널 인스턴스 간 word가 거의 같으므로
+   "커널 템플릿 + 주소 패치" 캐시로 크게 줄일 수 있다.
 4. **A2 잔여: 커널 경계를 넘는 DMA 병합** — 층 출력 store 직후 다음 커널이
    같은 텐서를 다시 load하는 왕복이 남아 있다.
 5. **C2: 상수 index take → slice** — prefill lm_head가 전체 seq에 대해
@@ -590,3 +600,43 @@ quantized [7,3072]×[3072,3072] 링크 시도:
    무해하나, scale-aware 전개(입력 크기에 따라 사전 스케일 선택)가 후보.
 8. **MetaSchedule 타일 튜닝 / layout 전파(C4) / transpose 흡수(C3)** —
    미측정 백로그 유지.
+
+
+## 18. decode와 생성 런타임 — 모델당 프로그램 2개 (2026-09-01)
+
+### 18.1 설계: 고정 capacity + 길이 mask
+
+동적 shape이 없는 기계에서 "step마다 context가 자라는" decode를 프로그램
+하나로 만드는 표준 해법을 썼다:
+
+- **cache는 고정 capacity**로 잡는다: K는 `[L, kv, hd, C]`(decode의 score
+  matmul이 바로 읽는 **전치** 배치), V는 `[L, kv, C, hd]`.
+- decode는 **항상 `C+1` slot을 어텐션**한다: 이번 토큰의 K/V를 그래프 안에서
+  concat으로 붙이고, **additive mask 입력 `[1,1,C+1]`** 이 현재 길이를
+  지정한다 — 유효 slot과 자기 자신은 0, 빈 slot은 fp16 바닥값(softmax가 0으로).
+- decode는 `(logits, 이번 step의 K행, V행)`을 반환하고, **호스트가 그 행을
+  cache의 다음 slot에 써넣는다**. shape이 step마다 불변이므로 컴파일된
+  decode 프로그램 하나가 전체 생성을 담당한다.
+
+따라서 배포 단위는 정확히 **프로그램 2개**다: `prefill_cache`(prompt 길이,
+logits + 초기 cache 반환)와 `decode`(capacity 고정). 런타임
+(`npu_generate.py`)은 둘을 **한 번 링크하고 재사용**한다 — step별 재링크가
+없다. 같은 루프를 llvm runner로도 돌릴 수 있어 step 단위 교차검증이 된다.
+
+### 18.2 양자화와의 관계 (사용자 질문 정리)
+
+- **weight 양자화(W8)는 오프라인이 맞다**: scale/quantize는 파라미터만의
+  함수라 lift된 transform에서 **모델 로드 시 1회** 실행된다(토큰마다 아님).
+  `run_nn_npu.py --params-cache`가 그 결과를 npz로 저장해 이후 실행에서
+  재사용한다 — 진짜 "사전 양자화 보관".
+- **vector unit의 VQUANT는 activation 양자화(A8)용**이다: 행마다 동적
+  max가 필요해 기계 안에서만 가능하다. W8A8 경로(oracle에 검증본 존재)의
+  표준 이식이 남은 항목이다.
+
+### 18.3 검증 상태
+
+| 수준 | 결과 |
+|---|---|
+| tiny 3-token 생성 (mask 경로 포함) | **NPU == llvm == float32 전체 재계산** (`[0,1,27]`) — cache가 의미 변경 없는 최적화임을 매 step 증명 |
+| 실 체크포인트 2층 절단 | NPU == llvm (`[0,0,0]`) |
+| 전체 28층 golden `[358,1184,311]` | **게이트 진행 중** (프로그램 2개 링크, ~4h) — 완료 시 여기에 추기 |
