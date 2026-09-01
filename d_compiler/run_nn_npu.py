@@ -73,6 +73,10 @@ def parse_args():
     parser.add_argument("--reference", default=None,
                         help="npz of HF logits to score against (defaults to "
                              "this family's recorded generation reference)")
+    parser.add_argument("--params-cache", default=None,
+                        help="npz path: save the transformed (e.g. quantized) "
+                             "weights on first run, reuse them afterwards -- "
+                             "the offline half of quantization")
     parser.add_argument("--skip-llvm", action="store_true",
                         help="skip the CPU build (saves memory on the full model)")
     return parser.parse_args()
@@ -114,8 +118,20 @@ def main():
 
     started = time.perf_counter()
     vm = relax.VirtualMachine(relax.build(lowered, "llvm"), tvm.cpu())
-    transformed = (vm["prefill_transform_params"]([weights]) if params else [])
-    print(f"  transform_params: {time.perf_counter() - started:.1f}s", flush=True)
+    cache_path = Path(args.params_cache) if args.params_cache else None
+    if cache_path is not None and cache_path.exists():
+        loaded = np.load(cache_path)
+        transformed = [tvm.nd.array(loaded[key]) for key in loaded.files]
+        print(f"  transform_params: reused {len(transformed)} tensors from "
+              f"{cache_path}", flush=True)
+    else:
+        transformed = (vm["prefill_transform_params"]([weights])
+                       if params else [])
+        if cache_path is not None and transformed:
+            np.savez(cache_path, *[t.numpy() for t in transformed])
+            print(f"  transform_params: saved to {cache_path}", flush=True)
+        print(f"  transform_params: {time.perf_counter() - started:.1f}s",
+              flush=True)
 
     reference = None
     if not args.skip_llvm:

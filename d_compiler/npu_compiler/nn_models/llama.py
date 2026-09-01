@@ -115,10 +115,18 @@ class Attention(nn.Module):
         out = self.o_proj(out)
         return (out, cache) if with_cache else out
 
-    def decode(self, hidden, cos, sin, k_prev, v_prev):
-        """One token against a cache: K arrives transposed [kv, hd, prev] and
-        V as [kv, prev, hd]; this token's K/V are appended in-graph and also
-        returned so the host can extend the cache once per step."""
+    def decode(self, hidden, cos, sin, k_prev, v_prev, mask):
+        """One token against a fixed-capacity cache.
+
+        K arrives transposed [kv, hd, C] and V as [kv, C, hd] where C is the
+        cache capacity, not the current length; the additive ``mask``
+        [1, 1, C+1] carries the length (zero over the valid slots and this
+        token, the fp16 floor elsewhere).  This is what makes ONE compiled
+        decode program serve every step: the shapes never change, only the
+        mask and the cache contents do.  This token's K/V are appended
+        in-graph for the attention and also returned so the host can write
+        them into the cache slot for the next step.
+        """
         h, kv, hd = self.num_heads, self.num_kv_heads, self.head_dim
         q = op.reshape(self.q_proj(hidden), [1, h, hd])
         k = op.reshape(self.k_proj(hidden), [1, kv, hd])
@@ -127,16 +135,16 @@ class Attention(nn.Module):
         k = _apply_rope(k, cos, sin, hd)
         k_new = op.permute_dims(k, [1, 2, 0])           # [kv, hd, 1]
         v_new = op.permute_dims(v, [1, 0, 2])           # [kv, 1, hd]
-        keys = op.concat([k_prev, k_new], dim=2)        # [kv, hd, ctx]
-        values = op.concat([v_prev, v_new], dim=1)      # [kv, ctx, hd]
+        keys = op.concat([k_prev, k_new], dim=2)        # [kv, hd, C+1]
+        values = op.concat([v_prev, v_new], dim=1)      # [kv, C+1, hd]
         group = h // kv
-        keys = op.repeat(keys, group, axis=0)           # [h, hd, ctx]
-        values = op.repeat(values, group, axis=0)       # [h, ctx, hd]
+        keys = op.repeat(keys, group, axis=0)           # [h, hd, C+1]
+        values = op.repeat(values, group, axis=0)       # [h, C+1, hd]
         q = op.permute_dims(q, [1, 0, 2])               # [h, 1, hd]
-        scores = op.matmul(q, keys)                     # [h, 1, ctx]
+        scores = op.matmul(q, keys)                     # [h, 1, C+1]
         scores = op.multiply(scores, nn.Tensor.from_scalar(
             1.0 / np.sqrt(hd), dtype=scores.dtype))
-        # no mask: a decode step attends to the whole context
+        scores = op.add(scores, mask)                   # kills empty slots
         out = op.matmul(op.softmax(scores, axis=-1), values)   # [h, 1, hd]
         out = op.reshape(op.permute_dims(out, [1, 0, 2]), [1, h * hd])
         return self.o_proj(out), k_new, v_new
@@ -175,9 +183,9 @@ class DecoderLayer(nn.Module):
         hidden = op.add(hidden, self.mlp(self.post_attention_layernorm(hidden)))
         return (hidden, cache) if with_cache else hidden
 
-    def decode(self, hidden, cos, sin, k_prev, v_prev):
+    def decode(self, hidden, cos, sin, k_prev, v_prev, mask):
         attended, k_new, v_new = self.self_attn.decode(
-            self.input_layernorm(hidden), cos, sin, k_prev, v_prev)
+            self.input_layernorm(hidden), cos, sin, k_prev, v_prev, mask)
         hidden = op.add(hidden, attended)
         hidden = op.add(hidden, self.mlp(self.post_attention_layernorm(hidden)))
         return hidden, k_new, v_new
@@ -221,13 +229,14 @@ class LlamaModel(nn.Module):
         return logits, op.concat(keys, dim=0), op.concat(values, dim=0)
 
     def decode(self, input_embeds: nn.Tensor, cos: nn.Tensor, sin: nn.Tensor,
-               k_cache: nn.Tensor, v_cache: nn.Tensor):
-        """One token; -> (logits, this step's K rows [L,kv,hd,1] and V rows
-        [L,kv,1,hd]) for the host to append."""
+               k_cache: nn.Tensor, v_cache: nn.Tensor, mask: nn.Tensor):
+        """One token against the fixed-capacity cache; -> (logits, this
+        step's K rows [L,kv,hd,1] and V rows [L,kv,1,hd]) for the host to
+        write into the next free slot."""
         layers = len(self.layers)
         kv = self.config.num_kv_heads
         hd = self.config.head_dim
-        prev = k_cache.shape[3]
+        prev = k_cache.shape[3]           # the capacity C
         k_split = op.split(k_cache, layers, axis=0) if layers > 1 else [k_cache]
         v_split = op.split(v_cache, layers, axis=0) if layers > 1 else [v_cache]
         hidden = input_embeds
@@ -236,7 +245,7 @@ class LlamaModel(nn.Module):
             k_prev = op.reshape(k_split[index], [kv, hd, prev])
             v_prev = op.reshape(v_split[index], [kv, prev, hd])
             hidden, k_new, v_new = layer.decode(hidden, cos, sin,
-                                                k_prev, v_prev)
+                                                k_prev, v_prev, mask)
             new_keys.append(op.unsqueeze(k_new, 0))
             new_values.append(op.unsqueeze(v_new, 0))
         logits = self.lm_head(self.norm(hidden))
@@ -260,14 +269,15 @@ class LlamaModel(nn.Module):
             },
         }
         if decode_context:
-            prev = decode_context - 1
+            capacity = decode_context
             spec["prefill_cache"] = dict(spec["prefill"])
             spec["decode"] = {
                 "input_embeds": nn.spec.Tensor([1, d], dtype),
                 "cos": nn.spec.Tensor([1, 1, hd], dtype),
                 "sin": nn.spec.Tensor([1, 1, hd], dtype),
-                "k_cache": nn.spec.Tensor([layers, kv, hd, prev], dtype),
-                "v_cache": nn.spec.Tensor([layers, kv, prev, hd], dtype),
+                "k_cache": nn.spec.Tensor([layers, kv, hd, capacity], dtype),
+                "v_cache": nn.spec.Tensor([layers, kv, capacity, hd], dtype),
+                "mask": nn.spec.Tensor([1, 1, capacity + 1], dtype),
                 "$": {"param_mode": "packed", "effect_mode": "none"},
             }
         return nn.spec.ModuleSpec.from_raw(spec, self)
@@ -282,17 +292,19 @@ def build_prefill(hf_config, seq):
     return mod, params, config
 
 
-def build_generate(hf_config, seq, context):
-    """prefill_cache at ``seq`` plus decode at one exact ``context``.
+def build_generate(hf_config, seq, capacity):
+    """The two programs of a deployed model: prefill_cache at the prompt
+    length and ONE decode at a fixed cache ``capacity``.
 
-    Every shape is static on this machine, so each context length is its own
-    decode program; the caller builds one module per step.
+    Static shapes cannot vary per step, so the decode program always attends
+    over ``capacity + 1`` slots and an additive mask input carries the
+    current length -- one compiled program serves the whole generation.
     """
     config = LlamaConfig(hf_config)
     model = LlamaModel(config)
     model.to(config.dtype)
     mod, params = model.export_tvm(
-        spec=model.get_default_spec(seq, decode_context=context))
+        spec=model.get_default_spec(seq, decode_context=capacity))
     return mod, params, config
 
 

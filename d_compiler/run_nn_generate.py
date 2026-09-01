@@ -30,6 +30,9 @@ def parse_args():
     parser.add_argument("--prompt", default="Hello, NPU compiler!")
     parser.add_argument("--layers", type=int, default=0)
     parser.add_argument("--tokens", type=int, default=3)
+    parser.add_argument("--capacity", type=int, default=0,
+                        help="decode cache capacity (default: prompt+tokens-1;"
+                             " a deployment would pick e.g. 512 once)")
     parser.add_argument("--llvm", action="store_true",
                         help="run the identical programs on the llvm build "
                              "instead of the C-model")
@@ -55,8 +58,9 @@ def main():
     started = time.perf_counter()
     runner = npu_generate.llvm_runner if args.llvm else None
     generated = npu_generate.generate(family, config, assets, input_ids,
-                                      args.tokens, runner=runner,
-                                      progress=report)
+                                      args.tokens,
+                                      capacity=args.capacity or None,
+                                      runner=runner, progress=report)
     result = {"model": args.model, "backend": "llvm" if args.llvm else "npu",
               "generated": generated,
               "decoded": assets.tokenizer.decode(generated),

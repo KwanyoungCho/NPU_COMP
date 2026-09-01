@@ -268,6 +268,21 @@ def schedule_matmul_sram(mod, func_name, tile=64):
             continue                       # already staged (padded operand)
         stage = sch.cache_read(block, index, SRAM_SCOPE)
         sch.compute_at(stage, k_o)
+    # a dequantized weight is a computed producer: without this it holds the
+    # WHOLE weight in SRAM (18 MiB at real widths).  Tiling it into the
+    # K-loop makes it -- and its int8/scale stages behind it -- one tile at a
+    # time, which CompactBufferAllocation then shrinks to tile extents.  The
+    # cost is re-dequantizing per row tile, the same trade B1 already makes
+    # for re-staging.
+    try:
+        dequant = sch.get_block("w_dequant", func_name=func_name)
+    except Exception:
+        dequant = None
+    if dequant is not None:
+        producers = list(sch.get_producers(dequant))
+        sch.compute_at(dequant, k_o)
+        for producer in producers:
+            sch.compute_at(producer, k_o)
     init = sch.decompose_reduction(block, k_o)
     sch.tensorize(sch.get_loops(block)[-3], "npu_gemm_acc_sram")
     sch.tensorize(sch.get_loops(init)[-2], "npu_fill_zero_sram")

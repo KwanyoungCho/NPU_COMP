@@ -147,10 +147,11 @@
    싣고 fp32 상수 1.0을 ascale로 가리켜 **순수 변환**으로 쓰고, per-channel
    scale은 뒤따르는 벡터곱이 적용한다. 변환 후 dtype을 FP16으로 복원(sticky)
 
-**주의해서 남겨두는 것**: `w_dequant` 버퍼는 지금 weight 전체 크기로 SRAM에
-잡힌다(타일 규모에서만 안전). 실모델 양자화 실행은 `w_dequant`를 타일 루프로
-`compute_at` 해야 한다 — B1(weight 재적재)과 같은 성질의 문제
-(테스트: tests/test_npu_quantize.py의 c-model 케이스 2종)
+**후속 해결(2026-09-01)**: `w_dequant`(+ int8/scale stage)를 `compute_at(k_o)`로
+타일 루프에 넣어 실모델 폭이 링크된다. 실측: quantized [7,3072]×[3072,3072]가
+C-model에서 **fp32 dense 대비 cosine 0.999964**(순수 INT8 오차 수준),
+mirror 대비 max|diff| 0.04. 트레이드오프는 행 타일마다 재-dequant(B1과 동형).
+남은 것: 전체 모델 W8A16 게이트(oracle cosine 0.9994~0.9998 재현)
 
 ## E. 참고: "표준 TVM으로 안 되는 것"의 정확한 구분
 
