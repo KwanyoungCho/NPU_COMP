@@ -32,8 +32,9 @@ REFERENCES = {
     "llama": "v3_reference_generate_hello_3.npz",
     "qwen3": "qwen3_reference_generate_hello_3.npz",
     "gemma": "gemma4_reference_generate_hello_3.npz",
+    "hf": "v3_reference_generate_hello_3.npz",     # same Llama checkpoint
 }
-GOLDEN_TOKEN = {"llama": 358, "qwen3": 358, "gemma": 108}
+GOLDEN_TOKEN = {"llama": 358, "qwen3": 358, "gemma": 108, "hf": 358}
 
 
 def load_family(name):
@@ -50,13 +51,19 @@ def load_family(name):
         from npu_compiler.nn_models import gemma
         from npu_compiler.gemma4_model import Gemma4Assets
         return gemma, Gemma4Assets()
+    if name == "hf":
+        # the HF checkpoint itself is the frontend: transformers builds the
+        # model, torch.export traces it, TVM's torch importer converts it
+        from npu_compiler.nn_models import hf
+        from npu_compiler.v3_model import Llama32Assets
+        return hf, Llama32Assets()
     raise SystemExit(f"unknown model family {name!r}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="llama",
-                        choices=("llama", "qwen3", "gemma"))
+                        choices=("llama", "qwen3", "gemma", "hf"))
     parser.add_argument("--prompt", default="Hello, NPU compiler!")
     parser.add_argument("--layers", type=int, default=0,
                         help="0 = all layers; smaller values truncate for a fast check")
@@ -85,51 +92,55 @@ def main():
     print(f"prompt {args.prompt!r} -> {seq} tokens, "
           f"{cfg.num_layers} layers", flush=True)
 
+    # the HF-traced frontend bakes its weights in as constants, so there is
+    # nothing to lift and no host-side transform to run
     lowered = pipeline.graph_pipeline(
         custom_legalize=npu_legalize.legalize_map(),
-        fuse=False, lift_params=True)(mod)
+        fuse=False, lift_params=bool(params))(mod)
 
     started = time.perf_counter()
     weights = [tvm.nd.array(value)
                for value in family.load_params(assets, params, cfg)]
     print(f"  weights loaded: {time.perf_counter() - started:.1f}s", flush=True)
+    entry = "prefill" if params else "main"
 
     graph_inputs = family.runtime_inputs(assets, cfg, input_ids)
     # take the order from the function signature, not the dict
-    order = [param.name_hint for param in lowered["prefill"].params
+    order = [param.name_hint for param in lowered[entry].params
              if param.name_hint in graph_inputs]
     if len(order) != len(graph_inputs):
         raise SystemExit(f"inputs {sorted(graph_inputs)} do not match "
-                         f"{[p.name_hint for p in lowered['prefill'].params]}")
+                         f"{[p.name_hint for p in lowered[entry].params]}")
 
     started = time.perf_counter()
     vm = relax.VirtualMachine(relax.build(lowered, "llvm"), tvm.cpu())
-    transformed = vm["prefill_transform_params"]([weights])
+    transformed = (vm["prefill_transform_params"]([weights]) if params else [])
     print(f"  transform_params: {time.perf_counter() - started:.1f}s", flush=True)
 
     reference = None
     if not args.skip_llvm:
         started = time.perf_counter()
-        reference = vm["prefill"](
+        reference = vm[entry](
             *[tvm.nd.array(graph_inputs[name]) for name in order],
-            *transformed).numpy()
+            *transformed).numpy().reshape(seq, cfg.vocab_size)
         print(f"  llvm prefill: {time.perf_counter() - started:.1f}s "
               f"-> token {int(np.argmax(reference[-1]))}", flush=True)
 
     started = time.perf_counter()
-    asm, plan = npu_link.compile_program(lowered)
+    asm, plan = npu_link.compile_program(lowered, entry)
     print(f"  link: {len(asm.words):,} words, {asm.kernel_count} kernels, "
           f"image {plan.top * 2 / 2**20:.1f} MiB "
           f"({time.perf_counter() - started:.0f}s)", flush=True)
 
-    planned, _ = npu_memplan.assign_addresses(lowered)
-    func = planned["prefill"]
+    planned, _ = npu_memplan.assign_addresses(lowered, entry)
+    func = planned[entry]
     values = dict(zip([p.name_hint for p in func.params],
                       [graph_inputs[name] for name in order]
                       + [t.numpy() for t in transformed]))
     started = time.perf_counter()
     logits, counters = npu_link.run_program(
         asm, plan, func, values, (seq, cfg.vocab_size))
+    logits = logits.reshape(seq, cfg.vocab_size)
     print(f"  c-model run: {time.perf_counter() - started:.0f}s", flush=True)
 
     token = int(np.argmax(logits[-1]))

@@ -29,6 +29,7 @@ from tvm import relax
 from .backend_0818 import CodegenError, _numel, _opname, plan
 from .isa_0818 import ACT_GELU, ACT_SILU, DST, IMM, SRC1, SRC2, VECTOR, Asm
 from .isa_v09 import (
+    V09EncodeError,
     DT_FP16, DT_FP32, DT_INT8, SRAM_NIBBLES, enc_ascale, enc_gload,
     enc_gstore, enc_halt, enc_mcols, enc_mrows, enc_snapshot, enc_vdequant,
     enc_vquant, enc_wscale)
@@ -41,6 +42,13 @@ DMA_MAX_CELLS = 0xFFFF
 class V09Asm(Asm):
     format_version = "v09"
     execution_target = "v09"
+
+    def vlen(self, n):
+        # the field is 16-bit and the base encoder masks silently; a longer
+        # vector would quietly process only the low bits' worth of lanes
+        if not 0 < int(n) <= 0xFFFF:
+            raise V09EncodeError(f"vlen={n} does not fit in 16 bits")
+        return super().vlen(n)
 
     def gload(self, g_addr, g_stride, sram, rows, cols):
         for word in enc_gload(g_addr, g_stride, sram, rows, cols):

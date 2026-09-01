@@ -722,10 +722,23 @@ class Walker:
                 raise V09TirError(f"movement destination stride {dst_stride}")
             asm = self.a
             if src_stride == src_unit:               # contiguous copy / slice
-                asm.vlen(length)
-                self.stage.vector(SRC1, src_base)
+                # the vector length field is 16-bit; longer rows go in pieces
+                offset = 0
+                while length - offset > 0xFFFF:
+                    asm.vlen(0xFFFF)
+                    self.stage.vector(SRC1, src_base + offset * src_unit)
+                    asm.load(0, SRC1)
+                    asm.v_copy()
+                    self.stage.vector(DST, dst_base + offset * dst_unit)
+                    asm.save(0)
+                    offset += 0xFFFF
+                asm.vlen(length - offset)
+                self.stage.vector(SRC1, src_base + offset * src_unit)
                 asm.load(0, SRC1)
                 asm.v_copy()
+                self.stage.vector(DST, dst_base + offset * dst_unit)
+                asm.save(0)
+                continue
             elif src_stride == 0:                    # broadcast along the row
                 asm.vlen(length)
                 self.stage.broadcast(src_base)
@@ -1198,21 +1211,42 @@ class SramEmitter:
 
     # -- DMA (global byte offsets <-> SRAM nibbles)
 
+    # rows and cols are 16-bit instruction fields; anything larger is split
+    MAX_CELLS = 0xFFFF
+
     def dma_in(self, global_byte, sram_nibble, nbytes):
-        cells, nib = self._cells(global_byte, nbytes, sram_nibble)
-        self.asm.gload(global_byte // 4, cells, nib, 1, cells)
+        self._dma_1d(self.asm.gload, global_byte, sram_nibble, nbytes)
 
     def dma_out(self, global_byte, sram_nibble, nbytes):
-        cells, nib = self._cells(global_byte, nbytes, sram_nibble)
-        self.asm.gstore(global_byte // 4, cells, nib, 1, cells)
+        self._dma_1d(self.asm.gstore, global_byte, sram_nibble, nbytes)
+
+    def _dma_1d(self, move, global_byte, sram_nibble, nbytes):
+        while nbytes > 0:
+            piece = min(nbytes, self.MAX_CELLS * 4)
+            cells, nib = self._cells(global_byte, piece, sram_nibble)
+            move(global_byte // 4, cells, nib, 1, cells)
+            global_byte += piece
+            sram_nibble += piece * 2
+            nbytes -= piece
 
     def dma_2d(self, global_byte, global_stride, sram_nibble, rows, nbytes,
                to_sram):
         """Move ``rows`` rows of ``nbytes`` bytes spaced ``global_stride``
         bytes apart in global memory to or from a packed SRAM block."""
-        cells, nib = self._cells(global_byte, nbytes, sram_nibble)
         move = self.asm.gload if to_sram else self.asm.gstore
-        move(global_byte // 4, global_stride // 4, nib, rows, cells)
+        if nbytes // 4 > self.MAX_CELLS:       # a row alone overflows the field
+            for _ in range(rows):
+                self._dma_1d(move, global_byte, sram_nibble, nbytes)
+                global_byte += global_stride
+                sram_nibble += nbytes * 2
+            return
+        while rows > 0:
+            batch = min(rows, self.MAX_CELLS)
+            cells, nib = self._cells(global_byte, nbytes, sram_nibble)
+            move(global_byte // 4, global_stride // 4, nib, batch, cells)
+            global_byte += batch * global_stride
+            sram_nibble += batch * nbytes * 2
+            rows -= batch
 
     @staticmethod
     def _cells(global_byte, nbytes, sram_nibble):

@@ -92,6 +92,45 @@ class StaticPlan:
         }
 
 
+def _unique_names(func):
+    """Give every binding variable a distinct name.
+
+    The plan (and the linker) key tensors by ``name_hint``, which the
+    hand-written frontends kept unique by construction.  Traced modules reuse
+    hints like ``lv`` across bindings, and a duplicate would silently alias
+    two different tensors to the last one's address.
+    """
+    from tvm.relax.expr_functor import PyExprMutator, mutator
+
+    @mutator
+    class Rename(PyExprMutator):
+        def __init__(self):
+            super().__init__()
+            self.seen = set()
+
+        def _fresh(self, var):
+            name = var.name_hint
+            while name in self.seen:
+                name = name + "_"
+            self.seen.add(name)
+            if name == var.name_hint:
+                return var
+            maker = (relax.DataflowVar
+                     if isinstance(var, relax.DataflowVar) else relax.Var)
+            return maker(name, var.struct_info)
+
+        def visit_var_def_(self, var):
+            return self._fresh(var)
+
+        def visit_dataflow_var_def_(self, var):
+            return self._fresh(var)
+
+    renamer = Rename()
+    for param in func.params:
+        renamer.seen.add(param.name_hint)
+    return renamer.visit_expr(func)
+
+
 def assign_addresses(mod, func_name="prefill", unit_bytes=2):
     """Run the standard planning passes and place every tensor in a flat buffer.
 
@@ -99,6 +138,7 @@ def assign_addresses(mod, func_name="prefill", unit_bytes=2):
     order, so the host fills the buffer the same way it does today.
     """
     planned = plan_pipeline()(mod)
+    planned[func_name] = _unique_names(planned[func_name])
     func = planned[func_name]
     plan = StaticPlan(unit_bytes)
 
