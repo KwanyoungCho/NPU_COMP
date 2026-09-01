@@ -630,8 +630,35 @@ logits + 초기 cache 반환)와 `decode`(capacity 고정). 런타임
   `run_nn_npu.py --params-cache`가 그 결과를 npz로 저장해 이후 실행에서
   재사용한다 — 진짜 "사전 양자화 보관".
 - **vector unit의 VQUANT는 activation 양자화(A8)용**이다: 행마다 동적
-  max가 필요해 기계 안에서만 가능하다. W8A8 경로(oracle에 검증본 존재)의
-  표준 이식이 남은 항목이다.
+  max가 필요해 기계 안에서만 가능하다.
+
+### 18.2b W8A8 — activation 양자화 완료 (2026-09-01)
+
+`QuantizeW8A8` pass가 파라미터-weight matmul을 W8A8 커널 하나로 재작성한다.
+기계 매핑은 oracle의 검증된 시퀀스를 그대로 방출한다(전용 emitter,
+`npu_w8a8.py`):
+
+- 행마다: `|x| = max(x, −x)` → seeded reduce-max → ÷127을 **FP32로 저장**
+  (scale 레지스터가 읽는 폭) → **VQUANT**로 INT8 행 생성 — 전부 SRAM 안.
+- **INT8×INT8 gemm**: 서술자 dtype=INT8, `ascale`/`wscale` 레지스터가
+  타일-로컬 scale 벡터를 가리키고, 기계가 부분합이 FP32 누산기에 들어갈 때
+  `w_scale[col]·a_scale[row]`을 곱한다(scale이 K에서 상수라 수학적으로 동일).
+- 이 커널만은 TIR을 걷지 않고 직접 방출한다 — TIR 본문은 llvm 교차검증용
+  의미 정의로 남는다(커널 단위 tensorize에 해당).
+
+**실측 (전부 C-model):**
+
+| 검증 | 결과 |
+|---|---|
+| mirror(`w8a8_reference`, lift된 q_w/w_scale 입력) 대비 | **bit-exact**: 64³, [7,128]×[128,192], [7,3072]×[3072,3072], [7,8192]×[8192,3072], [64,3072]×[3072,8192] |
+| fp32 dense 대비 cosine (실모델 폭) | 0.999917~0.999967 — 순수 W8A8 오차 |
+| tiny Llama 전체 그래프 | float32 대비 **0.999998**, argmax 일치, vquant 카운터 20(=양자화 matmul 5×행 4) |
+| 전체 28층 실 체크포인트 (`--quantize w8a8`) | **게이트 진행 중** — 완료 시 추기 |
+
+도중에 잡은 함정 둘: (a) gemm이 SRC1/SRC2 dtype을 INT8로 남겨 다음 커널의
+벡터 load가 거부 → emitter 끝에서 FP16 복원(sticky dtype 규칙 §12 재확인),
+(b) 호스트 transform의 w_scale이 numpy와 1 ULP 달라 경계값 725개가 반대로
+반올림 — mirror는 기계의 **실제 입력**(lift된 텐서)을 받아야 한다.
 
 ### 18.3 검증 상태
 

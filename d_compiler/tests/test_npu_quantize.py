@@ -174,10 +174,82 @@ def test_quantized_matmul_is_bit_exact_on_the_cmodel():
           f"({len(asm.words):,} words)")
 
 
+def test_w8a8_matmul_is_bit_exact_on_the_cmodel():
+    """The full W8A8 path: per-row dynamic activation quantization on the
+    machine (VQUANT), INT8xINT8 MAC with both scales applied at accumulator
+    entry -- bit-exact against the numpy mirror fed the same lifted weights."""
+    from npu_compiler import npu_link, npu_memplan as M
+    from npu_compiler.quantize import w8a8_reference
+
+    rng = np.random.default_rng(2)
+    for m, k, n in ((64, 64, 64), (7, 128, 192)):
+        x = rng.normal(0, 0.4, (m, k)).astype(np.float16)
+        weight = rng.normal(0, 0.2, (k, n)).astype(np.float16)
+        bb = relax.BlockBuilder()
+        left = relax.Var("a", relax.TensorStructInfo([m, k], "float16"))
+        right = relax.Var("w", relax.TensorStructInfo([k, n], "float16"))
+        with bb.function("prefill", [left, right]):
+            with bb.dataflow():
+                out = bb.emit_output(bb.emit(relax.op.matmul(left, right)))
+            bb.emit_func_output(out)
+        module = bb.finalize()
+        module["prefill"] = module["prefill"].with_attr("num_input", 1)
+        rewritten = npu_quantize.QuantizeW8A8()(module)
+        lowered = P.graph_pipeline(custom_legalize=npu_legalize.legalize_map(),
+                                   fuse=False, lift_params=True)(rewritten)
+        vm = relax.VirtualMachine(relax.build(lowered, "llvm"), tvm.cpu())
+        transformed = vm["prefill_transform_params"]([tvm.nd.array(weight)])
+        asm, plan = npu_link.compile_program(lowered)
+        planned, _ = M.assign_addresses(lowered)
+        func = planned["prefill"]
+        values = dict(zip([p.name_hint for p in func.params],
+                          [x] + [t.numpy() for t in transformed]))
+        got, counters = npu_link.run_program(asm, plan, func, values, (m, n))
+        q_w = [t.numpy() for t in transformed
+               if t.numpy().dtype == np.int8][0]
+        w_scale = [t.numpy() for t in transformed
+                   if t.numpy().dtype == np.float32][0]
+        reference, _, _ = w8a8_reference(x, q_w, w_scale)
+        assert counters.get("vquant") == m, counters.get("vquant")
+        assert np.array_equal(got.view(np.uint16), reference.view(np.uint16))
+        print(f"  [PASS] W8A8 [{m},{k}]x[{k},{n}] bit-exact vs mirror "
+              f"({len(asm.words):,} words, vquant={m})")
+
+
+def test_w8a8_model_runs_on_the_cmodel():
+    from npu_compiler import npu_link, npu_memplan as M
+
+    mod, params, cfg, weights, inputs = _model()
+    exact = _reference(cfg, weights, *inputs)
+    rewritten = npu_quantize.QuantizeW8A8()(mod)
+    lowered = P.graph_pipeline(custom_legalize=npu_legalize.legalize_map(),
+                               fuse=False, lift_params=True)(rewritten)
+    vm = relax.VirtualMachine(relax.build(lowered, "llvm"), tvm.cpu())
+    transformed = vm["prefill_transform_params"](
+        [[tvm.nd.array(weights[name]) for name, _ in params]])
+    asm, plan = npu_link.compile_program(lowered)
+    planned, _ = M.assign_addresses(lowered)
+    func = planned["prefill"]
+    values = dict(zip([p.name_hint for p in func.params],
+                      list(inputs) + [t.numpy() for t in transformed]))
+    got, counters = npu_link.run_program(asm, plan, func, values, exact.shape)
+    a = got.astype(np.float64).ravel()
+    b = exact.astype(np.float64).ravel()
+    cosine = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+    assert np.isfinite(a).all()
+    assert cosine > 0.999, cosine
+    assert int(np.argmax(got[-1])) == int(np.argmax(exact[-1]))
+    assert counters.get("vquant", 0) > 0     # the machine really quantized
+    print(f"  [PASS] W8A8 model on the c-model: cosine {cosine:.6f} "
+          f"({len(asm.words):,} words, vquant={counters['vquant']})")
+
+
 if __name__ == "__main__":
     test_only_parameter_weights_are_quantized()
     test_op_matches_the_numpy_mirror()
     test_quantized_model_matches_float32_and_lifts_the_packing()
     test_quantized_matmul_is_bit_exact_on_the_cmodel()
     test_quantized_model_runs_on_the_cmodel()
+    test_w8a8_matmul_is_bit_exact_on_the_cmodel()
+    test_w8a8_model_runs_on_the_cmodel()
     print("ALL QUANTIZE (S8) TESTS PASSED")

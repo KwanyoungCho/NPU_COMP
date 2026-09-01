@@ -151,7 +151,10 @@
 타일 루프에 넣어 실모델 폭이 링크된다. 실측: quantized [7,3072]×[3072,3072]가
 C-model에서 **fp32 dense 대비 cosine 0.999964**(순수 INT8 오차 수준),
 mirror 대비 max|diff| 0.04. 트레이드오프는 행 타일마다 재-dequant(B1과 동형).
-남은 것: 전체 모델 W8A16 게이트(oracle cosine 0.9994~0.9998 재현)
+남은 것: 전체 모델 W8A16 게이트(oracle cosine 0.9994~0.9998 재현).
+**W8A8도 완료(2026-09-01)**: `QuantizeW8A8` + 전용 emitter(`npu_w8a8.py`) —
+mirror와 bit-exact(실모델 폭 포함), tiny 모델 float32 대비 0.999998.
+전체 28층 게이트 진행 중
 
 ## E. 참고: "표준 TVM으로 안 되는 것"의 정확한 구분
 

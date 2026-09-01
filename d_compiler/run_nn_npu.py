@@ -73,6 +73,10 @@ def parse_args():
     parser.add_argument("--reference", default=None,
                         help="npz of HF logits to score against (defaults to "
                              "this family's recorded generation reference)")
+    parser.add_argument("--quantize", default=None,
+                        choices=("w8a16", "w8a8"),
+                        help="quantize parameter-weight matmuls before "
+                             "lowering")
     parser.add_argument("--params-cache", default=None,
                         help="npz path: save the transformed (e.g. quantized) "
                              "weights on first run, reuse them afterwards -- "
@@ -93,8 +97,13 @@ def main():
         dtype=np.int64)
     seq = int(input_ids.size)
     mod, params, cfg = family.build_prefill(config, seq)
+    if args.quantize:
+        from npu_compiler import npu_quantize
+        pass_cls = (npu_quantize.QuantizeW8A8 if args.quantize == "w8a8"
+                    else npu_quantize.QuantizeWeightsW8A16)
+        mod = pass_cls()(mod)
     print(f"prompt {args.prompt!r} -> {seq} tokens, "
-          f"{cfg.num_layers} layers", flush=True)
+          f"{cfg.num_layers} layers, quantize={args.quantize}", flush=True)
 
     # the HF-traced frontend bakes its weights in as constants, so there is
     # nothing to lift and no host-side transform to run
@@ -160,7 +169,8 @@ def main():
     print(f"  c-model run: {time.perf_counter() - started:.0f}s", flush=True)
 
     token = int(np.argmax(logits[-1]))
-    result = {"model": args.model, "first_token": token,
+    result = {"model": args.model, "quantize": args.quantize,
+              "first_token": token,
               "decoded": assets.tokenizer.decode([token]),
               "words": len(asm.words), "kernels": asm.kernel_count}
     if reference is not None:

@@ -122,6 +122,8 @@ class _Quantizer(PyExprMutator):
         except Exception:
             return None
 
+    act = False                    # True: W8A8 (per-row activation quant)
+
     def _quantizable(self, call):
         """The struct info of a weight worth quantizing, or None.
 
@@ -139,6 +141,12 @@ class _Quantizer(PyExprMutator):
             return None
         if int(info.shape[1]) < self.min_channels:
             return None            # too narrow to pay for the scale vector
+        if self.act:
+            left = call.args[0].struct_info
+            if (not isinstance(left, relax.TensorStructInfo)
+                    or left.ndim != 2
+                    or int(info.shape[0]) % 64 or int(info.shape[1]) % 64):
+                return None        # the INT8 gemm's K/N contract
         return info
 
     def visit_call_(self, call):
@@ -155,6 +163,10 @@ class _Quantizer(PyExprMutator):
         quantized = block.emit(
             block.call_te(_quantize_te, right, scale,
                           primfunc_name_hint="npu_w_quantize"))
+        if self.act:
+            self.count += 1
+            return block.call_te(_qmatmul_a8_te, left, quantized, scale,
+                                 primfunc_name_hint="npu_qmatmul_a8")
         scale16 = block.emit(
             block.call_te(_scale16_te, scale, primfunc_name_hint="npu_w_scale16"))
         self.count += 1
@@ -188,6 +200,74 @@ class QuantizeWeightsW8A16:
                     global_var, quantizer.visit_expr(function))
         # the builder holds the PrimFuncs the rewrite created, so the module
         # has to come from it rather than being edited in place
+        module = quantizer.builder_.get()
+        return relax.transform.DeadCodeElimination()(module)
+
+
+def _qmatmul_a8_te(x, weight, scale):
+    """FP16 x against INT8 weights with FP32 scales, activations quantized
+    per row on the fly -- the W8A8 kernel.
+
+    Written to match the machine's arithmetic (see quantize.w8a8_reference):
+    the row scale is this row's absmax over 127 in fp32, VQUANT rounds
+    half-to-even with +-127 saturation, and both scales multiply the
+    integer dot product.  The block names are the linker's cue to emit this
+    kernel as the validated W8A8 instruction sequence rather than walk it.
+    """
+    m, k_size = x.shape
+    n = weight.shape[1]
+    reduce_abs = te.reduce_axis((0, k_size), name="ka")
+    absmax = te.compute(
+        (m,), lambda i: te.max(te.abs(x[i, reduce_abs].astype("float32")),
+                               axis=reduce_abs), name="a_absmax")
+    a_scale = te.compute(
+        (m,), lambda i: tir.if_then_else(
+            absmax[i] == tir.const(0, "float32"),
+            tir.const(1, "float32"),
+            absmax[i] / tir.const(INT8_MAX, "float32")), name="a_scale")
+    a_quant = te.compute(
+        x.shape,
+        lambda i, j: te.max(
+            te.min(te.round(x[i, j].astype("float32") / a_scale[i]),
+                   tir.const(INT8_MAX, "float32")),
+            tir.const(-INT8_MAX, "float32")).astype("int8"), name="a_quant")
+    k = te.reduce_axis((0, k_size), name="k")
+    product = te.compute(
+        (m, n),
+        lambda i, j: te.sum(a_quant[i, k].astype("float32")
+                            * weight[k, j].astype("float32"), axis=k),
+        name="matmul")
+    return te.compute(
+        (m, n),
+        lambda i, j: (product[i, j] * scale[j] * a_scale[i]).astype("float16"),
+        name="dequant")
+
+
+@tvm.transform.module_pass(opt_level=0, name="QuantizeW8A8")
+class QuantizeW8A8:
+    """W8A16 plus per-row dynamic activation quantization on the device.
+
+    Weights quantize offline exactly as in W8A16; the FP32 scale reaches the
+    device (the matmul's scale registers read FP32), and each rewritten
+    matmul becomes the single W8A8 kernel.  The 64-multiple K/N contract of
+    the INT8 gemm gates which matmuls are rewritten.
+    """
+
+    def __init__(self, min_channels=64):
+        self.min_channels = min_channels
+
+    def transform_module(self, module, context):
+        quantizer = _Quantizer(module, self.min_channels)
+        quantizer.act = True
+        for global_var, function in list(module.functions.items()):
+            if not isinstance(function, relax.Function):
+                continue
+            runtime = function.attrs and function.attrs.get("num_input")
+            quantizer.weights = (set(function.params[int(runtime):])
+                                 if runtime is not None else set())
+            if quantizer.weights:
+                quantizer.builder_.update_func(
+                    global_var, quantizer.visit_expr(function))
         module = quantizer.builder_.get()
         return relax.transform.DeadCodeElimination()(module)
 

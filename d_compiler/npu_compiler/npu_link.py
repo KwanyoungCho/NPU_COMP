@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from tvm import relax, tir
 
-from . import npu_intrin, npu_memplan
+from . import npu_intrin, npu_memplan, npu_w8a8
 from .backend_v09 import V09Asm
 from .device import PROFILES
 from .peephole import eliminate_dead_stores
@@ -207,6 +207,18 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
                 continue
             prim = planned[call.op]
             if not isinstance(prim, tir.PrimFunc):
+                continue
+            if npu_w8a8.is_w8a8(prim):
+                # the W8A8 matmul is emitted as one validated sequence; its
+                # TIR body only defines the semantics the llvm build runs
+                addresses = []
+                for arg in call.args:
+                    addresses.append(plan.address[arg.name_hint])
+                asm_start = len(asm.words)
+                scratch_elems = _scratch_row(prim)
+                sram_start = scratch_base + slot_count * scratch_elems * 4
+                npu_w8a8.emit(asm, emitter, prim, addresses, sram_start)
+                kernels += 1
                 continue
             scheduled = _schedule(planned, call.op, prim, profile.tile)
             addresses = []
