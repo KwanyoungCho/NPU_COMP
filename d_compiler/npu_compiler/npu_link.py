@@ -15,9 +15,11 @@ then each PrimFunc is a single operation.
 """
 from __future__ import annotations
 
+import os
+
 from tvm import relax, tir
 
-from . import npu_intrin, npu_memplan, npu_w8a8
+from . import native, npu_intrin, npu_memplan, npu_w8a8
 from .backend_v09 import V09Asm
 from .device import PROFILES
 from .peephole import eliminate_dead_stores
@@ -69,14 +71,15 @@ def _schedule(module, gvar, prim, tile=64):
     return single[gvar]
 
 
-def _sram_layout(prim, cursor=0, capacity=None):
-    """Bump-allocate the kernel's cache buffers in SRAM.
+def _sram_buffers(prim):
+    """The kernel's cache buffers, in allocation order.
 
     Buffers may be allocated at any block after
     PlanAndUpdateBufferAllocationLocation moves them inward, so collect them
-    from the whole body rather than the root block.
+    from the whole body rather than the root block.  Kept separate from
+    placement because the walk is over the whole body while placement is a
+    handful of additions -- and the same kernel is placed once per call site.
     """
-    placement = {}
     buffers = []
     seen = set()
 
@@ -88,6 +91,12 @@ def _sram_layout(prim, cursor=0, capacity=None):
                     buffers.append(buffer)
 
     tir.stmt_functor.post_order_visit(prim.body, visit)
+    return buffers
+
+
+def _place_sram(buffers, cursor=0, capacity=None):
+    """Bump-allocate collected buffers from ``cursor``."""
+    placement = {}
     widths = {"float16": 4, "int8": 2, "float32": 8}
     for buffer in buffers:
         # every kernel-local temporary lives in SRAM: compute units cannot
@@ -142,8 +151,35 @@ def _collect_constants(prim):
     return values
 
 
+def _native_default():
+    """Emit natively when the library is there; ``NPU_NATIVE=0`` turns it off.
+
+    Safe as a default because a kernel the native walker does not cover falls
+    back to Python, and the two are gated word-for-word by
+    tests/test_native_codegen.py.
+    """
+    if os.environ.get("NPU_NATIVE", "1") == "0":
+        return None
+    return "use" if native.load() else None
+
+
+def _compare_native(name, python_words, native_words):
+    """Fail loudly on the first word where the two walkers disagree.
+
+    A silent divergence here would be a wrong program with no symptom other
+    than wrong numbers, so the check is exact and the message says where.
+    """
+    if len(python_words) != len(native_words):
+        raise LinkError(f"{name}: native emitted {len(native_words)} words, "
+                        f"python {len(python_words)}")
+    for index, (mine, theirs) in enumerate(zip(python_words, native_words)):
+        if int(mine) != int(theirs):
+            raise LinkError(f"{name}: word {index} differs -- python "
+                            f"{int(mine):#010x}, native {int(theirs):#010x}")
+
+
 def compile_program(mod, func_name="prefill", snapshot_at=None,
-                    peephole=True, profile=None):
+                    peephole=True, profile=None, native_mode=None):
     """Lowered IRModule -> (assembler, StaticPlan).
 
     ``mod`` must already have gone through the graph pipeline with fusion off.
@@ -155,8 +191,19 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
     Each one appends the whole memory image at that point, which is how a
     divergence is traced back to the kernel that caused it; the captured
     outputs are listed in ``plan.snapshots`` as (index, var name, struct info).
+
+    ``native_mode`` selects the native (C++) walker: ``"use"`` emits with it
+    wherever it has coverage and falls back to Python elsewhere, ``"compare"``
+    emits with Python but checks the native words match exactly and records
+    the outcome in ``plan.native``.  Default is Python only.  Each kernel is
+    walked independently -- the walker flushes the accumulator before it
+    returns -- so mixing the two per kernel is safe.
     """
     profile = profile or PROFILES["v09"]
+    if native_mode is None:
+        native_mode = _native_default()
+    elif native_mode == "python":
+        native_mode = None              # explicit opt-out, for the gate below
     planned, plan = npu_memplan.assign_addresses(mod, func_name)
 
     # scalar literals used by pointwise kernels live in a small pool that the
@@ -199,6 +246,7 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
     slot_count = profile.scratch_slots
     scratch_base = (len(constants) * 4 + 8 + 7) // 8 * 8
     kernels = 0
+    recipes = {}        # GlobalVar -> (scheduled, scratch row, SRAM buffers)
     for block in planned[func_name].body.blocks:
         for binding in block.bindings:
             call = binding.value
@@ -220,7 +268,16 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
                 npu_w8a8.emit(asm, emitter, prim, addresses, sram_start)
                 kernels += 1
                 continue
-            scheduled = _schedule(planned, call.op, prim, profile.tile)
+            # A 28-layer model calls ~32 distinct kernels 1,206 times, and
+            # scheduling is a pure function of the PrimFunc and the tile, so
+            # doing it per call site was 64% of the link.
+            recipe = recipes.get(call.op)
+            if recipe is None:
+                scheduled = _schedule(planned, call.op, prim, profile.tile)
+                recipe = (scheduled, _scratch_row(scheduled),
+                          _sram_buffers(scheduled))
+                recipes[call.op] = recipe
+            scheduled, scratch_elems, sram_buffers = recipe
             addresses = []
             for arg in call.args:
                 if isinstance(arg, relax.Constant):
@@ -237,24 +294,38 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
                 if arg.name_hint not in plan.address:
                     raise LinkError(f"{call.op.name_hint}: unplaced {arg.name_hint}")
                 addresses.append(plan.address[arg.name_hint])
-            scratch_elems = _scratch_row(scheduled)
             scratch_slots = tuple(scratch_base + index * scratch_elems * 4
                                   for index in range(slot_count))
             sram_start = scratch_base + slot_count * scratch_elems * 4
-            walker = Walker(asm, {}, emitter)
-            walker.constants = const_addr
-            walker.one_fp32 = one_fp32_nib
-            walker.scratch_slots = scratch_slots
-            # bind by parameter order -- buffer_map is a map, and its
-            # iteration order is not the signature's
-            for param, address in zip(scheduled.params, addresses):
-                buffer = scheduled.buffer_map[param]
-                walker.bases[buffer.data] = address
-                walker.dtypes[buffer.data] = str(buffer.dtype)
-            for buffer, nibble in _sram_layout(
-                    scheduled, sram_start, profile.sram_nibbles)[0].items():
-                walker.declare_sram(buffer, nibble)
-            walker.run(scheduled, {})
+            sram_map = _place_sram(sram_buffers, sram_start,
+                                   profile.sram_nibbles)[0]
+            native_words = None
+            if native_mode:
+                native_words = native.codegen_kernel(
+                    scheduled, addresses, sram_map, scratch_slots,
+                    const_addr, one_fp32_nib)
+                plan.native[call.op.name_hint] = native_words is not None
+            if native_mode == "use" and native_words is not None:
+                asm.words.extend(int(word) for word in native_words)
+                asm.tags.extend([None] * len(native_words))
+            else:
+                start = len(asm.words)
+                walker = Walker(asm, {}, emitter)
+                walker.constants = const_addr
+                walker.one_fp32 = one_fp32_nib
+                walker.scratch_slots = scratch_slots
+                # bind by parameter order -- buffer_map is a map, and its
+                # iteration order is not the signature's
+                for param, address in zip(scheduled.params, addresses):
+                    buffer = scheduled.buffer_map[param]
+                    walker.bases[buffer.data] = address
+                    walker.dtypes[buffer.data] = str(buffer.dtype)
+                for buffer, nibble in sram_map.items():
+                    walker.declare_sram(buffer, nibble)
+                walker.run(scheduled, {})
+                if native_mode == "compare" and native_words is not None:
+                    _compare_native(call.op.name_hint, asm.words[start:],
+                                    native_words)
             if snapshot_at is not None and kernels in snapshot_at:
                 asm.snapshot()
                 target = call.args[-1]

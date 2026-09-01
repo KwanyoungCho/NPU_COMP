@@ -1,5 +1,6 @@
 # build artifacts (note: original a_npu/*.out etc. are intentionally tracked)
 d_compiler/build/
+d_compiler/npu_codegen/*.so
 **/__pycache__/
 *.pyc
 
