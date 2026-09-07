@@ -234,20 +234,37 @@ def _matmul_mapping(planned, gvar, profile, budget):
     room = budget - (depth * tile + tile * tile) * itemsize
     if room <= 0:
         return None
-    span = max(tile, room // (depth * itemsize) // tile * tile)
+    span = room // (depth * itemsize)
 
     def ceil_div(a, b):
         return -(-a // b)
 
+    def panel_for(extent):
+        """Largest panel that both divides the axis and fits.
+
+        Splitting by something that does not divide the extent leaves a ragged
+        outer loop, and the block bindings under it stop being affine -- TVM
+        refuses the compute_at that puts the operand there.  Halving from the
+        full extent keeps the split even.
+        """
+        panel = extent
+        while panel > span and panel % 2 == 0 and panel // 2 >= tile:
+            panel //= 2
+        return panel if panel <= span else None
+
     now = rows * depth * ceil_div(cols, tile) + depth * cols * ceil_div(rows, tile)
-    hold_a = rows * depth + depth * cols * ceil_div(rows, min(span, rows))
-    hold_b = depth * cols + rows * depth * ceil_div(cols, min(span, cols))
-    best = min(now, hold_a, hold_b)
-    if best == now:
-        return None
-    if best == hold_a:
-        return "A", min(span, rows)
-    return "B", min(span, cols)
+    best, choice = now, None
+    panel = panel_for(rows)
+    if panel is not None:
+        cost = rows * depth + depth * cols * ceil_div(rows, panel)
+        if cost < best:
+            best, choice = cost, ("A", panel)
+    panel = panel_for(cols)
+    if panel is not None:
+        cost = depth * cols + rows * depth * ceil_div(cols, panel)
+        if cost < best:
+            best, choice = cost, ("B", panel)
+    return choice
 
 
 def _fit_kernel(planned, gvar, prim, profile, scratch_base, slot_count):

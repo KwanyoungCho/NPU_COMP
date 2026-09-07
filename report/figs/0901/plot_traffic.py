@@ -122,7 +122,7 @@ ax2.set_xticks(x)
 ax2.set_xticklabels(labels)
 ax2.set_xlabel("prompt length (tokens)")
 ax2.set_ylabel("MB moved per token  (log)")
-ax2.set_title("(b) cost per token now tracks the floor, until a panel stops fitting")
+ax2.set_title("(b) cost per token now falls with the prompt")
 ax2.legend()
 ax2.grid(alpha=0.25)
 

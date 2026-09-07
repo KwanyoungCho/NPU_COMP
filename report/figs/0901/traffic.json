@@ -27,7 +27,7 @@
     "vocab": 256,
     "fits": true,
     "words": 604568,
-    "link_seconds": 4.7,
+    "link_seconds": 4.8,
     "load": {
       "other": 20,
       "weight": 203393024,
@@ -49,7 +49,7 @@
     "vocab": 256,
     "fits": true,
     "words": 492186,
-    "link_seconds": 3.6,
+    "link_seconds": 3.7,
     "load": {
       "other": 20,
       "weight": 203966464,
@@ -114,18 +114,18 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 4028224,
-    "link_seconds": 21.4,
+    "words": 3858240,
+    "link_seconds": 10.8,
     "load": {
       "other": 20,
-      "weight": 574656512,
-      "activation": 585105408
+      "weight": 272666624,
+      "activation": 190840832
     },
     "store": {
       "activation": 174325760
     },
     "transfers": {
-      "load": 99815,
+      "load": 1641,
       "store": 22344
     },
     "sram_peak_bytes": 6424084,
