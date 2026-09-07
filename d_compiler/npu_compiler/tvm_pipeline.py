@@ -16,7 +16,30 @@ import tvm
 from tvm import relax
 
 
-def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True):
+def _masked_softmax_patterns():
+    """Attention's score chain: ``softmax(add(mul(scores, scale), mask))``.
+
+    Left unfused it is a separate pass over a [heads, seq, seq] tensor per op,
+    which is the largest thing in a long prompt: at 2048 tokens those kernels
+    move 1.6 GB of the 3.7 GB a layer moves.  Fused they share one staged
+    stripe.
+
+    Two patterns, most specific first.  Gemma folds the scale into the query
+    instead of scaling the scores, so its chain has no multiply, and only the
+    second pattern matches it.
+    """
+    from tvm.relax.dpl.pattern import is_op, wildcard
+
+    scores, scale, mask = wildcard(), wildcard(), wildcard()
+    scaled = is_op("relax.nn.softmax")(
+        is_op("relax.add")(is_op("relax.multiply")(scores, scale), mask))
+    plain = is_op("relax.nn.softmax")(is_op("relax.add")(scores, mask))
+    return [("npu.masked_softmax", scaled),
+            ("npu.masked_softmax_unscaled", plain)]
+
+
+def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True,
+                   fuse_attention=True):
     """Relax -> TIR PrimFuncs, following the standard stage order.
 
     ``custom_legalize`` is TVM's per-op legalization override map; NPU specific
@@ -27,6 +50,11 @@ def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True):
     weight) into a separate ``transform_params`` function the host runs once at
     load time.  Without it those transposes are materialized on every
     invocation -- for Llama's lm_head that is a 751 MiB tensor.
+
+    ``fuse_attention`` fuses only the attention score chain (see
+    ``_masked_softmax_pattern``).  It is separate from ``fuse``, which turns on
+    TVM's general fusion and is off by default because a fused body still has
+    to be re-serialized into vector steps and that is unverified.
     """
     stages = [
         relax.transform.CanonicalizeBindings(),
@@ -36,12 +64,19 @@ def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True):
     ]
     if lift_params:
         stages.append(relax.transform.LiftTransformParams())
+    if fuse_attention:
+        stages.append(relax.transform.FuseOpsByPattern(
+            _masked_softmax_patterns()))
     stages += [
         relax.transform.LegalizeOps(custom_legalize),
         relax.transform.AnnotateTIROpPattern(),
     ]
     if fuse:
         stages += [relax.transform.FuseOps(), relax.transform.FuseTIR()]
+    elif fuse_attention:
+        # only the pattern above became a composite function; FuseTIR merges
+        # its PrimFuncs and leaves everything else alone
+        stages.append(relax.transform.FuseTIR())
     stages += [relax.transform.DeadCodeElimination()]
     return tvm.transform.Sequential(stages, name="npu_graph_pipeline")
 

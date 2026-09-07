@@ -458,6 +458,7 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
                     scheduled, addresses, sram_map, scratch_slots,
                     const_addr, one_fp32_nib)
                 plan.native[call.op.name_hint] = native_words is not None
+            span_start = len(asm.words)
             if native_mode == "use" and native_words is not None:
                 asm.words.extend(int(word) for word in native_words)
                 asm.tags.extend([None] * len(native_words))
@@ -479,6 +480,13 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
                 if native_mode == "compare" and native_words is not None:
                     _compare_native(call.op.name_hint, asm.words[start:],
                                     native_words)
+            # which words came from which kernel, so traffic can be attributed
+            # to a kernel rather than to a tensor (storage pools are reused, so
+            # an address does not name one tensor).  Indices are into the
+            # stream as emitted; the peephole pass shortens it afterwards, so
+            # an analysis using these has to link with peephole=False.
+            plan.kernel_span.append(
+                (call.op.name_hint, span_start, len(asm.words)))
             if snapshot_at is not None and kernels in snapshot_at:
                 asm.snapshot()
                 target = call.args[-1]
