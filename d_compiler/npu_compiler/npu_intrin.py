@@ -186,7 +186,20 @@ def _sram_gemm_impl(a: T.handle, b: T.handle, c: T.handle):
                                  B.access_ptr("r"), sb))
 
 
-def schedule_matmul_sram(mod, func_name, tile=64):
+def matmul_extents(mod, func_name):
+    """(M, N, K) of the kernel's matmul, or None if it has no three-loop nest."""
+    sch = tir.Schedule(mod)
+    try:
+        block = sch.get_block("matmul", func_name=func_name)
+    except Exception:
+        return None
+    loops = sch.get_loops(block)
+    if len(loops) < 3:
+        return None
+    return tuple(int(sch.get(loop).extent) for loop in loops[-3:])
+
+
+def schedule_matmul_sram(mod, func_name, tile=64, hold=None, panel=None):
     """Tile a legalized matmul and stage its operands into SRAM.
 
     The DMA that the hand-written backend inserts by hand is expressed here as
@@ -253,21 +266,48 @@ def schedule_matmul_sram(mod, func_name, tile=64):
         # would give the buffer two writers, which blocks cache_read)
         loops = sch.get_loops(block)
         i, j, k = loops[-3:]
-    i_o, i_i = sch.split(i, [None, tile])
-    j_o, j_i = sch.split(j, [None, tile])
-    k_o, k_i = sch.split(k, [None, tile])
-    sch.reorder(i_o, j_o, k_o, i_i, j_i, k_i)
+    # Where each operand is staged is the whole of the intra-op decision.  The
+    # PE tile is 64x64 and there is one accumulator, so k must stay innermost
+    # to keep a C tile's MAC chain unbroken; that leaves only the order of the
+    # two outer loops, and with it which operand is invariant inside.  Staging
+    # that one at the outer loop reads it once and streams the other past it.
+    if hold is None:
+        # both operands staged at the reduction loop: the smallest footprint
+        # and the most re-reads, and what every kernel got before a budget was
+        # available to say otherwise
+        i_o, i_i = sch.split(i, [None, tile])
+        j_o, j_i = sch.split(j, [None, tile])
+        k_o, k_i = sch.split(k, [None, tile])
+        sch.reorder(i_o, j_o, k_o, i_i, j_i, k_i)
+        staged_at, enclosing = (k_o, k_o), j_o
+    elif hold == "A":
+        # input-stationary: A[panel, K] is read once, B[K, tile] once per row
+        # block
+        m_b, i_r = sch.split(i, [None, panel])
+        i_o, i_i = sch.split(i_r, [None, tile])
+        j_o, j_i = sch.split(j, [None, tile])
+        k_o, k_i = sch.split(k, [None, tile])
+        sch.reorder(m_b, j_o, i_o, k_o, i_i, j_i, k_i)
+        staged_at, enclosing = (m_b, j_o), i_o
+    else:
+        # weight-stationary: the mirror image
+        n_b, j_r = sch.split(j, [None, panel])
+        j_o, j_i = sch.split(j_r, [None, tile])
+        i_o, i_i = sch.split(i, [None, tile])
+        k_o, k_i = sch.split(k, [None, tile])
+        sch.reorder(n_b, i_o, j_o, k_o, i_i, j_i, k_i)
+        staged_at, enclosing = (i_o, n_b), j_o
     write_back = sch.cache_write(block, 0, SRAM_SCOPE)
-    sch.reverse_compute_at(write_back, j_o)
+    sch.reverse_compute_at(write_back, enclosing)
     if unpad is not None:
         # otherwise the padded result stays live across the whole N axis, and
         # a wide output (lm_head is [64, 128256] once M is padded) does not fit
-        sch.reverse_compute_at(unpad, j_o)
+        sch.reverse_compute_at(unpad, enclosing)
     for index in (0, 1):
         if sch.get(block).reads[index].buffer.scope() == SRAM_SCOPE:
             continue                       # already staged (padded operand)
         stage = sch.cache_read(block, index, SRAM_SCOPE)
-        sch.compute_at(stage, k_o)
+        sch.compute_at(stage, staged_at[index])
     # a dequantized weight is a computed producer: without this it holds the
     # WHOLE weight in SRAM (18 MiB at real widths).  Tiling it into the
     # K-loop makes it -- and its int8/scale stages behind it -- one tile at a
@@ -280,9 +320,9 @@ def schedule_matmul_sram(mod, func_name, tile=64):
         dequant = None
     if dequant is not None:
         producers = list(sch.get_producers(dequant))
-        sch.compute_at(dequant, k_o)
+        sch.compute_at(dequant, staged_at[1])
         for producer in producers:
-            sch.compute_at(producer, k_o)
+            sch.compute_at(producer, staged_at[1])
     init = sch.decompose_reduction(block, k_o)
     sch.tensorize(sch.get_loops(block)[-3], "npu_gemm_acc_sram")
     sch.tensorize(sch.get_loops(init)[-2], "npu_fill_zero_sram")

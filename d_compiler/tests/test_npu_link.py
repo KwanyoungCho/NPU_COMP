@@ -167,7 +167,9 @@ def test_tile_staging_uses_one_2d_transfer():
     multirow = [d for d in blocks if d["rows"] > 1]
     assert multirow, "tile staging fell back to one transfer per row"
     widest = max(d["rows"] for d in multirow)
-    assert widest == 64, widest
+    # at least a whole tile per instruction; the resident panel makes it more
+    # than a tile once the mapping keeps an operand in SRAM
+    assert widest >= 64, widest
     print(f"  [PASS] tile staging uses 2D transfers "
           f"({len(multirow)}/{len(blocks)} DMAs, up to {widest} rows each)")
 

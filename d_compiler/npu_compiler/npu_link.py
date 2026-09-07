@@ -43,7 +43,7 @@ def _is_matmul(prim):
     return bool(found)
 
 
-def _schedule(module, gvar, prim, tile=64, stripe=None):
+def _schedule(module, gvar, prim, tile=64, stripe=None, mapping=None):
     """Apply the NPU schedule this kernel needs; every kernel ends up staged.
 
     ``stripe`` narrows a non-matmul kernel to that many result rows at a time;
@@ -52,7 +52,9 @@ def _schedule(module, gvar, prim, tile=64, stripe=None):
     name = gvar.name_hint
     try:
         if _is_matmul(prim):
-            scheduled = npu_intrin.schedule_matmul_sram(module, name, tile)
+            hold, panel = mapping if mapping else (None, None)
+            scheduled = npu_intrin.schedule_matmul_sram(module, name, tile,
+                                                        hold, panel)
         elif stripe is None:
             scheduled = npu_intrin.schedule_generic_sram(module, name)
         else:
@@ -166,6 +168,88 @@ def _collect_constants(prim):
     return values
 
 
+def _measure(planned, gvar, prim, profile, scratch_base, slot_count,
+             stripe=None, mapping=None):
+    """Schedule a kernel and report (scheduled, scratch row, buffers, top)."""
+    scheduled = _schedule(planned, gvar, prim, profile.tile, stripe, mapping)
+    elems = _scratch_row(scheduled)
+    buffers = _sram_buffers(scheduled)
+    start = scratch_base + slot_count * elems * 4
+    _, top = _place_sram(buffers, start)
+    return scheduled, elems, buffers, top
+
+
+def _fit_matmul(planned, gvar, prim, profile, scratch_base, slot_count):
+    """Pick the matmul's mapping, narrowing the resident panel until it fits.
+
+    Falling back to the whole-tile schedule is always available -- it stages
+    one tile of each operand, so it fits any budget -- which is why a panel
+    that will not fit is never a link failure here.
+    """
+    budget = profile.sram_nibbles - scratch_base
+    mapping = _matmul_mapping(planned, gvar, profile, budget // 2)
+    while mapping is not None:
+        try:
+            scheduled, elems, buffers, top = _measure(
+                planned, gvar, prim, profile, scratch_base, slot_count,
+                mapping=mapping)
+        except LinkError:
+            break                      # this mapping does not schedule here
+        if top <= profile.sram_nibbles:
+            return scheduled, elems, buffers
+        hold, panel = mapping
+        panel //= 2
+        mapping = (hold, panel) if panel >= profile.tile else None
+    scheduled, elems, buffers, top = _measure(
+        planned, gvar, prim, profile, scratch_base, slot_count)
+    if top > profile.sram_nibbles:
+        raise LinkError(f"{gvar.name_hint}: needs "
+                        f"{top / 2 / 1024 / 1024:.2f} MiB of SRAM")
+    return scheduled, elems, buffers
+
+
+def _matmul_mapping(planned, gvar, profile, budget):
+    """Which operand to keep in SRAM for this matmul, and how much of it.
+
+    The PE tile is fixed and there is one accumulator, so k stays innermost
+    and the only choice left is the order of the two outer loops -- which is
+    the same as choosing which operand is invariant inside, and so read once.
+    Both candidates have a closed-form traffic, so this compares them rather
+    than searching.
+
+    Returns None to keep the whole-tile schedule.  That is the answer whenever
+    M is not a multiple of the tile: pad_einsum then leaves the padded operand
+    resident in SRAM already, so there is nothing left to win.
+    """
+    extents = npu_intrin.matmul_extents(planned, gvar.name_hint)
+    if extents is None:
+        return None
+    rows, cols, depth = extents
+    tile = profile.tile
+    if rows % tile:
+        return None
+    itemsize = 2
+    # the streamed operand still needs a [depth, tile] panel, and the result
+    # one tile; what is left is what the resident operand may use
+    room = budget - (depth * tile + tile * tile) * itemsize
+    if room <= 0:
+        return None
+    span = max(tile, room // (depth * itemsize) // tile * tile)
+
+    def ceil_div(a, b):
+        return -(-a // b)
+
+    now = rows * depth * ceil_div(cols, tile) + depth * cols * ceil_div(rows, tile)
+    hold_a = rows * depth + depth * cols * ceil_div(rows, min(span, rows))
+    hold_b = depth * cols + rows * depth * ceil_div(cols, min(span, cols))
+    best = min(now, hold_a, hold_b)
+    if best == now:
+        return None
+    if best == hold_a:
+        return "A", min(span, rows)
+    return "B", min(span, cols)
+
+
 def _fit_kernel(planned, gvar, prim, profile, scratch_base, slot_count):
     """Schedule a kernel, narrowing its stripe until its buffers fit SRAM.
 
@@ -176,6 +260,9 @@ def _fit_kernel(planned, gvar, prim, profile, scratch_base, slot_count):
     CompactBufferAllocation's shrinking and the kernel's scratch width are
     only known then.
     """
+    if _is_matmul(prim):
+        return _fit_matmul(planned, gvar, prim, profile, scratch_base,
+                           slot_count)
     stripe, rows = None, None
     while True:
         scheduled = _schedule(planned, gvar, prim, profile.tile, stripe)

@@ -5,7 +5,7 @@
     "vocab": 256,
     "fits": true,
     "words": 495386,
-    "link_seconds": 4.5,
+    "link_seconds": 4.6,
     "load": {
       "other": 20,
       "weight": 203013424,
@@ -27,7 +27,7 @@
     "vocab": 256,
     "fits": true,
     "words": 604568,
-    "link_seconds": 4.6,
+    "link_seconds": 4.7,
     "load": {
       "other": 20,
       "weight": 203393024,
@@ -48,18 +48,18 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 576307,
-    "link_seconds": 6.6,
+    "words": 492186,
+    "link_seconds": 3.6,
     "load": {
       "other": 20,
       "weight": 203966464,
-      "activation": 217645056
+      "activation": 18350080
     },
     "store": {
       "activation": 16285696
     },
     "transfers": {
-      "load": 49812,
+      "load": 707,
       "store": 2619
     },
     "sram_peak_bytes": 3244052,
@@ -70,18 +70,18 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 1137274,
-    "link_seconds": 14.0,
+    "words": 968649,
+    "link_seconds": 4.5,
     "load": {
       "other": 20,
-      "weight": 408307712,
-      "activation": 439615488
+      "weight": 205408256,
+      "activation": 38273024
     },
     "store": {
       "activation": 34144256
     },
     "transfers": {
-      "load": 100002,
+      "load": 779,
       "store": 5288
     },
     "sram_peak_bytes": 6389780,
@@ -92,18 +92,18 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 2266635,
-    "link_seconds": 28.1,
+    "words": 1925163,
+    "link_seconds": 6.4,
     "load": {
       "other": 20,
-      "weight": 818169856,
-      "activation": 896532480
+      "weight": 209471488,
+      "activation": 82837504
     },
     "store": {
       "activation": 74579968
     },
     "transfers": {
-      "load": 201525,
+      "load": 1003,
       "store": 10759
     },
     "sram_peak_bytes": 6389780,
@@ -114,18 +114,18 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 4553649,
-    "link_seconds": 56.0,
+    "words": 4028224,
+    "link_seconds": 21.4,
     "load": {
       "other": 20,
-      "weight": 1642631168,
-      "activation": 1862270976
+      "weight": 574656512,
+      "activation": 585105408
     },
     "store": {
       "activation": 174325760
     },
     "transfers": {
-      "load": 409272,
+      "load": 99815,
       "store": 22344
     },
     "sram_peak_bytes": 6424084,

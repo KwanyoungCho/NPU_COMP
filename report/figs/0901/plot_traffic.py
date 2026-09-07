@@ -8,9 +8,11 @@ say 1,619,976,421 cells for the 28-layer program).
 The point of these two figures is that every gate we run is seq=7, and at that
 one point the compiler looks optimal: weights are read exactly once and
 activation round trips are 1% of traffic.  Neither stays true as the prompt
-grows.  SRAM occupancy used to grow with it too and stopped fitting at 256;
-striping the elementwise and normalisation kernels caps it at ~6.1 MiB, so
-what is left in these figures is traffic, not capacity.
+grows.  Two pieces of work have landed since the first version of these
+figures: striping the elementwise and normalisation kernels, which caps SRAM
+at ~6.1 MiB (it used to grow past 8 and stop linking at 256), and choosing
+which matmul operand stays resident, which is what pulled weight re-reads back
+towards one.
 
 Colours: categorical blue/green for the two traffic kinds that behave
 differently, red reserved for the capacity violation, grey for recessive
@@ -120,7 +122,7 @@ ax2.set_xticks(x)
 ax2.set_xticklabels(labels)
 ax2.set_xlabel("prompt length (tokens)")
 ax2.set_ylabel("MB moved per token  (log)")
-ax2.set_title("(b) cost per token — the gap is what SRAM planning would close")
+ax2.set_title("(b) cost per token now tracks the floor, until a panel stops fitting")
 ax2.legend()
 ax2.grid(alpha=0.25)
 
@@ -174,7 +176,7 @@ ax2.set_xticks(x)
 ax2.set_xticklabels(labels)
 ax2.set_xlabel("prompt length (tokens)")
 ax2.set_ylabel("weight bytes moved / weight bytes")
-ax2.set_title("(b) weights are still re-read past one M-tile")
+ax2.set_title("(b) weight re-reads after choosing what stays resident")
 ax2.legend(loc="upper left")
 ax2.grid(alpha=0.25)
 
