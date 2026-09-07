@@ -43,14 +43,25 @@ def _is_matmul(prim):
     return bool(found)
 
 
-def _schedule(module, gvar, prim, tile=64):
-    """Apply the NPU schedule this kernel needs; every kernel ends up staged."""
+def _schedule(module, gvar, prim, tile=64, stripe=None):
+    """Apply the NPU schedule this kernel needs; every kernel ends up staged.
+
+    ``stripe`` narrows a non-matmul kernel to that many result rows at a time;
+    None stages whole tensors, which is what every kernel that fits gets.
+    """
     name = gvar.name_hint
     try:
         if _is_matmul(prim):
             scheduled = npu_intrin.schedule_matmul_sram(module, name, tile)
-        else:
+        elif stripe is None:
             scheduled = npu_intrin.schedule_generic_sram(module, name)
+        else:
+            scheduled = npu_intrin.schedule_generic_striped(module, name,
+                                                            stripe)
+            if scheduled is None:
+                raise LinkError(f"{name}: cannot be striped")
+    except LinkError:
+        raise
     except Exception as error:
         raise LinkError(f"{name}: {type(error).__name__}: "
                         f"{str(error).splitlines()[-1][:120]}") from error
@@ -153,6 +164,37 @@ def _collect_constants(prim):
 
     tir.stmt_functor.post_order_visit(prim.body, visit)
     return values
+
+
+def _fit_kernel(planned, gvar, prim, profile, scratch_base, slot_count):
+    """Schedule a kernel, narrowing its stripe until its buffers fit SRAM.
+
+    The first attempt stages whole tensors, so a kernel that already fits is
+    scheduled exactly as it was before this loop existed.  Only when it does
+    not does a stripe appear.  What is checked is the placement after the TIR
+    passes have sized the buffers, not an estimate -- pad_einsum's padding,
+    CompactBufferAllocation's shrinking and the kernel's scratch width are
+    only known then.
+    """
+    stripe, rows = None, None
+    while True:
+        scheduled = _schedule(planned, gvar, prim, profile.tile, stripe)
+        elems = _scratch_row(scheduled)
+        buffers = _sram_buffers(scheduled)
+        start = scratch_base + slot_count * elems * 4
+        _, top = _place_sram(buffers, start)
+        if top <= profile.sram_nibbles:
+            return scheduled, elems, buffers
+        if rows is None:
+            rows = npu_intrin.generic_row_count(planned, gvar.name_hint)
+            stripe = rows
+        if not rows or stripe <= 1:
+            raise LinkError(
+                f"{gvar.name_hint}: needs "
+                f"{top / 2 / 1024 / 1024:.2f} MiB of "
+                f"{profile.sram_nibbles / 2 / 1024 / 1024:.2f} MiB and "
+                f"cannot be narrowed further")
+        stripe //= 2
 
 
 def _native_default():
@@ -277,9 +319,8 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
             # doing it per call site was 64% of the link.
             recipe = recipes.get(call.op)
             if recipe is None:
-                scheduled = _schedule(planned, call.op, prim, profile.tile)
-                recipe = (scheduled, _scratch_row(scheduled),
-                          _sram_buffers(scheduled))
+                recipe = _fit_kernel(planned, call.op, prim, profile,
+                                     scratch_base, slot_count)
                 recipes[call.op] = recipe
             scheduled, scratch_elems, sram_buffers = recipe
             addresses = []

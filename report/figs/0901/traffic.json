@@ -27,7 +27,7 @@
     "vocab": 256,
     "fits": true,
     "words": 604568,
-    "link_seconds": 4.7,
+    "link_seconds": 4.6,
     "load": {
       "other": 20,
       "weight": 203393024,
@@ -71,7 +71,7 @@
     "vocab": 256,
     "fits": true,
     "words": 1137274,
-    "link_seconds": 13.9,
+    "link_seconds": 14.0,
     "load": {
       "other": 20,
       "weight": 408307712,
@@ -91,39 +91,44 @@
     "seq": 256,
     "layers": 1,
     "vocab": 256,
-    "fits": false,
-    "error": "kernel exceeds SRAM capacity: mask_global.sram [24, 256, 256] float16 takes it to 9.00 MiB of 8.00 MiB",
-    "link_seconds": 5.2
+    "fits": true,
+    "words": 2266635,
+    "link_seconds": 28.1,
+    "load": {
+      "other": 20,
+      "weight": 818169856,
+      "activation": 896532480
+    },
+    "store": {
+      "activation": 74579968
+    },
+    "transfers": {
+      "load": 201525,
+      "store": 10759
+    },
+    "sram_peak_bytes": 6389780,
+    "sram_peak_kernel": "silu"
   },
   {
     "seq": 512,
     "layers": 1,
     "vocab": 256,
-    "fits": false,
-    "error": "kernel exceeds SRAM capacity: rms_norm_global.sram [512, 3072] float16 takes it to 9.04 MiB of 8.00 MiB",
-    "link_seconds": 0.1
-  },
-  {
-    "seq": 7,
-    "layers": 28,
-    "vocab": 128256,
     "fits": true,
-    "words": 15285893,
-    "link_seconds": 126.7,
+    "words": 4553649,
+    "link_seconds": 56.0,
     "load": {
       "other": 20,
-      "weight": 6425852224,
-      "activation": 54053440
+      "weight": 1642631168,
+      "activation": 1862270976
     },
     "store": {
-      "activation": 48265280
+      "activation": 174325760
     },
     "transfers": {
-      "load": 786312,
-      "store": 23341
+      "load": 409272,
+      "store": 22344
     },
-    "sram_peak_bytes": 1999892,
-    "sram_peak_kernel": "matmul6",
-    "label": "verify"
+    "sram_peak_bytes": 6424084,
+    "sram_peak_kernel": "multiply"
   }
 ]

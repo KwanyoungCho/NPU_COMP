@@ -7,8 +7,10 @@ say 1,619,976,421 cells for the 28-layer program).
 
 The point of these two figures is that every gate we run is seq=7, and at that
 one point the compiler looks optimal: weights are read exactly once and
-activation round trips are 1% of traffic.  Both of those stop being true as
-the prompt grows, and SRAM stops fitting altogether.
+activation round trips are 1% of traffic.  Neither stays true as the prompt
+grows.  SRAM occupancy used to grow with it too and stopped fitting at 256;
+striping the elementwise and normalisation kernels caps it at ~6.1 MiB, so
+what is left in these figures is traffic, not capacity.
 
 Colours: categorical blue/green for the two traffic kinds that behave
 differently, red reserved for the capacity violation, grey for recessive
@@ -147,10 +149,10 @@ for xi, value, height in zip(x, peak, heights):
              color="black" if value is not None else FAIL_C)
 ax1.set_xticks(x)
 ax1.set_xticklabels(labels)
-ax1.set_ylim(0, max(heights) * 1.32)
+ax1.set_ylim(0, max(max(heights), CAPACITY) * 1.22)
 ax1.set_xlabel("prompt length (tokens)")
 ax1.set_ylabel("peak SRAM a kernel needs (MiB)")
-ax1.set_title("(a) the wall: elementwise kernels stage whole tensors")
+ax1.set_title("(a) a stripe caps what a kernel needs")
 ax1.grid(axis="y", alpha=0.25)
 
 # weight re-reads: the closed-form prediction, and what was measured
@@ -168,14 +170,11 @@ for xi, value in good:
 ax2.axhline(1.0, color=ACT_C, linestyle=":", linewidth=2)
 ax2.text(len(x) - 0.15, 1.12, "floor: every weight read once", color=ACT_C,
          fontsize=11, ha="right")
-ax2.text(len(x) - 0.15, predicted[-1] * 0.72,
-         "measured stops at 128:\nlonger prompts do not link", color=GREY,
-         fontsize=10, ha="right")
 ax2.set_xticks(x)
 ax2.set_xticklabels(labels)
 ax2.set_xlabel("prompt length (tokens)")
 ax2.set_ylabel("weight bytes moved / weight bytes")
-ax2.set_title("(b) weights get re-read once the prompt exceeds one M-tile")
+ax2.set_title("(b) weights are still re-read past one M-tile")
 ax2.legend(loc="upper left")
 ax2.grid(alpha=0.25)
 

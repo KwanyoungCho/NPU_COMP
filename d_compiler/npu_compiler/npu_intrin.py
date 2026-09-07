@@ -303,6 +303,109 @@ def schedule_elementwise(mod, func_name, block_name, intrin):
 register_all()
 
 
+def generic_row_count(mod, func_name):
+    """Rows the kernel's result iterates, or None if it has no row axis.
+
+    The stripe is measured in these rows; a kernel whose output is a single
+    loop (a per-row scalar, say) has nothing to stripe.
+    """
+    sch = tir.Schedule(mod)
+    root = sch.get_block("root", func_name=func_name)
+    prim = sch.mod[func_name]
+    output = prim.buffer_map[prim.params[-1]].data
+    for block_rv in sch.get_child_blocks(root):
+        block = sch.get(block_rv)
+        if block.writes and block.writes[0].buffer.data.same_as(output):
+            loops = sch.get_loops(block_rv)
+            if len(loops) < 2:
+                return None
+            rows = 1
+            for loop in loops[:-1]:
+                rows *= int(sch.get(loop).extent)
+            return rows
+    return None
+
+
+def schedule_generic_striped(mod, func_name, stripe):
+    """Stage a non-matmul kernel ``stripe`` rows at a time.
+
+    ``schedule_generic_sram`` stages whole tensors, which stops fitting once
+    the prompt grows: at 512 tokens a normalisation kernel alone asks for
+    9 MiB of the 8 MiB SRAM.  These kernels all iterate their result's leading
+    axes and then one inner axis, so fusing the leading axes gives one row
+    loop that every block of the kernel shares.  Splitting it and pulling the
+    rest of the kernel inside makes every staged buffer ``stripe`` rows tall,
+    which is what CompactBufferAllocation then sizes them to.
+
+    Returns None when the kernel does not have that shape, so the caller can
+    keep the whole-tensor schedule rather than get a wrong one.
+    """
+    sch = tir.Schedule(mod)
+    root = sch.get_block("root", func_name=func_name)
+    children = sch.get_child_blocks(root)
+    prim = sch.mod[func_name]
+    params = {prim.buffer_map[p].data for p in prim.params}
+    output = prim.buffer_map[prim.params[-1]].data
+
+    # the block writing the kernel's result anchors the stripe loop
+    anchor = None
+    for block_rv in children:
+        block = sch.get(block_rv)
+        if block.writes and block.writes[0].buffer.data.same_as(output):
+            anchor = block_rv
+    if anchor is None:
+        return None
+    anchor_name = sch.get(anchor).name_hint
+    loops = sch.get_loops(anchor)
+    if len(loops) < 2:
+        return None
+    outer, _ = sch.split(sch.fuse(*loops[:-1]), [None, stripe])
+
+    # every other block produces something the result needs, so pulling them
+    # under the stripe loop is what shrinks their buffers too; nearest
+    # producer first, which is the order compute_at can verify
+    for block_rv in reversed(children):
+        if sch.get(block_rv).name_hint == anchor_name:
+            continue
+        try:
+            sch.compute_at(block_rv, outer)
+        except Exception:
+            return None
+
+    def blocks():
+        return sch.get_child_blocks(sch.get_block("root", func_name=func_name))
+
+    # from here the three steps are schedule_generic_sram's, with the staging
+    # placed at the stripe loop instead of the whole loop nest
+    for block_rv in blocks():
+        block = sch.get(block_rv)
+        if not block.writes:
+            continue
+        target = block.writes[0].buffer
+        if not any(target.data.same_as(p) for p in params):
+            try:
+                sch.set_scope(block_rv, 0, SRAM_SCOPE)
+            except Exception:
+                pass
+
+    for block_rv in blocks():
+        if sch.get(block_rv).name_hint == anchor_name:
+            sch.reverse_compute_at(sch.cache_write(block_rv, 0, SRAM_SCOPE),
+                                   outer)
+            break
+
+    for block_rv in blocks():
+        block = sch.get(block_rv)
+        for index, region in enumerate(block.reads):
+            if region.buffer.data in params:
+                try:
+                    sch.compute_at(sch.cache_read(block_rv, index, SRAM_SCOPE),
+                                   outer)
+                except Exception:
+                    pass
+    return sch.mod
+
+
 def schedule_generic_sram(mod, func_name):
     """Stage a non-matmul kernel entirely in SRAM.
 
