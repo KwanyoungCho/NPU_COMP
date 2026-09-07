@@ -387,33 +387,48 @@ def schedule_generic_striped(mod, func_name, stripe):
     params = {prim.buffer_map[p].data for p in prim.params}
     output = prim.buffer_map[prim.params[-1]].data
 
-    # the block writing the kernel's result anchors the stripe loop
-    anchor = None
-    for block_rv in children:
-        block = sch.get(block_rv)
-        if block.writes and block.writes[0].buffer.data.same_as(output):
-            anchor = block_rv
-    if anchor is None:
+    # a kernel result is a parameter some block writes; there can be more than
+    # one (a split writes two), and then the blocks are siblings rather than a
+    # chain, so each result gets its own stripe loop
+    anchors = [rv for rv in children
+               if sch.get(rv).writes
+               and any(sch.get(rv).writes[0].buffer.data.same_as(p)
+                       for p in params)]
+    if not anchors:
         return None
-    anchor_name = sch.get(anchor).name_hint
-    loops = sch.get_loops(anchor)
-    if len(loops) < 2:
-        return None
-    outer, _ = sch.split(sch.fuse(*loops[:-1]), [None, stripe])
+    if len(anchors) > 1 and len(anchors) != len(children):
+        return None                # siblings mixed with producers: not handled
+    names = [sch.get(rv).name_hint for rv in anchors]
+    chain = len(anchors) == 1
 
-    # every other block produces something the result needs, so pulling them
-    # under the stripe loop is what shrinks their buffers too; nearest
-    # producer first, which is the order compute_at can verify
-    for block_rv in reversed(children):
-        if sch.get(block_rv).name_hint == anchor_name:
-            continue
-        try:
-            sch.compute_at(block_rv, outer)
-        except Exception:
+    outers = {}
+    for anchor, name in zip(anchors, names):
+        loops = sch.get_loops(anchor)
+        if len(loops) < 2:
             return None
+        outers[name], _ = sch.split(sch.fuse(*loops[:-1]), [None, stripe])
+
+    if chain:
+        # every other block produces something the result needs, so pulling
+        # them under the stripe loop is what shrinks their buffers too;
+        # nearest producer first, which is the order compute_at can verify
+        outer = outers[names[0]]
+        for block_rv in reversed(children):
+            if sch.get(block_rv).name_hint == names[0]:
+                continue
+            try:
+                sch.compute_at(block_rv, outer)
+            except Exception:
+                return None
 
     def blocks():
         return sch.get_child_blocks(sch.get_block("root", func_name=func_name))
+
+    def outer_for(block_rv):
+        """The stripe loop this block's staging belongs to."""
+        if chain:
+            return outers[names[0]]
+        return outers.get(sch.get(block_rv).name_hint)
 
     # from here the three steps are schedule_generic_sram's, with the staging
     # placed at the stripe loop instead of the whole loop nest
@@ -429,18 +444,25 @@ def schedule_generic_striped(mod, func_name, stripe):
                 pass
 
     for block_rv in blocks():
-        if sch.get(block_rv).name_hint == anchor_name:
+        name = sch.get(block_rv).name_hint
+        if name in names:
             sch.reverse_compute_at(sch.cache_write(block_rv, 0, SRAM_SCOPE),
-                                   outer)
-            break
+                                   outers[name])
 
     for block_rv in blocks():
         block = sch.get(block_rv)
+        outer = outer_for(block_rv)
+        if outer is None:
+            continue
         for index, region in enumerate(block.reads):
             if region.buffer.data in params:
                 try:
-                    sch.compute_at(sch.cache_read(block_rv, index, SRAM_SCOPE),
-                                   outer)
+                    # restricted to this consumer: sibling results (a split's
+                    # two halves) read the same input but live under different
+                    # stripe loops, and one shared cache could not sit in both
+                    stage = sch.cache_read(block_rv, index, SRAM_SCOPE,
+                                           consumer_blocks=[block_rv])
+                    sch.compute_at(stage, outer)
                 except Exception:
                     pass
     return sch.mod

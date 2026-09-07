@@ -34,7 +34,7 @@ from npu_compiler import tvm_pipeline as pipeline
 from npu_compiler.nn_models import llama
 from test_nn_frontend import _reference
 
-SEQS = (64, 128, 256, 512)
+SEQS = (64, 128, 256, 512, 1024)
 # measured 0.999997 at seq 64 and 0.999996 at 128 -- the machine accumulates
 # in fp32, so only the fp16 activations cost anything.  A staging or tiling
 # error moves this far below the threshold rather than nudging it.
