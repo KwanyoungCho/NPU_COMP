@@ -107,7 +107,7 @@ class Qwen3Model(nn.Module):
                 "input_embeds": nn.spec.Tensor([seq, d], self.config.dtype),
                 "cos": nn.spec.Tensor([seq, 1, hd], self.config.dtype),
                 "sin": nn.spec.Tensor([seq, 1, hd], self.config.dtype),
-                "mask": nn.spec.Tensor([h, seq, seq], self.config.dtype),
+                "mask": nn.spec.Tensor([1, seq, seq], self.config.dtype),
                 "$": {"param_mode": "packed", "effect_mode": "none"},
             }
         }, self)
@@ -138,7 +138,7 @@ def runtime_inputs(assets, config, token_ids):
         "input_embeds": assets.embedding(
             [int(i) for i in token_ids]).astype(np.float16),
         "cos": cos, "sin": sin,
-        "mask": causal_mask(config.num_heads, seq),
+        "mask": causal_mask(seq),
     }
 
 

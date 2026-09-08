@@ -61,7 +61,7 @@ def main():
                for name, p in params}
     x = rng.normal(0, 0.5, (args.seq, config.hidden_size)).astype(np.float16)
     cos, sin = llama.rope_inputs(config, np.arange(args.seq))
-    mask = llama.causal_mask(config.num_heads, args.seq)
+    mask = llama.causal_mask(args.seq)
 
     from test_nn_frontend import _reference
     exact = _reference(config, weights, x, cos, sin, mask)

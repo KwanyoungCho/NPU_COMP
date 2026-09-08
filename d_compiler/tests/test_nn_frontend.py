@@ -72,7 +72,7 @@ def test_nn_frontend_matches_numpy_reference():
     weights = {n: rng.normal(0, 0.15, p.shape).astype(np.float16) for n, p in params}
     x = rng.normal(0, 0.5, (SEQ, cfg.hidden_size)).astype(np.float16)
     cos, sin = llama.rope_inputs(cfg, np.arange(SEQ))
-    mask = llama.causal_mask(cfg.num_heads, SEQ)
+    mask = llama.causal_mask(SEQ)
 
     # standard build path: relax.build -> VirtualMachine
     vm = relax.VirtualMachine(relax.build(mod, target="llvm"), tvm.cpu())

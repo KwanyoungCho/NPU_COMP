@@ -68,7 +68,7 @@ def _inputs(cfg, seed):
     rng = np.random.default_rng(seed)
     x = rng.normal(0, 0.5, (SEQ, cfg.hidden_size)).astype(np.float16)
     cos, sin = qwen3.rope_inputs(cfg, np.arange(SEQ))
-    return rng, x, cos, sin, qwen3.causal_mask(cfg.num_heads, SEQ)
+    return rng, x, cos, sin, qwen3.causal_mask(SEQ)
 
 
 def test_qwen3_frontend_matches_numpy_reference():

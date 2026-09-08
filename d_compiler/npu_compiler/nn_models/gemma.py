@@ -51,14 +51,18 @@ def rope_inputs(head_dim, theta, positions, partial_rotary_factor=1.0):
             np.sin(angle).astype(np.float16)[:, None, :])
 
 
-def banded_mask(num_heads, seq, window=None, dtype=np.float16):
-    """Additive mask: causal, and for sliding attention also i-j >= window."""
+def banded_mask(seq, window=None, dtype=np.float16):
+    """[1, seq, seq] additive mask: causal, and for sliding also i-j >= window.
+
+    One copy for every head; see llama.causal_mask for why it is not
+    materialized per head.
+    """
     mask = np.zeros((seq, seq), dtype=np.float32)
     for i in range(seq):
         for j in range(seq):
             if j > i or (window is not None and i - j >= window):
                 mask[i, j] = -30000.0
-    return np.broadcast_to(mask, (num_heads, seq, seq)).astype(dtype).copy()
+    return mask[None].astype(dtype)
 
 
 def softcap(logits, cap):
@@ -231,8 +235,8 @@ class GemmaModel(nn.Module):
                 "sin_sliding": tensor([seq, 1, sliding.head_dim], self.dtype),
                 "cos_full": tensor([seq, 1, full.head_dim], self.dtype),
                 "sin_full": tensor([seq, 1, full.head_dim], self.dtype),
-                "mask_sliding": tensor([heads, seq, seq], self.dtype),
-                "mask_full": tensor([heads, seq, seq], self.dtype),
+                "mask_sliding": tensor([1, seq, seq], self.dtype),
+                "mask_full": tensor([1, seq, seq], self.dtype),
                 "$": {"param_mode": "packed", "effect_mode": "none"},
         }
         return nn.spec.ModuleSpec.from_raw(
@@ -262,8 +266,8 @@ def host_inputs(spec, positions):
     return {
         "cos_sliding": cos_s, "sin_sliding": sin_s,
         "cos_full": cos_f, "sin_full": sin_f,
-        "mask_sliding": banded_mask(heads, seq, sliding.window),
-        "mask_full": banded_mask(heads, seq, full.window),
+        "mask_sliding": banded_mask(seq, sliding.window),
+        "mask_full": banded_mask(seq, full.window),
     }
 
 

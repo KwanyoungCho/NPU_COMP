@@ -57,7 +57,7 @@ def _family(assets):
         def runtime_inputs(_assets, cfg, tokens):
             seq = len(tokens)
             return {"input_embeds": assets.embedding(tokens),
-                    "mask": llama.causal_mask(cfg.num_heads, seq)}
+                    "mask": llama.causal_mask(seq)}
 
     return Family()
 
@@ -70,7 +70,7 @@ def _greedy_reference(config, assets, weights_by_name, prompt, steps):
         seq = len(tokens)
         x = assets.embedding(tokens)
         cos, sin = llama.rope_inputs(config, np.arange(seq))
-        mask = llama.causal_mask(config.num_heads, seq)
+        mask = llama.causal_mask(seq)
         logits = _reference(config, weights_by_name, x, cos, sin, mask)
         generated.append(int(np.argmax(logits[-1])))
         tokens.append(generated[-1])

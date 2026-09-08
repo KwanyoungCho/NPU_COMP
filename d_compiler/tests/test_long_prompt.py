@@ -61,7 +61,7 @@ def _measure(seq):
                for name, p in params}
     x = rng.normal(0, 0.5, (seq, cfg.hidden_size)).astype(np.float16)
     cos, sin = llama.rope_inputs(cfg, np.arange(seq))
-    mask = llama.causal_mask(cfg.num_heads, seq)
+    mask = llama.causal_mask(seq)
 
     lowered = pipeline.graph_pipeline(
         custom_legalize=npu_legalize.legalize_map(),

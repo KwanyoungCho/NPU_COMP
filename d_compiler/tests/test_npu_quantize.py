@@ -32,7 +32,7 @@ def _model():
                for name, p in params}
     x = rng.normal(0, 0.5, (SEQ, cfg.hidden_size)).astype(np.float16)
     cos, sin = llama.rope_inputs(cfg, np.arange(SEQ))
-    mask = llama.causal_mask(cfg.num_heads, SEQ)
+    mask = llama.causal_mask(SEQ)
     return mod, params, cfg, weights, (x, cos, sin, mask)
 
 

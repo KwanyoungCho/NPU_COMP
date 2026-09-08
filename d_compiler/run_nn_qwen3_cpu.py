@@ -66,7 +66,7 @@ def main():
 
     embeds = assets.embedding([int(i) for i in input_ids]).astype(np.float16)
     cos, sin = qwen3.rope_inputs(cfg, np.arange(seq))
-    mask = qwen3.causal_mask(cfg.num_heads, seq)
+    mask = qwen3.causal_mask(seq)
 
     started = time.perf_counter()
     logits = vm["prefill"](*[tvm.nd.array(v) for v in (embeds, cos, sin, mask)],

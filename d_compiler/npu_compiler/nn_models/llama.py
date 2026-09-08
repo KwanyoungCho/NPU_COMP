@@ -264,7 +264,7 @@ class LlamaModel(nn.Module):
                 "input_embeds": nn.spec.Tensor([seq, d], dtype),
                 "cos": nn.spec.Tensor([seq, 1, hd], dtype),
                 "sin": nn.spec.Tensor([seq, 1, hd], dtype),
-                "mask": nn.spec.Tensor([h, seq, seq], dtype),
+                "mask": nn.spec.Tensor([1, seq, seq], dtype),
                 "$": {"param_mode": "packed", "effect_mode": "none"},
             },
         }
@@ -317,10 +317,16 @@ def rope_inputs(config, positions):
     return cos, sin
 
 
-def causal_mask(num_heads, seq, dtype=np.float16):
+def causal_mask(seq, dtype=np.float16):
+    """[1, seq, seq] -- the same mask for every head, broadcast by the add.
+
+    It used to be materialized per head.  That is the same bytes repeated
+    ``num_heads`` times, and the machine re-read all of them: at seq 2048 the
+    mask alone was 201 MB of traffic and 192 MiB of the image.
+    """
     m = np.zeros((seq, seq), dtype=np.float32)
     m[np.triu_indices(seq, k=1)] = -1e4
-    return np.broadcast_to(m, (num_heads, seq, seq)).astype(dtype).copy()
+    return m[None].astype(dtype)
 
 
 def model_config(assets, layers=0):
@@ -339,7 +345,7 @@ def runtime_inputs(assets, config, token_ids):
         "input_embeds": assets.embedding(
             [int(i) for i in token_ids]).astype(np.float16),
         "cos": cos, "sin": sin,
-        "mask": causal_mask(config.num_heads, seq),
+        "mask": causal_mask(seq),
     }
 
 

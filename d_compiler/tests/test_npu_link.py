@@ -252,7 +252,7 @@ def test_whole_layer_matches_the_cpu_build():
                for _, p in params]
     x = rng.normal(0, 0.5, (seq, config.hidden_size)).astype(np.float16)
     cos, sin = llama.rope_inputs(config, np.arange(seq))
-    mask = llama.causal_mask(config.num_heads, seq)
+    mask = llama.causal_mask(seq)
 
     lowered = P.graph_pipeline(custom_legalize=npu_legalize.legalize_map(),
                                fuse=False, lift_params=True)(mod)

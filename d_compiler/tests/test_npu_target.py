@@ -54,7 +54,7 @@ def test_build_produces_a_runnable_program():
                for _, p in params]
     x = rng.normal(0, 0.5, (SEQ, cfg.hidden_size)).astype(np.float16)
     cos, sin = llama.rope_inputs(cfg, np.arange(SEQ))
-    mask = llama.causal_mask(cfg.num_heads, SEQ)
+    mask = llama.causal_mask(SEQ)
 
     executable = T.build(mod, T.npu_target())
     assert executable.kernel_count > 0

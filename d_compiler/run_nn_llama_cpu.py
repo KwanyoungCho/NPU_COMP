@@ -68,7 +68,7 @@ def main():
 
     embeds = assets.embedding([int(i) for i in input_ids]).astype(np.float16)
     cos, sin = llama.rope_inputs(cfg, np.arange(seq))
-    mask = llama.causal_mask(cfg.num_heads, seq)
+    mask = llama.causal_mask(seq)
 
     started = time.perf_counter()
     logits = vm["prefill"](*[tvm.nd.array(v) for v in (embeds, cos, sin, mask)],
