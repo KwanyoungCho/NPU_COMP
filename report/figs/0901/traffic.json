@@ -5,10 +5,10 @@
     "vocab": 256,
     "fits": true,
     "words": 495370,
-    "link_seconds": 4.6,
+    "link_seconds": 5.0,
     "load": {
       "other": 20,
-      "weight": 203013424,
+      "weight": 203011172,
       "activation": 1925776
     },
     "store": {
@@ -26,11 +26,11 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 605515,
-    "link_seconds": 4.6,
+    "words": 605513,
+    "link_seconds": 5.0,
     "load": {
       "other": 20,
-      "weight": 203393024,
+      "weight": 203345920,
       "activation": 8880128
     },
     "store": {
@@ -48,19 +48,19 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 492622,
-    "link_seconds": 3.6,
+    "words": 484793,
+    "link_seconds": 3.9,
     "load": {
       "other": 20,
-      "weight": 203966464,
-      "activation": 17956864
+      "weight": 203778048,
+      "activation": 17563648
     },
     "store": {
-      "activation": 15892480
+      "activation": 15499264
     },
     "transfers": {
-      "load": 705,
-      "store": 2617
+      "load": 608,
+      "store": 2568
     },
     "sram_peak_bytes": 3244052,
     "sram_peak_kernel": "silu"
@@ -70,19 +70,19 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 968781,
-    "link_seconds": 4.4,
+    "words": 968420,
+    "link_seconds": 4.8,
     "load": {
       "other": 20,
-      "weight": 205408256,
-      "activation": 36700160
+      "weight": 204654592,
+      "activation": 35127296
     },
     "store": {
-      "activation": 32571392
+      "activation": 30998528
     },
     "transfers": {
-      "load": 771,
-      "store": 5280
+      "load": 692,
+      "store": 5108
     },
     "sram_peak_bytes": 6389780,
     "sram_peak_kernel": "silu"
@@ -92,19 +92,19 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 1924921,
-    "link_seconds": 6.3,
+    "words": 1924301,
+    "link_seconds": 6.5,
     "load": {
       "other": 20,
-      "weight": 209471488,
-      "activation": 80740352
+      "weight": 206456832,
+      "activation": 74448896
     },
     "store": {
-      "activation": 68288512
+      "activation": 61997056
     },
     "transfers": {
-      "load": 1002,
-      "store": 10736
+      "load": 851,
+      "store": 10168
     },
     "sram_peak_bytes": 6389780,
     "sram_peak_kernel": "multiply3"
@@ -114,19 +114,19 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 3894848,
-    "link_seconds": 12.3,
+    "words": 3855398,
+    "link_seconds": 10.6,
     "load": {
       "other": 20,
-      "weight": 275812352,
-      "activation": 180355072
+      "weight": 263753728,
+      "activation": 155189248
     },
     "store": {
-      "activation": 149159936
+      "activation": 123994112
     },
     "transfers": {
-      "load": 26083,
-      "store": 34472
+      "load": 1246,
+      "store": 20288
     },
     "sram_peak_bytes": 7908372,
     "sram_peak_kernel": "npu_rms_norm"
@@ -136,19 +136,19 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 8040610,
-    "link_seconds": 21.0,
+    "words": 7965094,
+    "link_seconds": 18.0,
     "load": {
       "other": 20,
-      "weight": 273227776,
-      "activation": 528482304
+      "weight": 224993280,
+      "activation": 440401920
     },
     "store": {
-      "activation": 348651520
+      "activation": 247988224
     },
     "transfers": {
-      "load": 52053,
-      "store": 47445
+      "load": 2455,
+      "store": 16005
     },
     "sram_peak_bytes": 7908372,
     "sram_peak_kernel": "npu_rms_norm"
@@ -158,19 +158,19 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 16923018,
-    "link_seconds": 42.7,
+    "words": 16329694,
+    "link_seconds": 37.6,
     "load": {
       "other": 20,
-      "weight": 582631424,
-      "activation": 1258291200
+      "weight": 389693440,
+      "activation": 1031798784
     },
     "store": {
-      "activation": 898629632
+      "activation": 495976448
     },
     "transfers": {
-      "load": 105178,
-      "store": 107176
+      "load": 5810,
+      "store": 32104
     },
     "sram_peak_bytes": 7908372,
     "sram_peak_kernel": "npu_rms_norm"

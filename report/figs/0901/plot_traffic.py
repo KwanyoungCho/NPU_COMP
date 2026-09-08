@@ -3,16 +3,20 @@
 Reads report/figs/0901/traffic.json, written by d_compiler/analyze_traffic.py
 (one link per point; traffic is summed from the DMA instructions in the linked
 program, and the total was checked against the C-model's own counter -- both
-say 1,619,976,421 cells for the 28-layer program).
+say 1,619,927,729 cells for the 28-layer program).
 
 The point of these two figures is that every gate we run is seq=7, and at that
 one point the compiler looks optimal: weights are read exactly once and
-activation round trips are 1% of traffic.  Neither stays true as the prompt
-grows.  Two pieces of work have landed since the first version of these
-figures: striping the elementwise and normalisation kernels, which caps SRAM
-at ~6.1 MiB (it used to grow past 8 and stop linking at 256), and choosing
-which matmul operand stays resident, which is what pulled weight re-reads back
-towards one.
+activation round trips are 1% of traffic.  Neither stayed true as the prompt
+grew.  Four pieces of work have landed since the first version of these
+figures: striping the elementwise and normalisation kernels (SRAM used to grow
+past 8 MiB and stop linking at seq 256), choosing which matmul operand stays
+resident (weight re-reads back towards one), fusing the attention score chain,
+and blocking the whole attention over query rows so the score matrix never
+reaches global memory at all.  Cost per token is now under 1 MB.
+
+"weight" here means every function parameter, the mask included, which is why
+the blue bar drops at 2048 when the mask stopped being materialized per head.
 
 Colours: categorical blue/green for the two traffic kinds that behave
 differently, red reserved for the capacity violation, grey for recessive
