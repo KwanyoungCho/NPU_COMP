@@ -199,7 +199,8 @@ def matmul_extents(mod, func_name):
     return tuple(int(sch.get(loop).extent) for loop in loops[-3:])
 
 
-def schedule_matmul_sram(mod, func_name, tile=64, hold=None, panel=None):
+def schedule_matmul_sram(mod, func_name, tile=64, hold=None, panel=None,
+                         tile_pad=False):
     """Tile a legalized matmul and stage its operands into SRAM.
 
     The DMA that the hand-written backend inserts by hand is expressed here as
@@ -305,7 +306,25 @@ def schedule_matmul_sram(mod, func_name, tile=64, hold=None, panel=None):
         sch.reverse_compute_at(unpad, enclosing)
     for index in (0, 1):
         if sch.get(block).reads[index].buffer.scope() == SRAM_SCOPE:
-            continue                       # already staged (padded operand)
+            # a padded operand is already in SRAM, whole.  Holding it whole is
+            # what we want when it is small -- it is then read exactly once,
+            # which is why a padded prefill is accidentally cheaper than an
+            # unpadded one.  It stops being what we want when the padded thing
+            # is the KV cache: decode has M=1 always, so this branch is always
+            # taken, and V as [heads, capacity+1, head_dim] does not fit past
+            # capacity 256.  Tiling the producer into the staging loop trades
+            # that back -- re-filled per tile, sized by CompactBufferAllocation.
+            if not tile_pad:
+                continue
+            padded = sch.get(block).reads[index].buffer
+            for producer in sch.get_producers(block):
+                if not sch.get(producer).writes[0].buffer.same_as(padded):
+                    continue
+                behind = list(sch.get_producers(producer))
+                sch.compute_at(producer, staged_at[index])
+                for stage in behind:
+                    sch.compute_at(stage, staged_at[index])
+            continue
         stage = sch.cache_read(block, index, SRAM_SCOPE)
         sch.compute_at(stage, staged_at[index])
     # a dequantized weight is a computed producer: without this it holds the

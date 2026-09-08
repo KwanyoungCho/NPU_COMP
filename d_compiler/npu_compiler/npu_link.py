@@ -60,7 +60,8 @@ def _is_attention(prim):
             and any("softmax" in name for name in names))
 
 
-def _schedule(module, gvar, prim, tile=64, stripe=None, mapping=None):
+def _schedule(module, gvar, prim, tile=64, stripe=None, mapping=None,
+              tile_pad=False):
     """Apply the NPU schedule this kernel needs; every kernel ends up staged.
 
     ``stripe`` narrows a non-matmul kernel to that many result rows at a time;
@@ -78,7 +79,7 @@ def _schedule(module, gvar, prim, tile=64, stripe=None, mapping=None):
         elif _is_matmul(prim):
             hold, panel = mapping if mapping else (None, None)
             scheduled = npu_intrin.schedule_matmul_sram(module, name, tile,
-                                                        hold, panel)
+                                                        hold, panel, tile_pad)
         elif stripe is None:
             scheduled = npu_intrin.schedule_generic_sram(module, name)
         else:
@@ -193,9 +194,10 @@ def _collect_constants(prim):
 
 
 def _measure(planned, gvar, prim, profile, scratch_base, slot_count,
-             stripe=None, mapping=None):
+             stripe=None, mapping=None, tile_pad=False):
     """Schedule a kernel and report (scheduled, scratch row, buffers, top)."""
-    scheduled = _schedule(planned, gvar, prim, profile.tile, stripe, mapping)
+    scheduled = _schedule(planned, gvar, prim, profile.tile, stripe, mapping,
+                          tile_pad)
     elems = _scratch_row(scheduled)
     buffers = _sram_buffers(scheduled)
     start = scratch_base + slot_count * elems * 4
@@ -226,9 +228,20 @@ def _fit_matmul(planned, gvar, prim, profile, scratch_base, slot_count):
         mapping = (hold, panel) if panel >= profile.tile else None
     scheduled, elems, buffers, top = _measure(
         planned, gvar, prim, profile, scratch_base, slot_count)
+    if top <= profile.sram_nibbles:
+        return scheduled, elems, buffers
+    # last rung: stop holding the padded operand whole.  Only reached when the
+    # padding is large, which in practice means decode, where M is 1 and the
+    # padded operand is the KV cache (see schedule_matmul_sram).  Kept below
+    # the plain schedule so a prefill that already fits is untouched.
+    whole = top
+    scheduled, elems, buffers, top = _measure(
+        planned, gvar, prim, profile, scratch_base, slot_count, tile_pad=True)
     if top > profile.sram_nibbles:
-        raise LinkError(f"{gvar.name_hint}: needs "
-                        f"{top / 2 / 1024 / 1024:.2f} MiB of SRAM")
+        raise LinkError(
+            f"{gvar.name_hint}: needs {whole / 2 / 1024 / 1024:.2f} MiB of "
+            f"SRAM holding the padded operand, "
+            f"{top / 2 / 1024 / 1024:.2f} MiB tiling it")
     return scheduled, elems, buffers
 
 
