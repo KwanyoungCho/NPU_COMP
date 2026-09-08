@@ -11,6 +11,7 @@ Contract (see d_compiler/ISA_V09.md):
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -92,7 +93,19 @@ def run(program_words, global_cells):
         images = []
     else:
         if len(raw) % image_bytes:
-            raise V09Error(f"malformed snapshot file size {len(raw)}")
+            # Almost always a short write: a full-model image is several GB
+            # and the simulator writes one per snapshot plus one at HALT, so a
+            # volume with less room than that leaves a truncated file behind.
+            # Reporting only "malformed" sends the reader looking at the
+            # compiler for a disk problem.
+            free = shutil.disk_usage(tmp_root or tempfile.gettempdir()).free
+            raise V09Error(
+                f"snapshot file is {len(raw):,} bytes, not a multiple of the "
+                f"{image_bytes:,}-byte image -- the simulator's write was cut "
+                f"short ({free / 2**30:.1f} GiB free on "
+                f"{tmp_root or tempfile.gettempdir()}; each image needs "
+                f"{image_bytes / 2**30:.1f} GiB and the run writes two)",
+                counters)
         images = [np.frombuffer(raw[base:base + image_bytes], dtype="<u4").copy()
                   for base in range(0, len(raw), image_bytes)]
     return images, counters
