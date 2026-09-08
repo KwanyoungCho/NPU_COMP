@@ -579,11 +579,16 @@ def schedule_generic_striped(mod, func_name, stripe):
         for index, region in enumerate(block.reads):
             if region.buffer.data in params:
                 try:
-                    # restricted to this consumer: sibling results (a split's
-                    # two halves) read the same input but live under different
-                    # stripe loops, and one shared cache could not sit in both
-                    stage = sch.cache_read(block_rv, index, SRAM_SCOPE,
-                                           consumer_blocks=[block_rv])
+                    # Sibling results (a split's two halves) read the same
+                    # input but live under DIFFERENT stripe loops, and one
+                    # shared cache cannot sit in both -- so those get a cache
+                    # per consumer.  A chain's blocks all live under the one
+                    # stripe loop and can share, and must: silu reads its
+                    # input twice (sigmoid, then multiply) and was staging it
+                    # twice, 1.50x its floor.
+                    stage = sch.cache_read(
+                        block_rv, index, SRAM_SCOPE,
+                        consumer_blocks=None if chain else [block_rv])
                     sch.compute_at(stage, outer)
                 except Exception:
                     pass
