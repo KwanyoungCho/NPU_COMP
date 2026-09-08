@@ -5,7 +5,7 @@
     "vocab": 256,
     "fits": true,
     "words": 495370,
-    "link_seconds": 5.0,
+    "link_seconds": 4.7,
     "load": {
       "other": 20,
       "weight": 203011172,
@@ -27,7 +27,7 @@
     "vocab": 256,
     "fits": true,
     "words": 605513,
-    "link_seconds": 5.0,
+    "link_seconds": 4.8,
     "load": {
       "other": 20,
       "weight": 203345920,
@@ -49,7 +49,7 @@
     "vocab": 256,
     "fits": true,
     "words": 484793,
-    "link_seconds": 3.9,
+    "link_seconds": 3.6,
     "load": {
       "other": 20,
       "weight": 203778048,
@@ -71,7 +71,7 @@
     "vocab": 256,
     "fits": true,
     "words": 968420,
-    "link_seconds": 4.8,
+    "link_seconds": 4.5,
     "load": {
       "other": 20,
       "weight": 204654592,
@@ -92,87 +92,87 @@
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 1924301,
-    "link_seconds": 6.5,
+    "words": 1924203,
+    "link_seconds": 6.1,
     "load": {
       "other": 20,
       "weight": 206456832,
-      "activation": 74448896
+      "activation": 70254592
     },
     "store": {
       "activation": 61997056
     },
     "transfers": {
-      "load": 851,
-      "store": 10168
+      "load": 829,
+      "store": 10166
     },
     "sram_peak_bytes": 6389780,
-    "sram_peak_kernel": "multiply3"
+    "sram_peak_kernel": "silu"
   },
   {
     "seq": 512,
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 3855398,
-    "link_seconds": 10.6,
+    "words": 3855034,
+    "link_seconds": 10.2,
     "load": {
       "other": 20,
-      "weight": 263753728,
-      "activation": 155189248
+      "weight": 260608000,
+      "activation": 140509184
     },
     "store": {
       "activation": 123994112
     },
     "transfers": {
-      "load": 1246,
-      "store": 20288
+      "load": 1160,
+      "store": 20284
     },
-    "sram_peak_bytes": 7908372,
-    "sram_peak_kernel": "npu_rms_norm"
+    "sram_peak_bytes": 6424084,
+    "sram_peak_kernel": "multiply1"
   },
   {
     "seq": 1024,
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 7965094,
-    "link_seconds": 18.0,
+    "words": 7964366,
+    "link_seconds": 17.5,
     "load": {
       "other": 20,
-      "weight": 224993280,
-      "activation": 440401920
+      "weight": 218701824,
+      "activation": 411041792
     },
     "store": {
       "activation": 247988224
     },
     "transfers": {
-      "load": 2455,
-      "store": 16005
+      "load": 2283,
+      "store": 15997
     },
-    "sram_peak_bytes": 7908372,
-    "sram_peak_kernel": "npu_rms_norm"
+    "sram_peak_bytes": 7446548,
+    "sram_peak_kernel": "matmul5"
   },
   {
     "seq": 2048,
     "layers": 1,
     "vocab": 256,
     "fits": true,
-    "words": 16329694,
-    "link_seconds": 37.6,
+    "words": 16328238,
+    "link_seconds": 35.5,
     "load": {
       "other": 20,
-      "weight": 389693440,
-      "activation": 1031798784
+      "weight": 377110528,
+      "activation": 973078528
     },
     "store": {
       "activation": 495976448
     },
     "transfers": {
-      "load": 5810,
-      "store": 32104
+      "load": 5466,
+      "store": 32088
     },
-    "sram_peak_bytes": 7908372,
-    "sram_peak_kernel": "npu_rms_norm"
+    "sram_peak_bytes": 7496724,
+    "sram_peak_kernel": "fused_relax_matmul_relax_multiply_relax_add_relax_nn_softmax_relax_matmul"
   }
 ]
