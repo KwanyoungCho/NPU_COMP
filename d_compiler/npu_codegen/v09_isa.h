@@ -63,15 +63,26 @@ inline Word enc_addr_half(int operand, int64_t value, bool high, int partial) {
 
 inline Word enc_vlen(int64_t n) { return (u16(n) << 8) | 0x82u; }
 
+// A 16-bit shape field that must not be masked silently: a [7, 128256]
+// result once wrote its rows at stride 62720 and produced garbage with no
+// error anywhere.
+inline Word field16(int64_t value, const char* name) {
+  if (value < 0 || value > 0xFFFF) {
+    throw EncodeError(std::string(name) + "=" + std::to_string(value) +
+                      " does not fit in 16 bits");
+  }
+  return static_cast<Word>(value);
+}
+
 // ver.08 shape words plus the v09 dtype in spare bits [26:25]
 inline Word enc_mrows(int operand, int64_t rows, int partial, int dtype) {
   return ((Word(operand) & 3u) << 30) | ((Word(partial) & 1u) << 29) |
-         (u16(rows) << 8) | 0x88u | ((Word(dtype) & 3u) << 25);
+         (field16(rows, "rows") << 8) | 0x88u | ((Word(dtype) & 3u) << 25);
 }
 
 inline Word enc_mcols(int operand, int64_t cols, int partial, int dtype) {
   return ((Word(operand) & 3u) << 30) | ((Word(partial) & 1u) << 29) |
-         (u16(cols) << 8) | 0x89u | ((Word(dtype) & 3u) << 25);
+         (field16(cols, "cols") << 8) | 0x89u | ((Word(dtype) & 3u) << 25);
 }
 
 // --------------------------------------------------------- load and save

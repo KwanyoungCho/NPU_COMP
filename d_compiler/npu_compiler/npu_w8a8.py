@@ -70,7 +70,10 @@ def emit(asm, stage, prim, addresses, sram_base):
     acc_nib = alloc(8)
     w_scale_nib = alloc(cols * 8)
     qw_tile_nib = alloc(TILE * TILE * 2)
-    dst_nib = alloc(rows * cols * 4)
+    # one column tile of the result, not the whole thing: a wide output (an
+    # lm_head is [7, 128256]) would need a row stride the 16-bit shape field
+    # cannot hold, and the encoder used to mask it silently
+    dst_nib = alloc(rows * TILE * 4)
 
     # ---- staging: activation and the fp32 scale vector, whole --------------
     stage.dma_in(x_addr * 2, x_nib, rows * inner * 2)
@@ -141,14 +144,16 @@ def emit(asm, stage, prim, addresses, sram_base):
                        TILE, TILE, DT_INT8, 2)
                 asm.load(1, SRC2)
                 asm.m_mul(VECTOR, mac=k_index != 0)
-            region(DST, dst_nib, cols, rows, row, col,
+            region(DST, dst_nib, TILE, part_rows, 0, 0,
                    part_rows, TILE, DT_FP16, 4)
             asm.save(1)
+            # drain this tile before the next one reuses the buffer
+            stage.dma_2d(out_addr * 2 + (row * cols + col) * 2, cols * 2,
+                         dst_nib, part_rows, TILE * 2, False)
 
     # descriptor dtype is sticky state: the gemm left SRC1/SRC2 at INT8,
     # which the next kernel's vector loads would trip over
     asm.shape_dt(SRC1, 1, 1, 1, DT_FP16)
     asm.shape_dt(SRC2, 1, 1, 1, DT_FP16)
     asm.shape_dt(DST, 1, 1, 1, DT_FP16)
-    stage.dma_out(out_addr * 2, dst_nib, rows * cols * 2)
     return cursor[0]

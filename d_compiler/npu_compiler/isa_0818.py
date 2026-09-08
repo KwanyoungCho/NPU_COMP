@@ -48,14 +48,26 @@ def enc_vlen(n):
     return (_u16(n) << 8) | 0x82
 
 
+def _field16(value, name):
+    """A 16-bit instruction field that must not be masked silently.
+
+    ``_u16`` truncates, which is how a [7, 128256] output once wrote its rows
+    at stride 62720 and produced garbage with no error anywhere.
+    """
+    value = int(value)
+    if not 0 <= value <= 0xFFFF:
+        raise ValueError(f"{name}={value} does not fit in 16 bits")
+    return value
+
+
 def enc_mrows(operand, rows, partial=PARTIAL):
     return (((operand & 3) << 30) | ((partial & 1) << 29)
-            | (_u16(rows) << 8) | 0x88)
+            | (_field16(rows, "rows") << 8) | 0x88)
 
 
 def enc_mcols(operand, cols, partial=PARTIAL):
     return (((operand & 3) << 30) | ((partial & 1) << 29)
-            | (_u16(cols) << 8) | 0x89)
+            | (_field16(cols, "cols") << 8) | 0x89)
 
 
 def enc_load(matrix, operand, strided=0, ncols=0, start=0):

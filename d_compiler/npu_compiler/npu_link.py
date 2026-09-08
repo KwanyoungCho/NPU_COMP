@@ -368,9 +368,14 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
             if isinstance(value, relax.Call) and isinstance(
                     value.op, relax.GlobalVar):
                 called.add(value.op)
+    # W8A8 matmuls are emitted directly rather than walked, so they never read
+    # the pool; collecting from them only drags in their reduce identity
+    # (-FLT_MAX), which cannot be represented in the fp16 pool and lands in the
+    # image as -inf
     constants = sorted(set().union(*[
         _collect_constants(planned[gv]) for gv in called
-        if isinstance(planned[gv], tir.PrimFunc)] or [set()]))
+        if isinstance(planned[gv], tir.PrimFunc)
+        and not npu_w8a8.is_w8a8(planned[gv])] or [set()]))
     # rsqrt and tanh need literal 1 and 2 whether or not the TIR mentions them
     constants = sorted(set(constants) | {1.0, 2.0})
     if len(constants) % 2:
