@@ -21,7 +21,24 @@ from npu_compiler import npu_generate
 
 os.environ.setdefault("NPU_V09_TMPDIR", "/data2/chokwans99/npu_tmp")
 
-GOLDEN = {"llama": [358, 1184, 311]}
+# The tokens HF generated for the default prompt, read from the recorded
+# reference rather than repeated here: the literal that used to sit in this
+# file was Qwen3's, so the Llama gate compared against another model's answer
+# and reported a failure the compiler never had.
+REFERENCES = {"llama": "v3_reference_generate_hello_3.npz"}
+
+
+def golden(model):
+    """-> the recorded HF tokens, or None when there is no reference."""
+    name = REFERENCES.get(model)
+    if name is None:
+        return None
+    path = Path(__file__).resolve().parent / "build" / name
+    if not path.exists():
+        return None
+    import numpy as np
+
+    return [int(t) for t in np.load(path)["generated_ids"]]
 
 
 def parse_args():
@@ -69,8 +86,9 @@ def main():
               "generated": generated,
               "decoded": assets.tokenizer.decode(generated),
               "seconds": round(time.perf_counter() - started, 1)}
-    if args.layers == 0 and args.model in GOLDEN:
-        expected = GOLDEN[args.model][:args.tokens]
+    expected = golden(args.model) if args.layers == 0 else None
+    if expected is not None:
+        expected = expected[:args.tokens]
         result["expected"] = expected
         result["match"] = generated == expected
     print(json.dumps(result))
