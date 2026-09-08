@@ -38,6 +38,58 @@ def _masked_softmax_patterns():
             ("npu.masked_softmax_unscaled", plain)]
 
 
+def _attention_patterns(tile=64):
+    """The whole attention: ``matmul -> scale -> mask -> softmax -> matmul``.
+
+    Fusing the score chain alone (``_masked_softmax_patterns``) removes two
+    passes over the score matrix but still materializes it.  Fusing the two
+    matmuls in as well lets the schedule block the whole thing over Q row
+    blocks, and then the score matrix never leaves SRAM: at seq 2048 the
+    attention moves 1,057 MB as five kernels and 235 MB as one.
+
+    Tried before the score-chain patterns, so an attention this cannot take
+    still gets the smaller fusion -- which is also the fallback when ``check``
+    below refuses.
+    """
+    from tvm.relax.dpl.pattern import is_op, wildcard
+    from tvm.relax.transform import FusionPattern
+
+    def chain(scaled):
+        scores = is_op("relax.matmul")(wildcard(), wildcard())
+        if scaled:
+            scores = is_op("relax.multiply")(scores, wildcard())
+        masked = is_op("relax.add")(scores, wildcard())
+        return is_op("relax.matmul")(
+            is_op("relax.nn.softmax")(masked), wildcard())
+
+    def tile_aligned(context):
+        """Only fuse an attention the block schedule can tensorize.
+
+        Both matmuls end up over (block, seq, head_dim) and go to the 64x64
+        matrix unit, so those two extents have to be tile multiples; the block
+        itself is halved down from seq and stays one.  When they are not,
+        pad_einsum would have to pad inside the block, which is both a lot of
+        wasted matrix work (a 4x4 attention padded to 64x64) and a shape the
+        tensorize refuses.  Declining here leaves the score-chain fusion,
+        which works at any size.
+
+        A consequence worth keeping: seq=7, which every full-depth gate uses,
+        is not tile aligned, so those gates are untouched by this pass.
+        """
+        shape = context.matched_expr.struct_info.shape
+        if shape is None or len(shape) != 3:
+            return False
+        try:
+            _, rows, width = (int(dim) for dim in shape)
+        except (TypeError, ValueError):
+            return False                     # dynamic shape
+        return rows % tile == 0 and width % tile == 0
+
+    return [FusionPattern("npu.attention", chain(True), None, tile_aligned),
+            FusionPattern("npu.attention_unscaled", chain(False), None,
+                          tile_aligned)]
+
+
 def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True,
                    fuse_attention=True):
     """Relax -> TIR PrimFuncs, following the standard stage order.
@@ -51,10 +103,11 @@ def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True,
     load time.  Without it those transposes are materialized on every
     invocation -- for Llama's lm_head that is a 751 MiB tensor.
 
-    ``fuse_attention`` fuses only the attention score chain (see
-    ``_masked_softmax_pattern``).  It is separate from ``fuse``, which turns on
-    TVM's general fusion and is off by default because a fused body still has
-    to be re-serialized into vector steps and that is unverified.
+    ``fuse_attention`` fuses the attention, whole where the shape allows
+    (``_attention_patterns``) and otherwise just its score chain
+    (``_masked_softmax_patterns``).  It is separate from ``fuse``, which turns
+    on TVM's general fusion and is off by default because a fused body still
+    has to be re-serialized into vector steps and that is unverified.
     """
     stages = [
         relax.transform.CanonicalizeBindings(),
@@ -66,7 +119,7 @@ def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True,
         stages.append(relax.transform.LiftTransformParams())
     if fuse_attention:
         stages.append(relax.transform.FuseOpsByPattern(
-            _masked_softmax_patterns()))
+            _attention_patterns() + _masked_softmax_patterns()))
     stages += [
         relax.transform.LegalizeOps(custom_legalize),
         relax.transform.AnnotateTIROpPattern(),

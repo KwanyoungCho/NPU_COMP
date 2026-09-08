@@ -43,6 +43,23 @@ def _is_matmul(prim):
     return bool(found)
 
 
+def _is_attention(prim):
+    """A whole attention: two matmuls with a softmax between them.
+
+    Checked before ``_is_matmul``, which would otherwise claim this kernel --
+    it has a block named ``matmul`` like any other.
+    """
+    names = set()
+
+    def visit(node):
+        if isinstance(node, tir.Block):
+            names.add(node.name_hint)
+
+    tir.stmt_functor.post_order_visit(prim.body, visit)
+    return ({"matmul", "matmul_1"} <= names
+            and any("softmax" in name for name in names))
+
+
 def _schedule(module, gvar, prim, tile=64, stripe=None, mapping=None):
     """Apply the NPU schedule this kernel needs; every kernel ends up staged.
 
@@ -51,7 +68,14 @@ def _schedule(module, gvar, prim, tile=64, stripe=None, mapping=None):
     """
     name = gvar.name_hint
     try:
-        if _is_matmul(prim):
+        if _is_attention(prim):
+            # ``stripe`` is the query row block here; the whole-tensor form
+            # does not exist for this kernel, so there is always a block
+            scheduled = npu_intrin.schedule_attention_blocked(
+                module, name, stripe or tile, tile)
+            if scheduled is None:
+                raise LinkError(f"{name}: attention has an unexpected shape")
+        elif _is_matmul(prim):
             hold, panel = mapping if mapping else (None, None)
             scheduled = npu_intrin.schedule_matmul_sram(module, name, tile,
                                                         hold, panel)
@@ -267,6 +291,38 @@ def _matmul_mapping(planned, gvar, profile, budget):
     return choice
 
 
+def _fit_attention(planned, gvar, prim, profile, scratch_base, slot_count):
+    """Pick the query row block, largest first.
+
+    A bigger block reads K and V fewer times -- they are re-read once per
+    block -- so this wants the largest that fits, the same direction as the
+    matmul panel.  Unlike the panel there is no whole-tensor fallback to land
+    on, so failing all the way down is a link error rather than a silent
+    retreat.
+    """
+    rows = npu_intrin.attention_rows(planned, gvar.name_hint) or profile.tile
+    floor = min(rows, profile.tile)   # an axis under a tile cannot be halved
+    block, why = rows, "no block was tried"
+    while True:
+        try:
+            scheduled, elems, buffers, top = _measure(
+                planned, gvar, prim, profile, scratch_base, slot_count,
+                stripe=block)
+        except LinkError as error:
+            why, top = str(error), None
+        else:
+            if top <= profile.sram_nibbles:
+                return scheduled, elems, buffers
+            why = f"needs {top / 2 / 1024 / 1024:.2f} MiB"
+        if block <= floor:
+            break
+        block = max(floor, block // 2)
+    # say which block failed and why: a schedule that silently falls back is
+    # how the panel bug in report_0908 s8.1 stayed hidden
+    raise LinkError(f"{gvar.name_hint}: attention does not fit down to a "
+                    f"{floor}-row block -- {why}")
+
+
 def _fit_kernel(planned, gvar, prim, profile, scratch_base, slot_count):
     """Schedule a kernel, narrowing its stripe until its buffers fit SRAM.
 
@@ -277,6 +333,9 @@ def _fit_kernel(planned, gvar, prim, profile, scratch_base, slot_count):
     CompactBufferAllocation's shrinking and the kernel's scratch width are
     only known then.
     """
+    if _is_attention(prim):
+        return _fit_attention(planned, gvar, prim, profile, scratch_base,
+                              slot_count)
     if _is_matmul(prim):
         return _fit_matmul(planned, gvar, prim, profile, scratch_base,
                            slot_count)

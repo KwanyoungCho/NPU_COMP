@@ -329,6 +329,128 @@ def schedule_matmul_sram(mod, func_name, tile=64, hold=None, panel=None):
     return sch.mod
 
 
+def is_attention(mod, func_name):
+    """Does this kernel hold a whole attention -- two matmuls and a softmax?
+
+    Named blocks rather than the function name: the fused name is built from
+    the ops it absorbed and changes with the pattern.
+    """
+    sch = tir.Schedule(mod)
+    try:
+        names = {sch.get(rv).name_hint for rv
+                 in sch.get_child_blocks(sch.get_block("root",
+                                                       func_name=func_name))}
+    except Exception:
+        return False
+    return {"matmul", "matmul_1"} <= names and any("softmax" in n for n in names)
+
+
+def attention_rows(mod, func_name):
+    """Rows of the attention result (the query axis), or None."""
+    sch = tir.Schedule(mod)
+    try:
+        loops = sch.get_loops(sch.get_block("matmul_1", func_name=func_name))
+    except Exception:
+        return None
+    return int(sch.get(loops[1]).extent) if len(loops) >= 4 else None
+
+
+def schedule_attention_blocked(mod, func_name, block, tile=64):
+    """Block a whole-attention kernel over ``block`` query rows at a time.
+
+    The score matrix is [heads, seq, seq] and never fits; blocking the query
+    axis makes every intermediate [1, block, seq], which does.  Because a
+    block holds a query row's WHOLE row of scores, the softmax over it is
+    exact -- there is no running maximum to carry and no accumulated output to
+    rescale, so unlike FlashAttention this needs no online softmax and leaves
+    the matrix unit's single accumulator alone.  That is a consequence of
+    having 8 MiB rather than a GPU's shared memory.
+
+    Every block of the kernel shares (head, row) as its first two loops; the
+    matmuls only add a reduction axis after them.  So one split of the anchor's
+    row axis and a compute_at of everything else is the whole transform.  The
+    row block is put OUTSIDE the head loop, which is what lets the mask rows --
+    shared by every head -- be staged once per block instead of once per
+    (block, head).
+    """
+    sch = tir.Schedule(mod)
+    root = sch.get_block("root", func_name=func_name)
+    children = list(sch.get_child_blocks(root))
+    prim = sch.mod[func_name]
+    params = {prim.buffer_map[p].data for p in prim.params}
+    anchor = children[-1]
+    if sch.get(anchor).writes[0].buffer.data not in params:
+        return None                     # not the result: not the shape we know
+
+    head, row = sch.get_loops(anchor)[:2]
+    row_o, _ = sch.split(row, [None, block])
+    inner = sch.get_loops(anchor)[3:]   # row_i is index 2 after the split
+    sch.reorder(row_o, head, *sch.get_loops(anchor)[2:3], *inner)
+    for block_rv in reversed(children[:-1]):
+        try:
+            sch.compute_at(block_rv, head)
+        except Exception:
+            return None                 # a block that will not go inside
+
+    def blocks():
+        return sch.get_child_blocks(sch.get_block("root", func_name=func_name))
+
+    for block_rv in blocks():
+        info = sch.get(block_rv)
+        if info.writes and info.writes[0].buffer.data not in params:
+            try:
+                sch.set_scope(block_rv, 0, SRAM_SCOPE)
+            except Exception:
+                pass
+    sch.reverse_compute_at(sch.cache_write(anchor, 0, SRAM_SCOPE), head)
+    for block_rv in blocks():
+        for index, region in enumerate(sch.get(block_rv).reads):
+            buffer = region.buffer
+            if buffer.data not in params:
+                continue
+            # An operand whose head axis is 1 is broadcast over the heads --
+            # the mask is the one -- so it belongs OUTSIDE the head loop and
+            # is then read once per row block instead of once per (block,
+            # head).  Staged inside, the mask was 201 MB of the 428 MB this
+            # kernel moved at seq 2048, which is the whole reason the row
+            # block is outside the head loop in the first place.
+            try:
+                broadcast = int(buffer.shape[0]) == 1
+            except (TypeError, ValueError):
+                broadcast = False
+            try:
+                stage = sch.cache_read(block_rv, index, SRAM_SCOPE,
+                                       consumer_blocks=[block_rv])
+                sch.compute_at(stage, row_o if broadcast else head)
+            except Exception:
+                pass
+
+    # both matmuls go to the matrix unit; same steps as schedule_matmul_sram,
+    # applied inside the block rather than over the whole tensor
+    for name in ("matmul", "matmul_1"):
+        target = sch.get_block(name, func_name=func_name)
+        loops = sch.get_loops(target)
+        if any(int(sch.get(loop).extent) % tile for loop in loops[-3:]):
+            # pad_einsum wants one entry per block iter var.  After compute_at
+            # get_loops also returns the enclosing loops, which are not iters
+            # of this block, so the count has to come from the block itself.
+            iters = len(sch.get(target).iter_vars)
+            sch.pad_einsum(target, [1] * (iters - 3) + [tile] * 3)
+            loops = sch.get_loops(target)
+        # capture the three handles before splitting any of them: get_loops
+        # after a split returns the new loops and the tail no longer names
+        # what it did
+        m, n, k = loops[-3:]
+        m_o, m_i = sch.split(m, [None, tile])
+        n_o, n_i = sch.split(n, [None, tile])
+        k_o, k_i = sch.split(k, [None, tile])
+        sch.reorder(m_o, n_o, k_o, m_i, n_i, k_i)
+        init = sch.decompose_reduction(target, k_o)
+        sch.tensorize(sch.get_loops(target)[-3], "npu_gemm_acc_sram")
+        sch.tensorize(sch.get_loops(init)[-2], "npu_fill_zero_sram")
+    return sch.mod
+
+
 def schedule_elementwise(mod, func_name, block_name, intrin):
     """Split the legalized elementwise loop by VLEN and tensorize the inner run."""
     sch = tir.Schedule(mod)
