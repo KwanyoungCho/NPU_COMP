@@ -1,0 +1,533 @@
+[
+  {
+    "seq": 128,
+    "layers": 1,
+    "vocab": 256,
+    "quantize": false,
+    "words": 1866119,
+    "kernels": {
+      "npu_rms_norm": {
+        "moved": 4737024,
+        "floor": 4737024,
+        "calls": 3,
+        "sram_bytes": 3189268
+      },
+      "matmul1": {
+        "moved": 40894464,
+        "floor": 40894464,
+        "calls": 2,
+        "sram_bytes": 1224724
+      },
+      "reshape": {
+        "moved": 1572864,
+        "floor": 1572864,
+        "calls": 1,
+        "sram_bytes": 1609748
+      },
+      "matmul2": {
+        "moved": 14680064,
+        "floor": 14680064,
+        "calls": 2,
+        "sram_bytes": 1224724
+      },
+      "reshape1": {
+        "moved": 1048576,
+        "floor": 1048576,
+        "calls": 2,
+        "sram_bytes": 536596
+      },
+      "multiply1": {
+        "moved": 3211264,
+        "floor": 3211264,
+        "calls": 2,
+        "sram_bytes": 1607188
+      },
+      "split": {
+        "moved": 1572864,
+        "floor": 1572864,
+        "calls": 1,
+        "sram_bytes": 1181204
+      },
+      "tir_negative": {
+        "moved": 786432,
+        "floor": 786432,
+        "calls": 1,
+        "sram_bytes": 787220
+      },
+      "concatenate": {
+        "moved": 1572864,
+        "floor": 1572864,
+        "calls": 1,
+        "sram_bytes": 1574420
+      },
+      "add1": {
+        "moved": 2359296,
+        "floor": 2359296,
+        "calls": 1,
+        "sram_bytes": 2360852
+      },
+      "multiply2": {
+        "moved": 1114112,
+        "floor": 1114112,
+        "calls": 2,
+        "sram_bytes": 558612
+      },
+      "split1": {
+        "moved": 524288,
+        "floor": 524288,
+        "calls": 1,
+        "sram_bytes": 394772
+      },
+      "tir_negative1": {
+        "moved": 262144,
+        "floor": 262144,
+        "calls": 1,
+        "sram_bytes": 262932
+      },
+      "concatenate1": {
+        "moved": 524288,
+        "floor": 524288,
+        "calls": 1,
+        "sram_bytes": 525844
+      },
+      "add2": {
+        "moved": 786432,
+        "floor": 786432,
+        "calls": 1,
+        "sram_bytes": 787988
+      },
+      "repeat": {
+        "moved": 2097152,
+        "floor": 2097152,
+        "calls": 2,
+        "sram_bytes": 1050132
+      },
+      "reshape2": {
+        "moved": 3145728,
+        "floor": 3145728,
+        "calls": 2,
+        "sram_bytes": 1574420
+      },
+      "transpose": {
+        "moved": 4718592,
+        "floor": 4718592,
+        "calls": 3,
+        "sram_bytes": 1574420
+      },
+      "transpose1": {
+        "moved": 1572864,
+        "floor": 1572864,
+        "calls": 1,
+        "sram_bytes": 1574420
+      },
+      "fused_relax_matmul_relax_multiply_relax_add_relax_nn_softmax_relax_matmul": {
+        "moved": 3178496,
+        "floor": 3178496,
+        "calls": 1,
+        "sram_bytes": 329748
+      },
+      "transpose2": {
+        "moved": 1572864,
+        "floor": 1572864,
+        "calls": 1,
+        "sram_bytes": 1574420
+      },
+      "reshape3": {
+        "moved": 1572864,
+        "floor": 1572864,
+        "calls": 1,
+        "sram_bytes": 1609748
+      },
+      "add3": {
+        "moved": 4718592,
+        "floor": 4718592,
+        "calls": 2,
+        "sram_bytes": 2396180
+      },
+      "matmul3": {
+        "moved": 106430464,
+        "floor": 106430464,
+        "calls": 2,
+        "sram_bytes": 1286164
+      },
+      "silu": {
+        "moved": 4194304,
+        "floor": 4194304,
+        "calls": 1,
+        "sram_bytes": 6389780
+      },
+      "multiply3": {
+        "moved": 6291456,
+        "floor": 6291456,
+        "calls": 1,
+        "sram_bytes": 6389780
+      },
+      "matmul4": {
+        "moved": 53215232,
+        "floor": 53215232,
+        "calls": 1,
+        "sram_bytes": 3252244
+      },
+      "matmul5": {
+        "moved": 2424832,
+        "floor": 2424832,
+        "calls": 1,
+        "sram_bytes": 1224724
+      }
+    }
+  },
+  {
+    "seq": 512,
+    "layers": 1,
+    "vocab": 256,
+    "quantize": false,
+    "words": 7426093,
+    "kernels": {
+      "npu_rms_norm": {
+        "moved": 18911232,
+        "floor": 18892800,
+        "calls": 3,
+        "sram_bytes": 6335508
+      },
+      "matmul2": {
+        "moved": 50331648,
+        "floor": 50331648,
+        "calls": 2,
+        "sram_bytes": 3584020
+      },
+      "reshape": {
+        "moved": 6291456,
+        "floor": 6291456,
+        "calls": 1,
+        "sram_bytes": 6328340
+      },
+      "matmul3": {
+        "moved": 20971520,
+        "floor": 20971520,
+        "calls": 2,
+        "sram_bytes": 3584020
+      },
+      "reshape1": {
+        "moved": 4194304,
+        "floor": 4194304,
+        "calls": 2,
+        "sram_bytes": 2109460
+      },
+      "multiply1": {
+        "moved": 12845056,
+        "floor": 12845056,
+        "calls": 2,
+        "sram_bytes": 6424084
+      },
+      "split": {
+        "moved": 6291456,
+        "floor": 6291456,
+        "calls": 1,
+        "sram_bytes": 4720148
+      },
+      "tir_negative": {
+        "moved": 3145728,
+        "floor": 3145728,
+        "calls": 1,
+        "sram_bytes": 3146516
+      },
+      "concatenate": {
+        "moved": 6291456,
+        "floor": 6291456,
+        "calls": 1,
+        "sram_bytes": 6293012
+      },
+      "add1": {
+        "moved": 9437184,
+        "floor": 9437184,
+        "calls": 1,
+        "sram_bytes": 4720148
+      },
+      "multiply2": {
+        "moved": 4456448,
+        "floor": 4456448,
+        "calls": 2,
+        "sram_bytes": 2229780
+      },
+      "split1": {
+        "moved": 2097152,
+        "floor": 2097152,
+        "calls": 1,
+        "sram_bytes": 1574420
+      },
+      "tir_negative1": {
+        "moved": 1048576,
+        "floor": 1048576,
+        "calls": 1,
+        "sram_bytes": 1049364
+      },
+      "concatenate1": {
+        "moved": 2097152,
+        "floor": 2097152,
+        "calls": 1,
+        "sram_bytes": 2098708
+      },
+      "add2": {
+        "moved": 3145728,
+        "floor": 3145728,
+        "calls": 1,
+        "sram_bytes": 3147284
+      },
+      "repeat": {
+        "moved": 8388608,
+        "floor": 8388608,
+        "calls": 2,
+        "sram_bytes": 4195860
+      },
+      "reshape2": {
+        "moved": 12582912,
+        "floor": 12582912,
+        "calls": 2,
+        "sram_bytes": 6293012
+      },
+      "transpose": {
+        "moved": 18874368,
+        "floor": 18874368,
+        "calls": 3,
+        "sram_bytes": 6293012
+      },
+      "transpose1": {
+        "moved": 6291456,
+        "floor": 6291456,
+        "calls": 1,
+        "sram_bytes": 6297620
+      },
+      "fused_relax_matmul_relax_multiply_relax_add_relax_nn_softmax_relax_matmul": {
+        "moved": 13107200,
+        "floor": 13107200,
+        "calls": 1,
+        "sram_bytes": 3678228
+      },
+      "transpose2": {
+        "moved": 6291456,
+        "floor": 6291456,
+        "calls": 1,
+        "sram_bytes": 6293012
+      },
+      "reshape3": {
+        "moved": 6291456,
+        "floor": 6291456,
+        "calls": 1,
+        "sram_bytes": 6328340
+      },
+      "add3": {
+        "moved": 18874368,
+        "floor": 18874368,
+        "calls": 2,
+        "sram_bytes": 4755476
+      },
+      "matmul4": {
+        "moved": 123731968,
+        "floor": 123731968,
+        "calls": 2,
+        "sram_bytes": 3645460
+      },
+      "silu": {
+        "moved": 16777216,
+        "floor": 16777216,
+        "calls": 1,
+        "sram_bytes": 6389780
+      },
+      "multiply3": {
+        "moved": 25165824,
+        "floor": 25165824,
+        "calls": 1,
+        "sram_bytes": 6389780
+      },
+      "matmul5": {
+        "moved": 112197632,
+        "floor": 61865984,
+        "calls": 1,
+        "sram_bytes": 5349396
+      },
+      "matmul6": {
+        "moved": 4980736,
+        "floor": 4980736,
+        "calls": 1,
+        "sram_bytes": 3584020
+      }
+    }
+  },
+  {
+    "seq": 2048,
+    "layers": 1,
+    "vocab": 256,
+    "quantize": false,
+    "words": 31342393,
+    "kernels": {
+      "npu_rms_norm": {
+        "moved": 75644928,
+        "floor": 75515904,
+        "calls": 3,
+        "sram_bytes": 6335508
+      },
+      "matmul2": {
+        "moved": 125829120,
+        "floor": 88080384,
+        "calls": 2,
+        "sram_bytes": 6729748
+      },
+      "reshape": {
+        "moved": 25165824,
+        "floor": 25165824,
+        "calls": 1,
+        "sram_bytes": 6328340
+      },
+      "matmul3": {
+        "moved": 46137344,
+        "floor": 46137344,
+        "calls": 2,
+        "sram_bytes": 6729748
+      },
+      "reshape1": {
+        "moved": 16777216,
+        "floor": 16777216,
+        "calls": 2,
+        "sram_bytes": 4206612
+      },
+      "multiply1": {
+        "moved": 51380224,
+        "floor": 51380224,
+        "calls": 2,
+        "sram_bytes": 6424084
+      },
+      "split": {
+        "moved": 25165824,
+        "floor": 25165824,
+        "calls": 1,
+        "sram_bytes": 6293012
+      },
+      "tir_negative": {
+        "moved": 12582912,
+        "floor": 12582912,
+        "calls": 1,
+        "sram_bytes": 6292244
+      },
+      "concatenate": {
+        "moved": 25165824,
+        "floor": 25165824,
+        "calls": 1,
+        "sram_bytes": 6293012
+      },
+      "add1": {
+        "moved": 37748736,
+        "floor": 37748736,
+        "calls": 1,
+        "sram_bytes": 4720148
+      },
+      "multiply2": {
+        "moved": 17825792,
+        "floor": 17825792,
+        "calls": 2,
+        "sram_bytes": 4458004
+      },
+      "split1": {
+        "moved": 8388608,
+        "floor": 8388608,
+        "calls": 1,
+        "sram_bytes": 6293012
+      },
+      "tir_negative1": {
+        "moved": 4194304,
+        "floor": 4194304,
+        "calls": 1,
+        "sram_bytes": 4195092
+      },
+      "concatenate1": {
+        "moved": 8388608,
+        "floor": 8388608,
+        "calls": 1,
+        "sram_bytes": 4195860
+      },
+      "add2": {
+        "moved": 12582912,
+        "floor": 12582912,
+        "calls": 1,
+        "sram_bytes": 6293012
+      },
+      "repeat": {
+        "moved": 33554432,
+        "floor": 33554432,
+        "calls": 2,
+        "sram_bytes": 4195860
+      },
+      "reshape2": {
+        "moved": 50331648,
+        "floor": 50331648,
+        "calls": 2,
+        "sram_bytes": 6293012
+      },
+      "transpose": {
+        "moved": 75497472,
+        "floor": 75497472,
+        "calls": 3,
+        "sram_bytes": 6293012
+      },
+      "transpose1": {
+        "moved": 25165824,
+        "floor": 25165824,
+        "calls": 1,
+        "sram_bytes": 6316052
+      },
+      "fused_relax_matmul_relax_multiply_relax_add_relax_nn_softmax_relax_matmul": {
+        "moved": 234881024,
+        "floor": 58720256,
+        "calls": 1,
+        "sram_bytes": 7496724
+      },
+      "transpose2": {
+        "moved": 25165824,
+        "floor": 25165824,
+        "calls": 1,
+        "sram_bytes": 6293012
+      },
+      "reshape3": {
+        "moved": 25165824,
+        "floor": 25165824,
+        "calls": 1,
+        "sram_bytes": 6328340
+      },
+      "add3": {
+        "moved": 75497472,
+        "floor": 75497472,
+        "calls": 2,
+        "sram_bytes": 4755476
+      },
+      "matmul4": {
+        "moved": 293601280,
+        "floor": 192937984,
+        "calls": 2,
+        "sram_bytes": 6791188
+      },
+      "silu": {
+        "moved": 67108864,
+        "floor": 67108864,
+        "calls": 1,
+        "sram_bytes": 6389780
+      },
+      "multiply3": {
+        "moved": 100663296,
+        "floor": 100663296,
+        "calls": 1,
+        "sram_bytes": 6389780
+      },
+      "matmul5": {
+        "moved": 331350016,
+        "floor": 96468992,
+        "calls": 1,
+        "sram_bytes": 7446548
+      },
+      "matmul6": {
+        "moved": 15204352,
+        "floor": 15204352,
+        "calls": 1,
+        "sram_bytes": 2011156
+      }
+    }
+  }
+]

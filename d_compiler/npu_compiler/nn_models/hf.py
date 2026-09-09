@@ -174,6 +174,57 @@ class _SqueezeMatmulBatch(PyExprMutator):
             out, [1] + [int(d) for d in out.struct_info.shape]))
 
 
+def _drop_output_batch(func):
+    """Return the logits without the leading unit dim the trace restores.
+
+    ``_SqueezeMatmulBatch`` puts the batch back after every matmul so the
+    graph keeps HF's shapes.  ``RewriteDataflowReshape`` turns all of those
+    into views except one: the reshape that produces the function's result
+    cannot be a view, because a result is a real tensor.  So the last one is
+    emitted as a copy of the whole logits -- 262.7 MB at seq 512, changing no
+    bytes.
+
+    Dropping it changes the returned shape from [1, S, V] to [S, V].  The
+    runners already reshape the result to (seq, vocab), so nothing downstream
+    moves.
+    """
+    body = func.body
+    if not isinstance(body, relax.SeqExpr) or not body.blocks:
+        return func
+    result = body.body
+    if not isinstance(result, relax.Var):
+        return func
+    blocks = list(body.blocks)
+    bindings = list(blocks[-1].bindings)
+    for index, binding in enumerate(bindings):
+        if not (isinstance(binding, relax.VarBinding)
+                and binding.var.same_as(result)):
+            continue
+        call = binding.value
+        if not (isinstance(call, relax.Call)
+                and call.op == tvm.ir.Op.get("relax.reshape")):
+            return func
+        source = call.args[0]
+        inner = source.struct_info
+        outer = result.struct_info
+        if not (isinstance(inner, relax.TensorStructInfo)
+                and isinstance(outer, relax.TensorStructInfo)):
+            return func
+        pad = outer.ndim - inner.ndim
+        if pad <= 0:
+            return func
+        want = [1] * pad + [int(d) for d in inner.shape]
+        if [int(d) for d in outer.shape] != want:
+            return func          # a real reshape, not just a unit dim
+        renamed = relax.Var(result.name_hint, inner)
+        bindings[index] = relax.VarBinding(renamed, source)
+        blocks[-1] = type(blocks[-1])(bindings)
+        return relax.Function(func.params,
+                              relax.SeqExpr(blocks, renamed),
+                              renamed.struct_info, func.is_pure, func.attrs)
+    return func
+
+
 def causal_mask4d(seq, dtype=np.float16):
     """The additive 4D causal mask HF passes through untouched."""
     import torch
@@ -234,6 +285,7 @@ def import_prefill(model, seq):
     mod["main"] = rewrite_call(pattern, rewrite, mod["main"])
     mod["main"] = _Demote().visit_expr(mod["main"])
     mod["main"] = _SqueezeMatmulBatch().visit_expr(mod["main"])
+    mod["main"] = _drop_output_batch(mod["main"])
     return relax.transform.Normalize()(mod)
 
 
