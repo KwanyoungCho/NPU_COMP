@@ -108,7 +108,11 @@ def register_all():
         desc, impl = _unary_pair(name, _UNARY_COMPUTE[name])
         _register(f"npu_v09_ew1_{name}", desc, impl)
     _register("npu_gemm_acc_sram", _sram_gemm_desc, _sram_gemm_impl)
+    _register("npu_gemm_acc_sram_int8", _sram_gemm_int8_desc,
+              _sram_gemm_int8_impl)
     _register("npu_fill_zero_sram", _sram_fill_desc, _sram_fill_impl)
+    _register("npu_fill_zero_sram_fp32", _sram_fill_fp32_desc,
+              _sram_fill_fp32_impl)
     return REGISTERED
 
 
@@ -151,6 +155,33 @@ def _sram_fill_impl(c: T.handle):
 
 
 @T.prim_func
+def _sram_fill_fp32_desc(c: T.handle):
+    """The INT8 gemm accumulates in FP32, so its C tile is zeroed as FP32."""
+    sc = T.int32()
+    C = T.match_buffer(c, (TILE, TILE), "float32", strides=[sc, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    with T.block("root"):
+        T.reads()
+        T.writes(C[0:TILE, 0:TILE])
+        for i, j in T.grid(TILE, TILE):
+            with T.block("fill"):
+                vi, vj = T.axis.remap("SS", [i, j])
+                C[vi, vj] = T.float32(0)
+
+
+@T.prim_func
+def _sram_fill_fp32_impl(c: T.handle):
+    sc = T.int32()
+    C = T.match_buffer(c, (TILE, TILE), "float32", strides=[sc, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    with T.block("root"):
+        T.reads()
+        T.writes(C[0:TILE, 0:TILE])
+        T.evaluate(T.call_extern("int32", "npu_fill_zero_fp32",
+                                 C.access_ptr("w"), sc))
+
+
+@T.prim_func
 def _sram_gemm_desc(a: T.handle, b: T.handle, c: T.handle):
     sa = T.int32(); sb = T.int32(); sc = T.int32()
     A = T.match_buffer(a, (TILE, TILE), "float16", strides=[sa, 1],
@@ -181,6 +212,53 @@ def _sram_gemm_impl(a: T.handle, b: T.handle, c: T.handle):
         T.reads(C[0:TILE, 0:TILE], A[0:TILE, 0:TILE], B[0:TILE, 0:TILE])
         T.writes(C[0:TILE, 0:TILE])
         T.evaluate(T.call_extern("int32", "npu_gemm_acc",
+                                 C.access_ptr("rw"), sc,
+                                 A.access_ptr("r"), sa,
+                                 B.access_ptr("r"), sb))
+
+
+@T.prim_func
+def _sram_gemm_int8_desc(a: T.handle, b: T.handle, c: T.handle):
+    """The INT8 tile the W8A8 kernel's matmul block computes.
+
+    Same shape as the FP16 one, but the operands are INT8 and the sum is
+    FP32 -- which is what the matrix unit does natively, so no conversion
+    happens anywhere.  The row and column scales are NOT here: the machine
+    can apply them as the products enter the accumulator, but the quantize
+    pass emits them as a separate ``dequant`` block (that block is what the
+    llvm cross-check and the vendor reference agree on), so they stay a
+    separate step and the scale registers are pointed at 1.0.
+    """
+    sa = T.int32(); sb = T.int32(); sc = T.int32()
+    A = T.match_buffer(a, (TILE, TILE), "int8", strides=[sa, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    B = T.match_buffer(b, (TILE, TILE), "int8", strides=[sb, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    C = T.match_buffer(c, (TILE, TILE), "float32", strides=[sc, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    with T.block("root"):
+        T.reads(C[0:TILE, 0:TILE], A[0:TILE, 0:TILE], B[0:TILE, 0:TILE])
+        T.writes(C[0:TILE, 0:TILE])
+        for i, j, k in T.grid(TILE, TILE, TILE):
+            with T.block("update"):
+                vi, vj, vk = T.axis.remap("SSR", [i, j, k])
+                C[vi, vj] = C[vi, vj] + T.Cast("float32", A[vi, vk]) \
+                    * T.Cast("float32", B[vk, vj])
+
+
+@T.prim_func
+def _sram_gemm_int8_impl(a: T.handle, b: T.handle, c: T.handle):
+    sa = T.int32(); sb = T.int32(); sc = T.int32()
+    A = T.match_buffer(a, (TILE, TILE), "int8", strides=[sa, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    B = T.match_buffer(b, (TILE, TILE), "int8", strides=[sb, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    C = T.match_buffer(c, (TILE, TILE), "float32", strides=[sc, 1],
+                       offset_factor=1, scope=SRAM_SCOPE)
+    with T.block("root"):
+        T.reads(C[0:TILE, 0:TILE], A[0:TILE, 0:TILE], B[0:TILE, 0:TILE])
+        T.writes(C[0:TILE, 0:TILE])
+        T.evaluate(T.call_extern("int32", "npu_gemm_acc_int8",
                                  C.access_ptr("rw"), sc,
                                  A.access_ptr("r"), sa,
                                  B.access_ptr("r"), sb))
@@ -298,8 +376,25 @@ def schedule_matmul_sram(mod, func_name, tile=64, hold=None, panel=None,
         k_o, k_i = sch.split(k, [None, tile])
         sch.reorder(n_b, i_o, j_o, k_o, i_i, j_i, k_i)
         staged_at, enclosing = (i_o, n_b), j_o
+    # INT8 operands mean this is the quantized kernel, which changes two things
+    # below: the scale-applying `dequant` block has to move inside with the
+    # result, and the tile intrinsics are the INT8 pair.  Decided here because
+    # cache_write is about to change what the block reads.
+    integer = any(str(region.buffer.dtype) == "int8"
+                  for region in sch.get(block).reads)
     write_back = sch.cache_write(block, 0, SRAM_SCOPE)
     sch.reverse_compute_at(write_back, enclosing)
+    if integer:
+        # `dequant` reads the integer sum and applies the row and column
+        # scales.  Without moving it in, the FP32 accumulator stays live across
+        # the whole outer axis.  Restricted to the INT8 case on purpose: doing
+        # it for every matmul moved blocks that were fine where they were and
+        # broke the schedules that follow.
+        for consumer in sch.get_consumers(write_back):
+            try:
+                sch.reverse_compute_at(consumer, enclosing)
+            except Exception:
+                pass
     if unpad is not None:
         # otherwise the padded result stays live across the whole N axis, and
         # a wide output (lm_head is [64, 128256] once M is padded) does not fit
@@ -343,8 +438,13 @@ def schedule_matmul_sram(mod, func_name, tile=64, hold=None, panel=None,
         for producer in producers:
             sch.compute_at(producer, staged_at[1])
     init = sch.decompose_reduction(block, k_o)
-    sch.tensorize(sch.get_loops(block)[-3], "npu_gemm_acc_sram")
-    sch.tensorize(sch.get_loops(init)[-2], "npu_fill_zero_sram")
+    # INT8 operands go to the machine's INT8 gemm, which accumulates in FP32;
+    # everything else is the FP16 one.  Picking by the buffer dtype rather
+    # than by a flag keeps the caller from having to know.
+    sch.tensorize(sch.get_loops(block)[-3],
+                  "npu_gemm_acc_sram_int8" if integer else "npu_gemm_acc_sram")
+    sch.tensorize(sch.get_loops(init)[-2],
+                  "npu_fill_zero_sram_fp32" if integer else "npu_fill_zero_sram")
     return sch.mod
 
 

@@ -19,7 +19,7 @@ import tvm.tir as tir
 from tvm import arith
 
 from .isa_0818 import DST, IMM, SRC1, SRC2, VECTOR
-from .isa_v09 import DT_FP16, DT_INT8
+from .isa_v09 import DT_FP16, DT_FP32, DT_INT8
 from .npu_intrin import SRAM_SCOPE, VLEN
 from .tir_backend import TILE, TirBackendError, _TIR_BINOPS
 
@@ -64,6 +64,8 @@ class Walker:
         self.dtypes = {}                # buffer data Var -> dtype string
         self.one_fp32 = None            # SRAM nibble of a literal fp32 1.0
         self.stored = {}                # C tile address -> stride, once stored
+        self.acc_dtype = {}             # C tile address -> descriptor dtype
+        self.scales_neutral = False     # ascale/wscale parked at 1.0
 
     # ---- index evaluation (ported from tir_backend) ----
 
@@ -556,6 +558,8 @@ class Walker:
         if isinstance(expr, tir.Call):
             name = expr.op.name if hasattr(expr.op, "name") else str(expr.op)
             call = self._CALLS.get(name)
+            if call is None and name == "tir.fabs":
+                return self._fabs(expr, inner, length, into)
             if call is None and name == "tir.rsqrt":
                 return self._rsqrt(expr, inner, length, into)
             if call is None and name == "tir.sigmoid":
@@ -704,6 +708,34 @@ class Walker:
         self.stage.vector(SRC2, quotient)
         asm.load(0, SRC2)
         asm.v_sub(VECTOR)
+        self.stage.vector(DST, target)
+        asm.save(0)
+        return target
+
+    def _fabs(self, expr, inner, length, into):
+        """|x| as max(x, -x) -- the machine has no absolute-value instruction.
+
+        This is how the hand-written W8A8 sequence did it, and the activation
+        quantization needs it: the row scale is the row's absolute maximum.
+        """
+        asm = self.a
+        depth = self.depth
+        operand = self._materialize(expr.args[0], inner, length)
+        self.depth = depth
+        negated = self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, operand)
+        asm.load(0, SRC1)
+        asm.v_sign_inv()
+        self.stage.vector(DST, negated)
+        asm.save(0)
+        target = into if into is not None else self._slot()
+        asm.vlen(length)
+        self.stage.vector(SRC1, operand)
+        asm.load(0, SRC1)
+        self.stage.vector(SRC2, negated)
+        asm.load(0, SRC2)
+        asm.v_max(VECTOR)
         self.stage.vector(DST, target)
         asm.save(0)
         return target
@@ -1132,13 +1164,14 @@ class Walker:
                 and expr.op.name == "tir.call_extern"):
             raise V09TirError(f"unhandled call {expr}")
         name = expr.args[0].value
-        if name == "npu_fill_zero":
+        if name in ("npu_fill_zero", "npu_fill_zero_fp32"):
             self.zeroed.add(self.ptr(expr.args[1]))
-        elif name == "npu_gemm_acc":
+        elif name in ("npu_gemm_acc", "npu_gemm_acc_int8"):
             c, sc = self.ptr(expr.args[1]), self.ev(expr.args[2])
             a, sa = self.ptr(expr.args[3]), self.ev(expr.args[4])
             b, sb = self.ptr(expr.args[5]), self.ev(expr.args[6])
-            self.emit_gemm(c, sc, a, sa, b, sb)
+            self.emit_gemm(c, sc, a, sa, b, sb,
+                           integer=name.endswith("_int8"))
         elif name.startswith("npu_ew2_"):
             self.flush()
             self.emit_binary(name[len("npu_ew2_"):], self.ptr(expr.args[1]),
@@ -1153,13 +1186,26 @@ class Walker:
 
     # ---- v09 emission ----
 
-    def emit_gemm(self, c, sc, a, sa, b, sb):
+    def emit_gemm(self, c, sc, a, sa, b, sb, integer=False):
         """One 64x64x64 tile of C += A @ B.
 
         Consecutive calls to the same C tile chain through the PE accumulator
         with the MAC bit and store once, matching the Relax backend's sequence.
+
+        ``integer`` selects the machine's INT8 gemm: the operand descriptors
+        carry INT8 and the accumulator is stored as FP32, which is what the
+        W8A8 kernel's TIR says.  The row and column scale registers are left
+        pointing at the FP32 1.0 the linker places, so the machine's fused
+        scaling is a no-op and the separate ``dequant`` block does it -- that
+        block is what the vendor reference defines.
         """
         asm = self.a
+        if integer:
+            self.acc_dtype[c] = DT_FP32
+            if not self.scales_neutral:
+                asm.ascale(self.one_fp32)
+                asm.wscale(self.one_fp32)
+                self.scales_neutral = True
         first = c in self.zeroed
         if first:
             self.zeroed.discard(c)
@@ -1173,13 +1219,25 @@ class Walker:
                 raise V09TirError(f"accumulate into unseen C tile @{c}")
             self.flush()
             # bring the stored partial back into the PE output register
-            self.stage.region(SRC1, c, self.stored[c], TILE, TILE)
+            reload_dt = self.acc_dtype.get(c)
+            if reload_dt is None:
+                self.stage.region(SRC1, c, self.stored[c], TILE, TILE)
+            else:
+                self.stage.region_dt(SRC1, c, self.stored[c], TILE, TILE,
+                                     reload_dt)
             asm.load(1, SRC1)
             asm.m_add(IMM, 0)
             self.pending = (c, sc)
-        self.stage.region(SRC1, a, sa, TILE, TILE)
+        operand = DT_INT8 if integer else DT_FP16
+        if integer:
+            self.stage.region_dt(SRC1, a, sa, TILE, TILE, operand)
+        else:
+            self.stage.region(SRC1, a, sa, TILE, TILE)
         asm.load(1, SRC1)
-        self.stage.region(SRC2, b, sb, TILE, TILE)
+        if integer:
+            self.stage.region_dt(SRC2, b, sb, TILE, TILE, operand)
+        else:
+            self.stage.region(SRC2, b, sb, TILE, TILE)
         asm.load(1, SRC2)
         asm.m_mul(VECTOR, mac=not first)
 
@@ -1219,7 +1277,11 @@ class Walker:
         if self.pending is None:
             return
         c, sc = self.pending
-        self.stage.region(DST, c, sc, TILE, TILE)
+        dtype = self.acc_dtype.get(c)
+        if dtype is None:
+            self.stage.region(DST, c, sc, TILE, TILE)
+        else:
+            self.stage.region_dt(DST, c, sc, TILE, TILE, dtype)
         self.a.save(1)
         self.stored[c] = sc
         self.pending = None
@@ -1264,6 +1326,17 @@ class SramEmitter:
         self.asm.shape(operand, rows, stride, 0)
         self.asm.addr(operand, nibble, 1)
         self.asm.shape(operand, rows, cols, 1)
+
+    def region_dt(self, operand, nibble, stride, rows, cols, dtype):
+        """``region`` with the descriptor's dtype bits set explicitly.
+
+        Kept separate rather than adding a default argument to ``region`` so
+        the FP16 path emits exactly the words it did before.
+        """
+        self.asm.addr(operand, nibble, 0)
+        self.asm.shape_dt(operand, rows, stride, 0, dtype)
+        self.asm.addr(operand, nibble, 1)
+        self.asm.shape_dt(operand, rows, cols, 1, dtype)
 
     def strided(self, operand, nibble, stride, count):
         self.asm.addr(operand, nibble, 0)

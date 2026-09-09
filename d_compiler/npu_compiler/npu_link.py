@@ -484,8 +484,19 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
             if not isinstance(prim, tir.PrimFunc):
                 continue
             if npu_w8a8.is_w8a8(prim):
-                # the W8A8 matmul is emitted as one validated sequence; its
-                # TIR body only defines the semantics the llvm build runs
+                # Still emitted from the hand-written sequence rather than
+                # scheduled, and that is why W8A8 gets none of the SRAM
+                # planning (report_0908.md 6.7): the weight is re-read
+                # ceil(M/64) times and the activation is staged whole, so it
+                # loses to FP16 past seq 128 and does not link at 512.
+                #
+                # The matmul half of the move is done -- npu_gemm_acc_sram_int8
+                # exists and schedule_matmul_sram picks it by dtype, and the
+                # kernel schedules.  What is not done is the vector half: the
+                # activation quantization needs float16->float32, round,
+                # float32->int8 (VQUANT) and saturation in the codegen, which
+                # the hand sequence has been covering all along.  Until those
+                # land this path stays.
                 addresses = []
                 for arg in call.args:
                     addresses.append(plan.address[arg.name_hint])
