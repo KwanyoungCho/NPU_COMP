@@ -88,12 +88,19 @@ def main():
               "seconds": round(time.perf_counter() - started, 1)}
     expected = golden(args.model) if args.layers == 0 else None
     if expected is not None:
-        expected = expected[:args.tokens]
+        # The reference holds however many tokens were recorded, which is
+        # fewer than --tokens can ask for.  Compare the overlap and say how
+        # long it was; comparing the whole list against a shorter reference
+        # reports a mismatch for tokens the reference never had an opinion on.
+        checked = min(len(expected), len(generated))
+        expected = expected[:checked]
         result["expected"] = expected
-        result["match"] = generated == expected
+        result["checked_tokens"] = checked
+        result["match"] = generated[:checked] == expected
     print(json.dumps(result))
     if args.layers == 0 and not result.get("match", True):
-        raise SystemExit(f"generated {generated} != golden {expected}")
+        raise SystemExit(f"generated {generated[:len(expected)]} != golden "
+                         f"{expected}")
 
 
 if __name__ == "__main__":
