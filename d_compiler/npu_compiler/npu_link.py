@@ -503,7 +503,8 @@ def compile_program(mod, func_name="prefill", snapshot_at=None,
                 asm_start = len(asm.words)
                 scratch_elems = _scratch_row(prim)
                 sram_start = scratch_base + slot_count * scratch_elems * 4
-                npu_w8a8.emit(asm, emitter, prim, addresses, sram_start)
+                npu_w8a8.emit(asm, emitter, prim, addresses, sram_start,
+                              capacity=profile.sram_nibbles)
                 kernels += 1
                 continue
             # A 28-layer model calls ~32 distinct kernels 1,206 times, and

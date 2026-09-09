@@ -42,7 +42,7 @@ def is_w8a8(prim):
     return bool(found)
 
 
-def emit(asm, stage, prim, addresses, sram_base):
+def emit(asm, stage, prim, addresses, sram_base, capacity=None):
     """Emit the whole W8A8 matmul; returns the SRAM high-water mark."""
     # bind by parameter order -- buffer_map's iteration order is not the
     # signature's
@@ -56,6 +56,28 @@ def emit(asm, stage, prim, addresses, sram_base):
     if inner > 0xFFFF:
         raise ValueError(f"activation row of {inner} exceeds the vlen field")
 
+    # How many rows at a time.  Everything below is sized by this, so it is
+    # decided first and taken as large as fits -- the same rule the scheduled
+    # kernels follow.  Taking all the rows is what this did before, and it is
+    # why the kernel stopped linking past seq 256: at [512, 8192] the fp16
+    # activation alone is 8 MiB.
+    fixed = inner * TILE * 2 + inner * 4 + 8 + cols * 8 + 64
+    per_row = inner * 6 + 8 + TILE * 4
+    panel = rows
+    if capacity is not None:
+        room = capacity - sram_base - fixed
+        if room < per_row * TILE:
+            raise ValueError(
+                f"W8A8 [{rows},{inner}]x[{inner},{cols}] does not fit: "
+                f"{TILE} rows need "
+                f"{(fixed + TILE * per_row) / 2 / 1024 / 1024:.2f} MiB of "
+                f"{(capacity - sram_base) / 2 / 1024 / 1024:.2f} MiB")
+        panel = min(rows, room // per_row)
+        if panel >= TILE:
+            panel = panel // TILE * TILE
+            while panel > TILE and rows % panel:
+                panel -= TILE          # an even row loop, like panel_for does
+
     cursor = [sram_base]
 
     def alloc(nibbles):
@@ -63,64 +85,23 @@ def emit(asm, stage, prim, addresses, sram_base):
         cursor[0] += (nibbles + 7) // 8 * 8
         return base
 
-    x_nib = alloc(rows * inner * 4)
-    qa_nib = alloc(rows * inner * 2)
-    a_scale_nib = alloc(rows * 8)
+    x_nib = alloc(panel * inner * 4)
+    qa_nib = alloc(panel * inner * 2)
+    a_scale_nib = alloc(panel * 8)
     tmp_nib = alloc(inner * 4)
     acc_nib = alloc(8)
     w_scale_nib = alloc(cols * 8)
-    qw_tile_nib = alloc(TILE * TILE * 2)
+    # one column of the weight with every k tile of it, so a column crosses
+    # the bus once per row panel instead of once per (row tile, column, k) --
+    # that re-read is what made W8A8 lose to FP16 past seq 128
+    qw_strip_nib = alloc(inner * TILE * 2)
     # one column tile of the result, not the whole thing: a wide output (an
     # lm_head is [7, 128256]) would need a row stride the 16-bit shape field
     # cannot hold, and the encoder used to mask it silently
-    dst_nib = alloc(rows * TILE * 4)
+    dst_nib = alloc(panel * TILE * 4)
 
-    # ---- staging: activation and the fp32 scale vector, whole --------------
-    stage.dma_in(x_addr * 2, x_nib, rows * inner * 2)
     stage.dma_in(ws_addr * 2, w_scale_nib, cols * 4)
 
-    # ---- per-row dynamic activation quantization (the oracle recipe) -------
-    for row in range(rows):
-        row_nib = x_nib + row * inner * 4
-        asm.vlen(inner)
-        asm.addr(SRC1, row_nib, 1)
-        asm.shape_dt(SRC1, 1, inner, 1, DT_FP16)
-        asm.load(0, SRC1)
-        asm.v_sign_inv()
-        asm.addr(DST, tmp_nib, 1)
-        asm.shape_dt(DST, 1, inner, 1, DT_FP16)
-        asm.save(0)
-        asm.addr(SRC1, row_nib, 1)
-        asm.load(0, SRC1)
-        asm.addr(SRC2, tmp_nib, 1)
-        asm.shape_dt(SRC2, 1, inner, 1, DT_FP16)
-        asm.load(0, SRC2)
-        asm.v_max(VECTOR)
-        asm.addr(DST, tmp_nib, 1)
-        asm.save(0)
-        asm.addr(SRC1, tmp_nib, 1)
-        asm.load(0, SRC1)
-        asm.v_reduce_max()                    # seeded: exact for any sign
-        asm.addr(DST, acc_nib, 1)
-        asm.save(0)
-        asm.vlen(1)
-        asm.addr(SRC1, acc_nib, 1)
-        asm.shape_dt(SRC1, 1, 1, 1, DT_FP16)
-        asm.load(0, SRC1)
-        asm.v_div(IMM, 127)
-        asm.addr(DST, a_scale_nib + row * 8, 1)
-        asm.shape_dt(DST, 1, 1, 1, DT_FP32)   # the width the scale reads use
-        asm.save(0)
-        asm.vlen(inner)
-        asm.ascale(a_scale_nib + row * 8)
-        asm.addr(SRC1, row_nib, 1)
-        asm.shape_dt(SRC1, 1, inner, 1, DT_FP16)
-        asm.addr(DST, qa_nib + row * inner * 2, 1)
-        asm.shape_dt(DST, 1, inner, 1, DT_INT8)
-        asm.vquant()
-    asm.shape_dt(DST, 1, 1, 1, DT_FP16)       # dtype is sticky: restore
-
-    # ---- INT8 x INT8 tiled gemm, scales applied inside the MAC -------------
     def region(operand, nib0, stride, all_rows, row, col, part_rows,
                part_cols, dtype, width):
         asm.addr(operand, nib0, 0)
@@ -128,28 +109,74 @@ def emit(asm, stage, prim, addresses, sram_base):
         asm.addr(operand, nib0 + (row * stride + col) * width, 1)
         asm.shape_dt(operand, part_rows, part_cols, 1, dtype)
 
-    for row in range(0, rows, TILE):
-        part_rows = min(TILE, rows - row)
-        asm.ascale(a_scale_nib + row * 8)     # tile-local row indexing
+    for base_row in range(0, rows, panel):
+        part = min(panel, rows - base_row)
+        stage.dma_in(x_addr * 2 + base_row * inner * 2, x_nib,
+                     part * inner * 2)
+
+        # ---- per-row dynamic activation quantization (the oracle recipe) ---
+        for row in range(part):
+            row_nib = x_nib + row * inner * 4
+            asm.vlen(inner)
+            asm.addr(SRC1, row_nib, 1)
+            asm.shape_dt(SRC1, 1, inner, 1, DT_FP16)
+            asm.load(0, SRC1)
+            asm.v_sign_inv()
+            asm.addr(DST, tmp_nib, 1)
+            asm.shape_dt(DST, 1, inner, 1, DT_FP16)
+            asm.save(0)
+            asm.addr(SRC1, row_nib, 1)
+            asm.load(0, SRC1)
+            asm.addr(SRC2, tmp_nib, 1)
+            asm.shape_dt(SRC2, 1, inner, 1, DT_FP16)
+            asm.load(0, SRC2)
+            asm.v_max(VECTOR)
+            asm.addr(DST, tmp_nib, 1)
+            asm.save(0)
+            asm.addr(SRC1, tmp_nib, 1)
+            asm.load(0, SRC1)
+            asm.v_reduce_max()                # seeded: exact for any sign
+            asm.addr(DST, acc_nib, 1)
+            asm.save(0)
+            asm.vlen(1)
+            asm.addr(SRC1, acc_nib, 1)
+            asm.shape_dt(SRC1, 1, 1, 1, DT_FP16)
+            asm.load(0, SRC1)
+            asm.v_div(IMM, 127)
+            asm.addr(DST, a_scale_nib + row * 8, 1)
+            asm.shape_dt(DST, 1, 1, 1, DT_FP32)   # the width scale reads use
+            asm.save(0)
+            asm.vlen(inner)
+            asm.ascale(a_scale_nib + row * 8)
+            asm.addr(SRC1, row_nib, 1)
+            asm.shape_dt(SRC1, 1, inner, 1, DT_FP16)
+            asm.addr(DST, qa_nib + row * inner * 2, 1)
+            asm.shape_dt(DST, 1, inner, 1, DT_INT8)
+            asm.vquant()
+
+        # ---- INT8 x INT8 tiled gemm, scales applied inside the MAC --------
         for col in range(0, cols, TILE):
             asm.wscale(w_scale_nib + col * 8)
-            for k_index, k0 in enumerate(range(0, inner, TILE)):
-                region(SRC1, qa_nib, inner, rows, row, k0,
-                       part_rows, TILE, DT_INT8, 2)
-                asm.load(1, SRC1)
-                # weight tile arrives fresh from global for each use
-                stage.dma_2d(qw_addr * 2 + k0 * cols + col, cols,
-                             qw_tile_nib, TILE, TILE, True)
-                region(SRC2, qw_tile_nib, TILE, TILE, 0, 0,
-                       TILE, TILE, DT_INT8, 2)
-                asm.load(1, SRC2)
-                asm.m_mul(VECTOR, mac=k_index != 0)
-            region(DST, dst_nib, TILE, part_rows, 0, 0,
-                   part_rows, TILE, DT_FP16, 4)
-            asm.save(1)
-            # drain this tile before the next one reuses the buffer
-            stage.dma_2d(out_addr * 2 + (row * cols + col) * 2, cols * 2,
-                         dst_nib, part_rows, TILE * 2, False)
+            stage.dma_2d(qw_addr * 2 + col, cols, qw_strip_nib, inner, TILE,
+                         True)
+            for row in range(0, part, TILE):
+                part_rows = min(TILE, part - row)
+                asm.ascale(a_scale_nib + row * 8)   # panel-local row indexing
+                for k_index, k0 in enumerate(range(0, inner, TILE)):
+                    region(SRC1, qa_nib, inner, part, row, k0,
+                           part_rows, TILE, DT_INT8, 2)
+                    asm.load(1, SRC1)
+                    region(SRC2, qw_strip_nib, TILE, inner, k0, 0,
+                           TILE, TILE, DT_INT8, 2)
+                    asm.load(1, SRC2)
+                    asm.m_mul(VECTOR, mac=k_index != 0)
+                region(DST, dst_nib, TILE, part_rows, 0, 0,
+                       part_rows, TILE, DT_FP16, 4)
+                asm.save(1)
+                # drain this tile before the next one reuses the buffer
+                stage.dma_2d(
+                    out_addr * 2 + ((base_row + row) * cols + col) * 2,
+                    cols * 2, dst_nib, part_rows, TILE * 2, False)
 
     # descriptor dtype is sticky state: the gemm left SRC1/SRC2 at INT8,
     # which the next kernel's vector loads would trip over
