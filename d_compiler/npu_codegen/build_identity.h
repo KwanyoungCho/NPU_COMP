@@ -1,0 +1,2 @@
+#pragma once
+#define NPU_BUILD_SOURCE_HASH "ae2854c0604e9c71ceddb77446b17ccfe410a9705ebcef21eac9520982f68d9c"

@@ -2,9 +2,8 @@
 """Autoregressive generation on the standard path, against the recorded
 golden tokens.
 
-Every context length is its own static program on this machine, so a run
-links one prefill_cache program and one decode program per generated token;
-the KV cache moves through the host between steps.
+Decode programs are compiled once at fixed capacities. Optional cache buckets
+reduce the static context scanned by early tokens.
 """
 import argparse
 import json
@@ -18,6 +17,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from npu_compiler import npu_generate
+from npu_compiler.npu_compilation import compilation
 
 os.environ.setdefault("NPU_V09_TMPDIR", "/data2/chokwans99/npu_tmp")
 
@@ -53,6 +53,9 @@ def parse_args():
     parser.add_argument("--llvm", action="store_true",
                         help="run the identical programs on the llvm build "
                              "instead of the C-model")
+    parser.add_argument("--cache-buckets", type=int, nargs="+",
+                        help="increasing decode capacities; last must equal --capacity when supplied")
+    parser.add_argument("--fusion", choices=("auto", "off", "on"), default="auto")
     parser.add_argument("--params-cache", default=None,
                         help="directory holding this checkpoint's transformed "
                              "weights; computed on first use and reused after")
@@ -62,7 +65,7 @@ def parse_args():
 def main():
     args = parse_args()
     from npu_compiler.nn_models import llama as family
-    from npu_compiler.v3_model import Llama32Assets
+    from npu_compiler.assets.llama import Llama32Assets
 
     assets = Llama32Assets()
     config = family.model_config(assets, args.layers)
@@ -77,15 +80,31 @@ def main():
 
     started = time.perf_counter()
     runner = npu_generate.llvm_runner if args.llvm else None
-    generated = npu_generate.generate(family, config, assets, input_ids,
+    diagnostics = {}
+    last_compile_update = 0.
+    def compile_progress(event):
+        nonlocal last_compile_update
+        kind = event['event']
+        if kind in ('candidate_begin','candidate_end','entry_compiled','entry_reused'):
+            print(f"  compile {kind}: {event.get('entry', event.get('label', ''))} "
+                  f"{event.get('status', '')} ({event['elapsed_seconds']:.1f}s)",flush=True)
+        elif event['elapsed_seconds']-last_compile_update >= 20:
+            last_compile_update = event['elapsed_seconds']
+            print(f"  compile {event.get('entry', '')} {event.get('kernel', '')}: "
+                  f"{event.get('phase', '')} ({event['elapsed_seconds']:.1f}s)",flush=True)
+    with compilation(progress=compile_progress):
+        generated = npu_generate.generate(family, config, assets, input_ids,
                                       args.tokens,
                                       capacity=args.capacity or None,
                                       runner=runner, progress=report,
-                                      params_cache=args.params_cache)
+                                      params_cache=args.params_cache,
+                                      fusion=args.fusion, cache_buckets=args.cache_buckets,
+                                      diagnostics=diagnostics)
     result = {"model": args.model, "backend": "llvm" if args.llvm else "npu",
               "generated": generated,
               "decoded": assets.tokenizer.decode(generated),
               "seconds": round(time.perf_counter() - started, 1)}
+    result["execution"] = diagnostics
     expected = golden(args.model) if args.layers == 0 else None
     if expected is not None:
         # The reference holds however many tokens were recorded, which is

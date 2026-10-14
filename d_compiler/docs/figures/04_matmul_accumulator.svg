@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5b70"/></marker></defs>
+<rect width="1200" height="700" fill="white"/>
+<g font-family="DejaVu Sans,Arial,sans-serif" fill="#142239">
+<text x="45" y="52" font-size="30" text-anchor="start" font-weight="bold">04  K accumulation and FP16 boundaries</text>
+<text x="45" y="89" font-size="17" text-anchor="start" font-weight="normal">X[64,128] @ B[128,64] = P[64,64] | two K tiles, one output tile</text>
+<rect x="45" y="175" width="330" height="100" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="210.0" y="217.15" font-size="19" text-anchor="middle" font-weight="normal">X[:,0:64] @ B[0:64,:]</text>
+<text x="210.0" y="246.15" font-size="19" text-anchor="middle" font-weight="normal">M_MUL: accumulate = 0</text>
+<rect x="435" y="175" width="330" height="100" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="600.0" y="217.3" font-size="18" text-anchor="middle" font-weight="normal">X[:,64:128] @ B[64:128,:]</text>
+<text x="600.0" y="245.3" font-size="18" text-anchor="middle" font-weight="normal">M_MUL: accumulate = 1</text>
+<rect x="825" y="175" width="330" height="100" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="990.0" y="217.15" font-size="19" text-anchor="middle" font-weight="normal">SAVE</text>
+<text x="990.0" y="246.15" font-size="19" text-anchor="middle" font-weight="normal">P to SRAM as FP16</text>
+<path d="M375,225 L435,225" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="435,225 424.0,230.0 424.0,220.0" fill="#4b5b70"/>
+<path d="M765,225 L825,225" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="825,225 814.0,230.0 814.0,220.0" fill="#4b5b70"/>
+<rect x="45" y="345" width="720" height="90" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="405.0" y="396.65" font-size="19" text-anchor="middle" font-weight="normal">FP32 accumulator stays inside the matrix unit across K</text>
+<path d="M210,275 L210,345" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="210,345 205.0,334.0 215.0,334.0" fill="#4b5b70"/>
+<path d="M600,275 L600,345" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="600,345 595.0,334.0 605.0,334.0" fill="#4b5b70"/>
+<rect x="825" y="345" width="330" height="90" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="990.0" y="382.15" font-size="19" text-anchor="middle" font-weight="normal">Add / SiLU after all K</text>
+<text x="990.0" y="411.15" font-size="19" text-anchor="middle" font-weight="normal">FP16 stage boundaries</text>
+<path d="M990,275 L990,345" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="990,345 985.0,334.0 995.0,334.0" fill="#4b5b70"/>
+<rect x="150" y="505" width="900" height="80" rx="12" fill="#fff3c7" stroke="#66758b" stroke-width="1.5"/>
+<text x="600.0" y="551.3" font-size="18" text-anchor="middle" font-weight="normal">DMA panel size may cover many 64x64 tiles; it is a separate schedule choice.</text>
+<text x="45" y="662" font-size="16" text-anchor="start" font-weight="normal">Current automatic M_MUL path uses activation OFF. Fusion must preserve the numeric contract.</text>
+</g></svg>

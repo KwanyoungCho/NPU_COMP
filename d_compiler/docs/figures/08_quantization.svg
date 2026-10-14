@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5b70"/></marker></defs>
+<rect width="1200" height="700" fill="white"/>
+<g font-family="DejaVu Sans,Arial,sans-serif" fill="#142239">
+<text x="45" y="52" font-size="30" text-anchor="start" font-weight="bold">08  Quantization is a separate validation track</text>
+<text x="45" y="89" font-size="17" text-anchor="start" font-weight="normal">Weights stored as INT8 do not imply that every calculation is INT8</text>
+<rect x="45" y="175" width="310" height="100" rx="12" fill="#ffe1b8" stroke="#66758b" stroke-width="1.5"/>
+<text x="200.0" y="217.15" font-size="19" text-anchor="middle" font-weight="normal">W8A16</text>
+<text x="200.0" y="246.15" font-size="19" text-anchor="middle" font-weight="normal">INT8 W + FP16 X</text>
+<rect x="445" y="175" width="310" height="100" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="600.0" y="217.15" font-size="19" text-anchor="middle" font-weight="normal">Dequantize W</text>
+<text x="600.0" y="246.15" font-size="19" text-anchor="middle" font-weight="normal">FP16 tile in SRAM</text>
+<rect x="845" y="175" width="310" height="100" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="1000.0" y="217.3" font-size="18" text-anchor="middle" font-weight="normal">FP16 matrix multiply</text>
+<text x="1000.0" y="245.3" font-size="18" text-anchor="middle" font-weight="normal">FP32 accumulation</text>
+<path d="M355,225 L445,225" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="445,225 434.0,230.0 434.0,220.0" fill="#4b5b70"/>
+<path d="M755,225 L845,225" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="845,225 834.0,230.0 834.0,220.0" fill="#4b5b70"/>
+<rect x="45" y="370" width="310" height="120" rx="12" fill="#ffe1b8" stroke="#66758b" stroke-width="1.5"/>
+<text x="200.0" y="407.65" font-size="19" text-anchor="middle" font-weight="normal">W8A8</text>
+<text x="200.0" y="436.65" font-size="19" text-anchor="middle" font-weight="normal">Quantize X per group</text>
+<text x="200.0" y="465.65" font-size="19" text-anchor="middle" font-weight="normal">INT8 W + INT8 X</text>
+<rect x="445" y="370" width="310" height="120" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="600.0" y="422.15" font-size="19" text-anchor="middle" font-weight="normal">64-element INT8 dot</text>
+<text x="600.0" y="451.15" font-size="19" text-anchor="middle" font-weight="normal">INT32 group sum</text>
+<rect x="845" y="370" width="310" height="120" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="1000.0" y="422.15" font-size="19" text-anchor="middle" font-weight="normal">Apply scales</text>
+<text x="1000.0" y="451.15" font-size="19" text-anchor="middle" font-weight="normal">FP32 sum -&gt; FP16</text>
+<path d="M355,430 L445,430" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="445,430 434.0,435.0 434.0,425.0" fill="#4b5b70"/>
+<path d="M755,430 L845,430" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="845,430 834.0,435.0 834.0,425.0" fill="#4b5b70"/>
+<rect x="95" y="550" width="1010" height="65" rx="12" fill="#fff3c7" stroke="#66758b" stroke-width="1.5"/>
+<text x="600.0" y="589.15" font-size="19" text-anchor="middle" font-weight="normal">Small kernel/model checks exist. End-to-end quantized generation is not validated.</text>
+<text x="45" y="662" font-size="16" text-anchor="start" font-weight="normal">See the quantization appendix for scale layout, workspace constraints and historical test scope.</text>
+</g></svg>

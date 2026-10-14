@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""S7 gate: a real checkpoint, compiled through the standard pipeline, linked
-to v09 instructions, and executed on the C-model.
+"""Run a checkpoint prefill through the TVM pipeline and v09 C-model.
 
-The same lowered module is also built for llvm, so the run is judged twice:
-against the CPU build of the identical IR (numerical agreement) and against
-the known first generated token (end-to-end agreement with HF).  Note that
-the CPU build accumulates float16 matmuls in float16 while the machine
-accumulates in float32, so a cosine below 1 there is expected -- see
-run_real_layer_npu.py, which scores both against float32.
+Also executes the semantic TIR on LLVM and compares the last-token logits
+with the saved Hugging Face reference. FP32 accumulation is explicit in the
+semantic TIR; NPU tile reduction order can still differ from LLVM.
 """
 import argparse
 import json
@@ -41,21 +37,21 @@ def load_family(name):
     """-> (frontend module, checkpoint assets) for one model family."""
     if name == "llama":
         from npu_compiler.nn_models import llama
-        from npu_compiler.v3_model import Llama32Assets
+        from npu_compiler.assets.llama import Llama32Assets
         return llama, Llama32Assets()
     if name == "qwen3":
         from npu_compiler.nn_models import qwen3
-        from npu_compiler.qwen3_model import Qwen3Assets
+        from npu_compiler.assets.qwen3 import Qwen3Assets
         return qwen3, Qwen3Assets()
     if name == "gemma":
         from npu_compiler.nn_models import gemma
-        from npu_compiler.gemma4_model import Gemma4Assets
+        from npu_compiler.assets.gemma import Gemma4Assets
         return gemma, Gemma4Assets()
     if name == "hf":
         # the HF checkpoint itself is the frontend: transformers builds the
         # model, torch.export traces it, TVM's torch importer converts it
         from npu_compiler.nn_models import hf
-        from npu_compiler.v3_model import Llama32Assets
+        from npu_compiler.assets.llama import Llama32Assets
         return hf, Llama32Assets()
     raise SystemExit(f"unknown model family {name!r}")
 
@@ -78,9 +74,11 @@ def parse_args():
                         help="quantize parameter-weight matmuls before "
                              "lowering")
     parser.add_argument("--params-cache", default=None,
-                        help="npz path: save the transformed (e.g. quantized) "
+                        help="cache directory: save the transformed (e.g. quantized) "
                              "weights on first run, reuse them afterwards -- "
                              "the offline half of quantization")
+    parser.add_argument("--fusion", choices=("auto", "off", "on"), default="auto")
+    parser.add_argument("--no-residency", action="store_true")
     parser.add_argument("--skip-llvm", action="store_true",
                         help="skip the CPU build (saves memory on the full model)")
     return parser.parse_args()
@@ -107,9 +105,12 @@ def main():
 
     # the HF-traced frontend bakes its weights in as constants, so there is
     # nothing to lift and no host-side transform to run
-    lowered = pipeline.graph_pipeline(
-        custom_legalize=npu_legalize.legalize_map(),
-        fuse=False, lift_params=bool(params))(mod)
+    from npu_compiler.npu_target import build
+    from npu_compiler.npu_generate import _transform, _bind_inputs
+    from npu_compiler.npu_compilation import reachable_module
+    entry = "prefill" if params else "main"
+    executable = build(mod, func_name=entry, fusion=args.fusion, residency=not args.no_residency)
+    lowered = executable.module
 
     started = time.perf_counter()
     weights = [tvm.nd.array(value)
@@ -126,45 +127,33 @@ def main():
                          f"{[p.name_hint for p in lowered[entry].params]}")
 
     started = time.perf_counter()
-    vm = relax.VirtualMachine(relax.build(lowered, "llvm"), tvm.cpu())
-    cache_path = Path(args.params_cache) if args.params_cache else None
-    if cache_path is not None and cache_path.exists():
-        loaded = np.load(cache_path)
-        transformed = [tvm.nd.array(loaded[key]) for key in loaded.files]
-        print(f"  transform_params: reused {len(transformed)} tensors from "
-              f"{cache_path}", flush=True)
-    else:
-        transformed = (vm["prefill_transform_params"]([weights])
-                       if params else [])
-        if cache_path is not None and transformed:
-            np.savez(cache_path, *[t.numpy() for t in transformed])
-            print(f"  transform_params: saved to {cache_path}", flush=True)
-        print(f"  transform_params: {time.perf_counter() - started:.1f}s",
-              flush=True)
+    transformed = _transform(lowered, entry, weights, args.params_cache) if params else []
+    print(f"  transform_params: {time.perf_counter() - started:.1f}s", flush=True)
 
     reference = None
     if not args.skip_llvm:
         started = time.perf_counter()
+        from npu_compiler.npu_numeric import tile_order_reference
+        vm = relax.VirtualMachine(relax.build(tile_order_reference(
+            reachable_module(lowered, [entry])), "llvm"), tvm.cpu())
         reference = vm[entry](
             *[tvm.nd.array(graph_inputs[name]) for name in order],
-            *transformed).numpy().reshape(seq, cfg.vocab_size)
+            *[tvm.nd.array(t) for t in transformed]).numpy().reshape(seq, cfg.vocab_size)
         print(f"  llvm prefill: {time.perf_counter() - started:.1f}s "
               f"-> token {int(np.argmax(reference[-1]))}", flush=True)
 
     started = time.perf_counter()
-    asm, plan = npu_link.compile_program(lowered, entry)
+    from npu_compiler.v09_asm import V09Asm
+    asm = V09Asm(); asm.words = executable.words; asm.kernel_count = executable.kernel_count
+    plan = executable.plan
     print(f"  link: {len(asm.words):,} words, {asm.kernel_count} kernels, "
           f"image {plan.top * 2 / 2**20:.1f} MiB "
           f"({time.perf_counter() - started:.0f}s)", flush=True)
 
-    planned, _ = npu_memplan.assign_addresses(lowered, entry)
-    func = planned[entry]
-    values = dict(zip([p.name_hint for p in func.params],
-                      [graph_inputs[name] for name in order]
-                      + [t.numpy() for t in transformed]))
+    func = plan.func
+    values = _bind_inputs(func, graph_inputs, transformed)
     started = time.perf_counter()
-    logits, counters = npu_link.run_program(
-        asm, plan, func, values, (seq, cfg.vocab_size))
+    logits, counters = executable.run(values)
     logits = logits.reshape(seq, cfg.vocab_size)
     print(f"  c-model run: {time.perf_counter() - started:.0f}s", flush=True)
 

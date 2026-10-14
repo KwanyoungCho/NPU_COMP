@@ -1,0 +1,12 @@
+test_buffer_read_in_next_iteration_stays_live (__main__.LifetimeTests.test_buffer_read_in_next_iteration_stays_live) ... ok
+test_capacity_selection_uses_the_same_layout_as_the_linker (__main__.LifetimeTests.test_capacity_selection_uses_the_same_layout_as_the_linker) ... ok
+test_disjoint_lifetimes_reuse_but_operands_do_not_alias (__main__.LifetimeTests.test_disjoint_lifetimes_reuse_but_operands_do_not_alias) ... ok
+test_match_buffer_alias_extends_the_owners_lifetime (__main__.LifetimeTests.test_match_buffer_alias_extends_the_owners_lifetime) ... ok
+test_pending_matrix_destination_is_pinned (__main__.LifetimeTests.test_pending_matrix_destination_is_pinned) ... ok
+test_reuse_is_bit_exact_and_respects_the_pool_end (__main__.LifetimeTests.test_reuse_is_bit_exact_and_respects_the_pool_end) ... ok
+test_validator_rejects_conflicting_overlap_and_capacity (__main__.LifetimeTests.test_validator_rejects_conflicting_overlap_and_capacity) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 3.323s
+
+OK

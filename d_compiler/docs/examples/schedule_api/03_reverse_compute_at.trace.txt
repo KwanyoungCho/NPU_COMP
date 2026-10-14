@@ -1,0 +1,5 @@
+b0 = sch.get_block(name="B", func_name="main")
+l1, l2 = sch.get_loops(block=b0)
+l3, l4 = sch.split(loop=l1, factors=[None, 2], preserve_unit_iters=True, disable_predication=False)
+b5 = sch.get_block(name="C", func_name="main")
+sch.reverse_compute_at(block=b5, loop=l3, preserve_unit_loops=False, index=-1)

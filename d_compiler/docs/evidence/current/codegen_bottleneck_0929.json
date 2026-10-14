@@ -1,0 +1,247 @@
+{
+  "status": "focused_fix_verified_full_model_not_rerun",
+  "interruption": {
+    "status": "stopped_for_codegen_fix",
+    "stopped_utc": "2026-09-29T16:04:40.521204+00:00",
+    "reason": "User requested fixing long-running Python codegen and excessive memory; no full-model output verification completed",
+    "processes": {
+      "3654414": {
+        "VmHWM": "13356 kB",
+        "VmRSS": "13336 kB",
+        "VmSwap": "0 kB"
+      },
+      "3614679": {
+        "VmHWM": "96106076 kB",
+        "VmRSS": "96106076 kB",
+        "VmSwap": "0 kB"
+      }
+    },
+    "completed_graph_candidates": 1,
+    "active_graph_candidate": {
+      "attention": false,
+      "generic_fusion": "vectors"
+    },
+    "active_phase": "python_codegen",
+    "saved_compile_artifact": false,
+    "automatic_validation_cancelled": true
+  },
+  "original_native_probe": {
+    "diagnostics": {
+      "status": "fallback",
+      "reason": "DMA stage needs contiguous rows"
+    },
+    "words": null,
+    "seconds": 7.323639579117298,
+    "maxrss_kib": 466908
+  },
+  "full_shape_rejection": {
+    "status": "rejected_before_codegen",
+    "seconds": 3.047299636527896,
+    "reason": "main: no supported rectangular stripe; generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement",
+    "maxrss_kib": 171068,
+    "diagnostics": {
+      "kind": "generic",
+      "attempts": [
+        {
+          "stripe_rows": null,
+          "sram_peak_nibbles": 72357912,
+          "sram_allocator": "usmp.greedy_by_conflicts",
+          "status": "capacity_rejected",
+          "reason": "exceeds SRAM capacity"
+        },
+        {
+          "stripe_rows": 28672,
+          "sram_peak_nibbles": 58726424,
+          "sram_allocator": "usmp.greedy_by_conflicts",
+          "status": "capacity_rejected",
+          "reason": "exceeds SRAM capacity"
+        },
+        {
+          "stripe_rows": 14336,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 524288 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 7168,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 1048576 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 4096,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 1835008 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 2048,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 3670016 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 1024,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 512,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 256,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 128,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 64,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 32,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 16,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 8,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 4,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 2,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        },
+        {
+          "stripe_rows": 1,
+          "status": "schedule_rejected",
+          "reason": "generic stripe repeats producer T_transpose_27: at least 7340032 iterations versus at most 262144 before compute_at; requires a different placement"
+        }
+      ],
+      "selection_policy": "whole tensor, descending rectangular stripes on capacity overflow"
+    },
+    "shape": {
+      "layers": 28,
+      "tokens": 256,
+      "heads": 8,
+      "head_dim": 128
+    },
+    "provenance": {
+      "python": "3.11.15",
+      "packages": {
+        "numpy": "2.4.6",
+        "torch": "2.12.0+cpu",
+        "transformers": "5.12.1",
+        "safetensors": "0.8.0"
+      },
+      "tvm_version": "0.19.0",
+      "tvm_commit": "c4dc0c29ff81ddae688da24625a603da3b4a2c0e",
+      "llvm_version": "18.1.8",
+      "compiler_head": "2f0e081b45ebb4cd271c47796fc304cd10ceb67f",
+      "compiler_source_sha256": "66888a400d1013347fa5f210511f77ef68a66abb9db5572d780aa955db882671",
+      "sources": {
+        "d_compiler/npu_codegen/build_identity.h": "f2cbf328ba1e647e0a61d8145cbdee7b98fe0cfedaf10b9d84ebc07395bea24d",
+        "d_compiler/npu_codegen/codegen_v09.cc": "6936eddc4c96e7e60b06a116be516a518b3197d29a96e8d5c180b20b058c522c",
+        "d_compiler/npu_codegen/v09_asm.h": "713a2bfcdcb3b662b2421d9423bad388cc44b3e017f0f2dc17a9e38ab1fc452c",
+        "d_compiler/npu_codegen/v09_contract.h": "693fcd7ae1bcd73a070bd00214bf74d41ba30fcb525ef4cb0c955e35bc0bc2b1",
+        "d_compiler/npu_codegen/v09_isa.h": "610ca18be66c0206c05be1bb1b57c03b7f27b21e07c1f0e649325eeac4cf3264",
+        "d_compiler/npu_codegen/v09_walker.cc": "34c63e19b6bd1ea2f5b028ff2b635046c6c6d33c6d05e9232bd65cedc6e47793",
+        "d_compiler/npu_compiler/__init__.py": "bc81ca3d0f3a2b3cef7db62a820b82e21442e728c0b73c0474cb442b78a0efa2",
+        "d_compiler/npu_compiler/assets/__init__.py": "0da5ebb016d674e47f568fc28d0f7fd95108218940f1e830ce099da94571c474",
+        "d_compiler/npu_compiler/assets/gemma.py": "8d49ccdfc1384bae4110b5750d84146f8c7b552140bde89a3f3253a1d3091f84",
+        "d_compiler/npu_compiler/assets/gemma_ple.py": "6a5f21a66d034018b0b092acc0c93f55b0b8247e676d31a21b2d75b538be43c1",
+        "d_compiler/npu_compiler/assets/llama.py": "c46885fa85c0c9b54daa6d584c53ee9ffc86dc382c09b63a1a9fd74840a0ff7d",
+        "d_compiler/npu_compiler/assets/qwen3.py": "2980392dc3ae9c76a6d2aa04fd7ffef72735d30e5b9871ad56f3bbcb2e8a81ab",
+        "d_compiler/npu_compiler/assets/spec.py": "1f878ee996e9f5b0d0d41f2712cfcf8f5580f3ac97ad1cf81d1989ac039c479d",
+        "d_compiler/npu_compiler/device.py": "585d89466ada0e7551f4d13aafb96b67320ea774a02823affdb2f4da707ee1ff",
+        "d_compiler/npu_compiler/isa_compute.py": "7f88bc329dde2a7bf6cbcfa4599fa3d133e3f863ea687ec86fdad8a6fb1a599a",
+        "d_compiler/npu_compiler/isa_v09.py": "25990fad3b4c9209a1024a6424af682bfe96f2611b742ba2e141ff514d5e485f",
+        "d_compiler/npu_compiler/native.py": "f9e03340692fb89ddf2a75d3f8550f999734b5a6d442fa21ae9785c092f8b731",
+        "d_compiler/npu_compiler/nn_models/__init__.py": "535fcf43378bf06f189cae1c5a05362e57f32134935f08e7111703c12e201504",
+        "d_compiler/npu_compiler/nn_models/gemma.py": "df7f62b9ac4b3bc6ce8f231003a17ebbf65bddbc27efa792f65a8305aaf291af",
+        "d_compiler/npu_compiler/nn_models/hf.py": "5127270e98af60f86a2d8e01ebdaf3f34f20c511fdfe2a02ac096585a77d1036",
+        "d_compiler/npu_compiler/nn_models/llama.py": "1cd20eabe72104f11f276f7effa51cea8c774b972812f168a8f306945ddd2c6b",
+        "d_compiler/npu_compiler/nn_models/qwen3.py": "0d0974b5cfa24b96c385a35193256d6f071b3665f7fd7e79f6ce68c211dc0171",
+        "d_compiler/npu_compiler/npu_abi.py": "06319244047b7e97b35d60c800d299d8bc4c90b0a3b2e3778e834e02d5ce9eb5",
+        "d_compiler/npu_compiler/npu_accumulator.py": "e68bd8e9164ed28d99484decbff2a76f7b4f3cb4e9c65e67c3c53bc2f4a326fb",
+        "d_compiler/npu_compiler/npu_attention.py": "c952e6c0056ae831c4d87fac7461a6f7b2373f7b79ce2544ce040109b8a58221",
+        "d_compiler/npu_compiler/npu_build.py": "497b4b5bd1d3a3d3fdec0aed1c113aabf3b2114a02312d8a58431e75205b35a9",
+        "d_compiler/npu_compiler/npu_cache.py": "fcf5eca54b03da60c7e7eeac2adc706e4b404d5efa9b055cbd9a8396e67f64a0",
+        "d_compiler/npu_compiler/npu_compilation.py": "82c9dbb45299c0300788fdf12a238412d7ee9d01b9fa70ba82b36e64bcf617d8",
+        "d_compiler/npu_compiler/npu_errors.py": "df62dd34edb1e92842299ef2d91232041b224fbfee223c587c1a4f5ddcb1c76d",
+        "d_compiler/npu_compiler/npu_fusion.py": "8d087c4633ea68954661f236491c4a323d541fcac1a8bb9939902f4d2d53a395",
+        "d_compiler/npu_compiler/npu_generate.py": "0008848456f1589b8e0f0b7449298a57a11737b0946aa1a2ddb5dacbdc55ddad",
+        "d_compiler/npu_compiler/npu_graph_opt.py": "74d79b4f0617a790411f43c9216bf9bd621d55a3df2a772bcebc14900562ce22",
+        "d_compiler/npu_compiler/npu_intrin.py": "1a2c4db6d0419981a9c633809810dfd8f10c82542daadfdc9e742d7f8eefbd46",
+        "d_compiler/npu_compiler/npu_kernel.py": "882147564fd801a64a45ac55ebdf55e5adce6236340ba5499e0eb74355ae788c",
+        "d_compiler/npu_compiler/npu_legalize.py": "5a3897072b97fd9c774f7f78a2c50f06f73870065b1217205d3acc44c7b3858d",
+        "d_compiler/npu_compiler/npu_link.py": "0564fa72ce7f0f7cbb49f773d36783b3f06557aea24808692f36acc43d629353",
+        "d_compiler/npu_compiler/npu_memory_search.py": "bf0709e83746c151b42dd4b4546e3216346411a7111ce252b4afbd6591ef8d34",
+        "d_compiler/npu_compiler/npu_memplan.py": "db740fa78541f839293273f6759d248f16176b58e9151c7d040d6195943a3348",
+        "d_compiler/npu_compiler/npu_meta_schedule.py": "786d2e9627275909190dcfd5f10b5c77b781454db185a001f91c4b085207f868",
+        "d_compiler/npu_compiler/npu_numeric.py": "5e590eaf28ecf4391b4244b7524efc6d9bfabefcfba743082b27aa379a87a1a5",
+        "d_compiler/npu_compiler/npu_provenance.py": "1f8e5fe42edaf0f9d628cabcda6eb6287e503914eb4f156434695b4a0d9eb58e",
+        "d_compiler/npu_compiler/npu_quantize.py": "5ae2da936c50d859cb357686e0257f82318ad302db79adf6175740b601289c3d",
+        "d_compiler/npu_compiler/npu_residency.py": "83af7b2dd7e29c5ad1515371326f846bf123fcc8b76ad1a560573c8c671a66b6",
+        "d_compiler/npu_compiler/npu_schedule.py": "83b8d97daf7a932e4b019a6048c85c96aa9ccd86b497cf925e1e83354e80da9a",
+        "d_compiler/npu_compiler/npu_schedule_space.py": "8b11e54e528966d30bb229c483eea271d937b0ea598b1ba31ab1b1cd1cbd3325",
+        "d_compiler/npu_compiler/npu_sram.py": "90262594121b7192434261242f472e0985bf2ee8f5daa3ea96b277a63bde0474",
+        "d_compiler/npu_compiler/npu_target.py": "ffee395d5fdbc0ce3f87cfe671a84c6d5e5214d44d4eb64394ed7eda8f1daffb",
+        "d_compiler/npu_compiler/npu_verify.py": "7f8e277794c92ac058929de28b16bd96445b362c5385c041a854b99338ebabee",
+        "d_compiler/npu_compiler/npu_views.py": "d1e74e439b902c04cd42b352685495312a1452b912b7b7d03f26e9248951c59f",
+        "d_compiler/npu_compiler/npu_w8a8.py": "4e5e4a072619c9079d05bba0ccf239c385ca08896fc4b4bddc8dd1e07e7e99b4",
+        "d_compiler/npu_compiler/npu_w8a8_intrin.py": "e465188b910ca2da1081b18463e98d5baff0485fadc4343d7ea030c5ea74083a",
+        "d_compiler/npu_compiler/npu_w8a8_schedule.py": "81816aecf064cae1f0a0b1c422af4f23af658656490947442fcb7807fe9db093",
+        "d_compiler/npu_compiler/peephole.py": "1a63d787038e52060bd4b80eaf029cf514069e34ecc5fb7af6a005720b901fe0",
+        "d_compiler/npu_compiler/tir_codegen_v09.py": "44c374d640dea30bb2da9df8ced0dbc3ecb4fc1682c9911e44abdc427c7c8db3",
+        "d_compiler/npu_compiler/tvm_pipeline.py": "52a7fc3cbf72d39dd4ee28a5df6201143f6a73f3061c8dad3fb7ece759631a7a",
+        "d_compiler/npu_compiler/v09_asm.py": "0af40ed93905ceba4803d515683783ccb4c73f6739505ae901177ae88cf09d54",
+        "d_compiler/npu_compiler/v09_contract.py": "9bae9c93275127e89a5c3b0ba606b09868d5a5644b5d98e0af697fa00fa95be2",
+        "d_compiler/npu_compiler/v09_effects.py": "b623435242447b9001acba94917f04b011b328b619391594a92b3897feca0eb6",
+        "d_compiler/npu_compiler/v09_runtime.py": "788f0444effa7f1ee3a8daafcbb09f41179e3f86a8ab9074a934063c8ce60edd",
+        "d_compiler/npu_compiler/v09_stats.py": "24e9d7051dba0f7c5734f7bbc9aa3cc0c7465fc0a17e48a8e60f5be7162fce83"
+      },
+      "contract_sha256": "7a7167f2a5353843ff911dd03cbc8e04181cb9f3b6af2f83a49a27c95342f3e9",
+      "native_path": "/home/chokwans99/NPU_cmodel/d_compiler/npu_codegen/libnpu_codegen.so",
+      "native_sha256": "efa15d70e3a5869d41333a3ce3eb76fd6a771145c0453961cc9d0f58c11142bf",
+      "cmodel_source_sha256": "f5a40d0040a060d105e5f0c02f1e0c8ee809d2ad4cde012ae3bb27cb36800c00"
+    }
+  },
+  "tests": {
+    "regressions": {
+      "count": 58,
+      "includes_new_regressions": 4,
+      "seconds": 59.462,
+      "status": "passed",
+      "log": "..........................................................\n----------------------------------------------------------------------\nRan 58 tests in 59.462s\n\nOK\n"
+    },
+    "native": {
+      "status": "passed",
+      "log": "  [PASS] 84 words bit-exact across every encoder, descriptor and DMA shape\n  [PASS] unsupported kernel returns None with a reason\n  [PASS] llama prefill           24/24  kernel types identical (12,523 words)\n  [PASS] qwen3 prefill           26/26  kernel types identical (15,317 words)\n  [PASS] llama prefill_cache     26/26  kernel types identical (13,051 words)\n  [PASS] llama decode            25/25  kernel types identical (7,447 words)\n  [PASS] whole program identical: 8,009 words, 24/24 kernel types native\nALL NATIVE CODEGEN TESTS PASSED\n"
+    },
+    "compile_memory_limit": {
+      "status": "passed",
+      "scope": "24 GiB address-space limit set and previous limit restored; no model compile"
+    }
+  },
+  "limits": {
+    "full_model_recompiled": false,
+    "full_model_output_validated": false,
+    "new_efficient_conditional_fusion_schedule": false,
+    "default_compile_address_space_limit_gib": 24
+  }
+}

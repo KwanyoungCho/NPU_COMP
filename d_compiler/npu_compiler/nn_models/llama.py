@@ -1,15 +1,8 @@
-"""Llama 3.2 3B defined with the standard TVM frontend (relax.frontend.nn).
+"""Llama graph definitions using TVM Relax frontend.nn.
 
-Structure only; weights come from the HF checkpoint and are bound by parameter
-name (see :func:`hf_param_map`).  RoPE follows the same convention as the
-existing hand-written path: half-duplicated frequencies and rotate_half, with
-Llama-3 frequency scaling, so numerics are comparable.
-
-Two entry points are exported:
-  ``prefill(input_embeds[S, D], positions[S])`` -> logits[1, vocab]
-  ``decode(input_embeds[1, D], positions[1], k_cache/v_cache)`` — added later.
-
-S0 scope: prefill only, validated on llvm against HF.
+Checkpoint weights are bound by frontend parameter name (hf_param_map).
+Builders export prefill and generation entries, including decode with KV
+cache updates. RoPE tables preserve default, linear, and Llama-3 scaling.
 """
 from __future__ import annotations
 
@@ -18,8 +11,20 @@ from tvm.relax.frontend import nn
 from tvm.relax.frontend.nn import op
 
 
+def benchmark_config(layers=1, vocab=256):
+    """Llama 3.2 3B geometry for synthetic compiler tests and traffic tools.
+
+    Checkpoint runs use the checkpoint's config instead. The small default
+    vocabulary keeps this benchmark focused on the decoder layers.
+    """
+    return dict(hidden_size=3072, intermediate_size=8192,
+                num_hidden_layers=layers, num_attention_heads=24,
+                num_key_value_heads=8, head_dim=128, vocab_size=vocab,
+                rms_norm_eps=1e-5, rope_theta=500000.0)
+
+
 def llama3_scale_freqs(freqs, factor=32.0, low=1.0, high=4.0, old_ctx=8192):
-    """Llama-3 RoPE frequency scaling (same routine as legalize.py)."""
+    """Llama-3 RoPE frequency scaling."""
     out = np.empty_like(freqs)
     low_wl, high_wl = old_ctx / low, old_ctx / high
     for i, f in enumerate(freqs):
@@ -34,12 +39,52 @@ def llama3_scale_freqs(freqs, factor=32.0, low=1.0, high=4.0, old_ctx=8192):
     return out
 
 
+def validate_rope_scaling(scaling):
+    """Preserve HF parameters; reject variants we cannot implement faithfully."""
+    import math
+    if scaling is None or scaling is False:
+        return {"rope_type": "default"}
+    # Compatibility for the original public helper's explicit boolean option.
+    if scaling is True:
+        scaling = dict(rope_type="llama3", factor=32.0, low_freq_factor=1.0,
+                       high_freq_factor=4.0, original_max_position_embeddings=8192)
+    if not isinstance(scaling, dict):
+        raise ValueError("rope_scaling must be a configuration dictionary")
+    cfg = dict(scaling)
+    kind = cfg.pop("type", cfg.get("rope_type", "default"))
+    if "rope_type" in cfg and cfg["rope_type"] != kind:
+        raise ValueError("conflicting RoPE type and rope_type")
+    cfg["rope_type"] = kind
+    required = {"default": set(), "linear": {"factor"}, "llama3": {
+        "factor", "low_freq_factor", "high_freq_factor", "original_max_position_embeddings"}}
+    if kind not in required:
+        raise ValueError(f"unsupported RoPE type {kind!r}; supported: default, linear, llama3")
+    missing = required[kind] - cfg.keys()
+    unknown = cfg.keys() - (required[kind] | {"rope_type"})
+    if missing or unknown:
+        raise ValueError(f"RoPE {kind}: missing {sorted(missing)}, unsupported {sorted(unknown)}")
+    for key in required[kind]:
+        if not isinstance(cfg[key], (int, float)) or not math.isfinite(cfg[key]) or cfg[key] <= 0:
+            raise ValueError(f"RoPE {key} must be finite and positive")
+    if kind != "default" and cfg["factor"] < 1:
+        raise ValueError("RoPE factor must be >= 1")
+    if kind == "llama3" and cfg["high_freq_factor"] <= cfg["low_freq_factor"]:
+        raise ValueError("RoPE high_freq_factor must exceed low_freq_factor")
+    return cfg
+
+
 def rope_freqs(head_dim, base, llama3_scaling):
     """Half-duplicated frequency row [head_dim] shared by cos and sin."""
+    if head_dim <= 0 or head_dim % 2 or not np.isfinite(base) or base <= 0:
+        raise ValueError("RoPE requires a positive even head_dim and finite positive base")
+    cfg = validate_rope_scaling(llama3_scaling)
     half = head_dim // 2
     freqs = base ** (-2.0 * np.arange(half) / head_dim)
-    if llama3_scaling:
-        freqs = llama3_scale_freqs(freqs)
+    if cfg["rope_type"] == "linear":
+        freqs = freqs / cfg["factor"]
+    elif cfg["rope_type"] == "llama3":
+        freqs = llama3_scale_freqs(freqs, cfg["factor"], cfg["low_freq_factor"],
+                                  cfg["high_freq_factor"], cfg["original_max_position_embeddings"])
     return np.concatenate([freqs, freqs])
 
 
@@ -55,7 +100,10 @@ class LlamaConfig:
         self.vocab_size = int(hf_config["vocab_size"])
         self.rms_eps = float(hf_config.get("rms_norm_eps", 1e-5))
         self.rope_theta = float(hf_config.get("rope_theta", 500000.0))
-        self.rope_scaling = bool(hf_config.get("rope_scaling"))
+        self.rope_scaling = validate_rope_scaling(hf_config.get("rope_scaling"))
+        if self.num_heads <= 0 or self.num_kv_heads <= 0 or self.num_heads % self.num_kv_heads:
+            raise ValueError("attention heads must be positive and divisible by KV heads")
+        rope_freqs(self.head_dim, self.rope_theta, self.rope_scaling)
         self.dtype = "float16"
 
 
@@ -197,6 +245,7 @@ class LlamaModel(nn.Module):
 
     def __init__(self, config: LlamaConfig):
         self.config = config
+        self.generation_last_logits = False
         self.layers = nn.ModuleList(
             [DecoderLayer(config) for _ in range(config.num_layers)])
         self.norm = nn.RMSNorm(config.hidden_size, -1, config.rms_eps, bias=False)
@@ -225,6 +274,12 @@ class LlamaModel(nn.Module):
             hidden, (k, v) = layer(hidden, cos, sin, mask, with_cache=True)
             keys.append(op.unsqueeze(op.permute_dims(k, [1, 2, 0]), 0))
             values.append(op.unsqueeze(op.permute_dims(v, [1, 0, 2]), 0))
+        if self.generation_last_logits:
+            from tvm import te
+            hidden = op.tensor_expr_op(
+                lambda x: te.compute((1, x.shape[1]),
+                                     lambda i, j: x[x.shape[0]-1, j], name="last_hidden"),
+                name_hint="last_hidden", args=[hidden])
         logits = self.lm_head(self.norm(hidden))
         return logits, op.concat(keys, dim=0), op.concat(values, dim=0)
 
@@ -292,7 +347,7 @@ def build_prefill(hf_config, seq):
     return mod, params, config
 
 
-def build_generate(hf_config, seq, capacity):
+def build_generate(hf_config, seq, capacity, last_logits=False):
     """The two programs of a deployed model: prefill_cache at the prompt
     length and ONE decode at a fixed cache ``capacity``.
 
@@ -302,9 +357,13 @@ def build_generate(hf_config, seq, capacity):
     """
     config = LlamaConfig(hf_config)
     model = LlamaModel(config)
+    model.generation_last_logits = bool(last_logits)
     model.to(config.dtype)
     mod, params = model.export_tvm(
         spec=model.get_default_spec(seq, decode_context=capacity))
+    from ..npu_cache import declare
+    mod["decode"] = declare(mod["decode"],
+                            [("k_cache", 1, 3), ("v_cache", 2, 2)])
     return mod, params, config
 
 

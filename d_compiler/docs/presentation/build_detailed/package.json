@@ -1,0 +1,7 @@
+{
+  "name": "npu-compiler-detailed-deck",
+  "private": true,
+  "description": "Generator for docs/presentation/npu_compiler_detailed.pptx (pptxgenjs)",
+  "scripts": { "build": "node build.js ../npu_compiler_detailed.pptx" },
+  "dependencies": { "pptxgenjs": "4.0.1" }
+}

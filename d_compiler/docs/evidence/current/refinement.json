@@ -1,0 +1,3438 @@
+{
+  "provenance": {
+    "python": "3.11.15",
+    "packages": {
+      "numpy": "2.4.6",
+      "torch": "2.12.0+cpu",
+      "transformers": "5.12.1",
+      "safetensors": "0.8.0"
+    },
+    "tvm_version": "0.19.0",
+    "tvm_commit": "c4dc0c29ff81ddae688da24625a603da3b4a2c0e",
+    "llvm_version": "18.1.8",
+    "compiler_head": "2f0e081b45ebb4cd271c47796fc304cd10ceb67f",
+    "compiler_source_sha256": "42843f7e26c3ffc363f93eda76fac3a04603c72c6d772daaf40b1206b968027d",
+    "sources": {
+      "d_compiler/npu_codegen/build_identity.h": "64d33ad3531ec08c9f96e911d80b9d67d844b379458862258c23d66720c98225",
+      "d_compiler/npu_codegen/codegen_v09.cc": "6936eddc4c96e7e60b06a116be516a518b3197d29a96e8d5c180b20b058c522c",
+      "d_compiler/npu_codegen/v09_asm.h": "713a2bfcdcb3b662b2421d9423bad388cc44b3e017f0f2dc17a9e38ab1fc452c",
+      "d_compiler/npu_codegen/v09_contract.h": "693fcd7ae1bcd73a070bd00214bf74d41ba30fcb525ef4cb0c955e35bc0bc2b1",
+      "d_compiler/npu_codegen/v09_isa.h": "610ca18be66c0206c05be1bb1b57c03b7f27b21e07c1f0e649325eeac4cf3264",
+      "d_compiler/npu_codegen/v09_walker.cc": "0625947f705e00cea0b120f4e5f2144c2a62bd9bfc890e1c25f5e48d3e0b42bc",
+      "d_compiler/npu_compiler/__init__.py": "bc81ca3d0f3a2b3cef7db62a820b82e21442e728c0b73c0474cb442b78a0efa2",
+      "d_compiler/npu_compiler/assets/__init__.py": "0da5ebb016d674e47f568fc28d0f7fd95108218940f1e830ce099da94571c474",
+      "d_compiler/npu_compiler/assets/gemma.py": "8d49ccdfc1384bae4110b5750d84146f8c7b552140bde89a3f3253a1d3091f84",
+      "d_compiler/npu_compiler/assets/gemma_ple.py": "6a5f21a66d034018b0b092acc0c93f55b0b8247e676d31a21b2d75b538be43c1",
+      "d_compiler/npu_compiler/assets/llama.py": "c46885fa85c0c9b54daa6d584c53ee9ffc86dc382c09b63a1a9fd74840a0ff7d",
+      "d_compiler/npu_compiler/assets/qwen3.py": "2980392dc3ae9c76a6d2aa04fd7ffef72735d30e5b9871ad56f3bbcb2e8a81ab",
+      "d_compiler/npu_compiler/assets/spec.py": "1f878ee996e9f5b0d0d41f2712cfcf8f5580f3ac97ad1cf81d1989ac039c479d",
+      "d_compiler/npu_compiler/device.py": "3b37bac59f3b72abdde136d39654c019766bf8486f33c5914f0b9b97bf361d8e",
+      "d_compiler/npu_compiler/isa_compute.py": "7f88bc329dde2a7bf6cbcfa4599fa3d133e3f863ea687ec86fdad8a6fb1a599a",
+      "d_compiler/npu_compiler/isa_v09.py": "25990fad3b4c9209a1024a6424af682bfe96f2611b742ba2e141ff514d5e485f",
+      "d_compiler/npu_compiler/native.py": "460d2487d6e5952895f001826ef7f34dff68a8869a270ab13bec18a96acdcf64",
+      "d_compiler/npu_compiler/nn_models/__init__.py": "535fcf43378bf06f189cae1c5a05362e57f32134935f08e7111703c12e201504",
+      "d_compiler/npu_compiler/nn_models/gemma.py": "df7f62b9ac4b3bc6ce8f231003a17ebbf65bddbc27efa792f65a8305aaf291af",
+      "d_compiler/npu_compiler/nn_models/hf.py": "5127270e98af60f86a2d8e01ebdaf3f34f20c511fdfe2a02ac096585a77d1036",
+      "d_compiler/npu_compiler/nn_models/llama.py": "1cd20eabe72104f11f276f7effa51cea8c774b972812f168a8f306945ddd2c6b",
+      "d_compiler/npu_compiler/nn_models/qwen3.py": "0d0974b5cfa24b96c385a35193256d6f071b3665f7fd7e79f6ce68c211dc0171",
+      "d_compiler/npu_compiler/npu_abi.py": "06319244047b7e97b35d60c800d299d8bc4c90b0a3b2e3778e834e02d5ce9eb5",
+      "d_compiler/npu_compiler/npu_accumulator.py": "e68bd8e9164ed28d99484decbff2a76f7b4f3cb4e9c65e67c3c53bc2f4a326fb",
+      "d_compiler/npu_compiler/npu_attention.py": "c952e6c0056ae831c4d87fac7461a6f7b2373f7b79ce2544ce040109b8a58221",
+      "d_compiler/npu_compiler/npu_build.py": "5aef14677e0f8ac69d90e209e943324b2b4cc8d199dd9ba3bfaa781f101f90c8",
+      "d_compiler/npu_compiler/npu_cache.py": "fcf5eca54b03da60c7e7eeac2adc706e4b404d5efa9b055cbd9a8396e67f64a0",
+      "d_compiler/npu_compiler/npu_compilation.py": "c43d95082a1c681cee622fd80182147eee7ac44b78bffafa3df8241f3140a040",
+      "d_compiler/npu_compiler/npu_errors.py": "df62dd34edb1e92842299ef2d91232041b224fbfee223c587c1a4f5ddcb1c76d",
+      "d_compiler/npu_compiler/npu_fusion.py": "74f8b33d3dc1cf7285671513821a85197d24ce726ead3ef916bfaa7feef43f6d",
+      "d_compiler/npu_compiler/npu_generate.py": "0008848456f1589b8e0f0b7449298a57a11737b0946aa1a2ddb5dacbdc55ddad",
+      "d_compiler/npu_compiler/npu_graph_opt.py": "74d79b4f0617a790411f43c9216bf9bd621d55a3df2a772bcebc14900562ce22",
+      "d_compiler/npu_compiler/npu_intrin.py": "c57a507ed5879574c2bbfb9ae6a662807133ecf88929f31ee77d815bc062b453",
+      "d_compiler/npu_compiler/npu_kernel.py": "882147564fd801a64a45ac55ebdf55e5adce6236340ba5499e0eb74355ae788c",
+      "d_compiler/npu_compiler/npu_legalize.py": "5a3897072b97fd9c774f7f78a2c50f06f73870065b1217205d3acc44c7b3858d",
+      "d_compiler/npu_compiler/npu_link.py": "0919c4a60a80af0a5bf5df3fc74f6daaa8ff080c0960129ab5432419f344fd85",
+      "d_compiler/npu_compiler/npu_memory_search.py": "2ee50fa286907de540296298ca17ebb982f20520fa47e5dfab5b8d8ac6f1f932",
+      "d_compiler/npu_compiler/npu_memplan.py": "db740fa78541f839293273f6759d248f16176b58e9151c7d040d6195943a3348",
+      "d_compiler/npu_compiler/npu_numeric.py": "5e590eaf28ecf4391b4244b7524efc6d9bfabefcfba743082b27aa379a87a1a5",
+      "d_compiler/npu_compiler/npu_provenance.py": "1f8e5fe42edaf0f9d628cabcda6eb6287e503914eb4f156434695b4a0d9eb58e",
+      "d_compiler/npu_compiler/npu_quantize.py": "5ae2da936c50d859cb357686e0257f82318ad302db79adf6175740b601289c3d",
+      "d_compiler/npu_compiler/npu_residency.py": "83af7b2dd7e29c5ad1515371326f846bf123fcc8b76ad1a560573c8c671a66b6",
+      "d_compiler/npu_compiler/npu_schedule.py": "11c771262afd47fa65ebedc77c01e779b21505514be14bcee379c14201c815ea",
+      "d_compiler/npu_compiler/npu_schedule_space.py": "b500e9cd5aded43d6d4407692c87d6cd625f4cfbf8d628eb8ba746ee6010ac96",
+      "d_compiler/npu_compiler/npu_sram.py": "90262594121b7192434261242f472e0985bf2ee8f5daa3ea96b277a63bde0474",
+      "d_compiler/npu_compiler/npu_target.py": "ffee395d5fdbc0ce3f87cfe671a84c6d5e5214d44d4eb64394ed7eda8f1daffb",
+      "d_compiler/npu_compiler/npu_verify.py": "7f8e277794c92ac058929de28b16bd96445b362c5385c041a854b99338ebabee",
+      "d_compiler/npu_compiler/npu_views.py": "d1e74e439b902c04cd42b352685495312a1452b912b7b7d03f26e9248951c59f",
+      "d_compiler/npu_compiler/npu_w8a8.py": "4e5e4a072619c9079d05bba0ccf239c385ca08896fc4b4bddc8dd1e07e7e99b4",
+      "d_compiler/npu_compiler/npu_w8a8_intrin.py": "e465188b910ca2da1081b18463e98d5baff0485fadc4343d7ea030c5ea74083a",
+      "d_compiler/npu_compiler/npu_w8a8_schedule.py": "81816aecf064cae1f0a0b1c422af4f23af658656490947442fcb7807fe9db093",
+      "d_compiler/npu_compiler/peephole.py": "1a63d787038e52060bd4b80eaf029cf514069e34ecc5fb7af6a005720b901fe0",
+      "d_compiler/npu_compiler/tir_codegen_v09.py": "44c374d640dea30bb2da9df8ced0dbc3ecb4fc1682c9911e44abdc427c7c8db3",
+      "d_compiler/npu_compiler/tvm_pipeline.py": "52a7fc3cbf72d39dd4ee28a5df6201143f6a73f3061c8dad3fb7ece759631a7a",
+      "d_compiler/npu_compiler/v09_asm.py": "0af40ed93905ceba4803d515683783ccb4c73f6739505ae901177ae88cf09d54",
+      "d_compiler/npu_compiler/v09_contract.py": "9bae9c93275127e89a5c3b0ba606b09868d5a5644b5d98e0af697fa00fa95be2",
+      "d_compiler/npu_compiler/v09_effects.py": "b623435242447b9001acba94917f04b011b328b619391594a92b3897feca0eb6",
+      "d_compiler/npu_compiler/v09_runtime.py": "788f0444effa7f1ee3a8daafcbb09f41179e3f86a8ab9074a934063c8ce60edd",
+      "d_compiler/npu_compiler/v09_stats.py": "24e9d7051dba0f7c5734f7bbc9aa3cc0c7465fc0a17e48a8e60f5be7162fce83"
+    },
+    "contract_sha256": "7a7167f2a5353843ff911dd03cbc8e04181cb9f3b6af2f83a49a27c95342f3e9",
+    "native_path": "/home/chokwans99/NPU_cmodel/d_compiler/npu_codegen/libnpu_codegen.so",
+    "native_sha256": "77e2adbe08ffab29c1bf6edf33578a2af27cf64ef41878d8be9b2686ec98156c",
+    "cmodel_source_sha256": "f5a40d0040a060d105e5f0c02f1e0c8ee809d2ad4cde012ae3bb27cb36800c00"
+  },
+  "cases": {
+    "two_matmuls_44k": {
+      "before": {
+        "statistics": {
+          "words": 85,
+          "instructions": 67,
+          "dma_packets": 6,
+          "dma_load_bytes": 40972,
+          "dma_store_bytes": 8192,
+          "dma_bytes": 49164,
+          "opcodes": {
+            "0x42": 4,
+            "0x80": 26,
+            "0x88": 6,
+            "0x89": 11,
+            "0x90": 8,
+            "0x98": 5,
+            "0xa0": 5,
+            "0xa8": 1,
+            "0xff": 1
+          },
+          "measurement": "static instruction stream; no cycle estimate",
+          "sram_peak_bytes": 42508,
+          "global_image_bytes": 65548
+        },
+        "kernel_count": 2,
+        "compile_seconds": 1.1991279888898134,
+        "executed": true,
+        "selected_fusion": null,
+        "joint_memory": {
+          "policy": "bounded call-site schedule and retained-SRAM search",
+          "beam_width": 4,
+          "excluded": [],
+          "candidates": 1,
+          "trials": 4,
+          "rejections": [],
+          "calls": [
+            {
+              "index": 0,
+              "name": "matmul",
+              "parameter_sram_nibbles": {
+                "2": 52248
+              },
+              "workspace_limit_nibbles": 52248,
+              "retained_bytes": 16384,
+              "workspace_peak_bytes": 26124,
+              "sram_peak_bytes": 42508,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 24576,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 55,
+                  "instructions": 46,
+                  "dma_packets": 3,
+                  "dma_load_bytes": 24576,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 18,
+                    "0x88": 6,
+                    "0x89": 9,
+                    "0x90": 4,
+                    "0x98": 4,
+                    "0xa0": 3
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 55,
+                "instructions": 46,
+                "dma_packets": 3,
+                "dma_load_bytes": 24576,
+                "dma_store_bytes": 0,
+                "dma_bytes": 24576,
+                "opcodes": {
+                  "0x42": 2,
+                  "0x80": 18,
+                  "0x88": 6,
+                  "0x89": 9,
+                  "0x90": 4,
+                  "0x98": 4,
+                  "0xa0": 3
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 1,
+              "name": "matmul1",
+              "parameter_sram_nibbles": {
+                "0": 52248
+              },
+              "workspace_limit_nibbles": 52248,
+              "retained_bytes": 16384,
+              "workspace_peak_bytes": 26124,
+              "sram_peak_bytes": 42508,
+              "selected": {
+                "mapping": [
+                  "B_stream",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 32768,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 43,
+                  "instructions": 37,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 16384,
+                  "dma_store_bytes": 8192,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 1,
+                    "0xa0": 1,
+                    "0xa8": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 43,
+                "instructions": 37,
+                "dma_packets": 2,
+                "dma_load_bytes": 16384,
+                "dma_store_bytes": 8192,
+                "dma_bytes": 24576,
+                "opcodes": {
+                  "0x42": 2,
+                  "0x80": 16,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 4,
+                  "0x98": 1,
+                  "0xa0": 1,
+                  "0xa8": 1
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            }
+          ],
+          "retained_values": [
+            {
+              "producer": 0,
+              "argument": 2,
+              "address_bytes": 40960,
+              "size_bytes": 16384,
+              "last_use": 1,
+              "readers": [
+                [
+                  1,
+                  0
+                ]
+              ]
+            }
+          ],
+          "dma_bytes": 49152,
+          "words": 98,
+          "sram_peak_bytes": 42508,
+          "arena_relocation_bytes": 2548,
+          "program_comparison": {
+            "baseline": {
+              "words": 87,
+              "instructions": 60,
+              "dma_packets": 9,
+              "dma_load_bytes": 57356,
+              "dma_store_bytes": 24576,
+              "dma_bytes": 81932,
+              "opcodes": {
+                "0x42": 4,
+                "0x80": 22,
+                "0x88": 6,
+                "0x89": 7,
+                "0x90": 8,
+                "0x98": 3,
+                "0xa0": 6,
+                "0xa8": 3,
+                "0xff": 1
+              },
+              "measurement": "static instruction stream; no cycle estimate",
+              "sram_peak_bytes": 34316,
+              "global_image_bytes": 65548
+            },
+            "candidate": {
+              "words": 85,
+              "instructions": 67,
+              "dma_packets": 6,
+              "dma_load_bytes": 40972,
+              "dma_store_bytes": 8192,
+              "dma_bytes": 49164,
+              "opcodes": {
+                "0x42": 4,
+                "0x80": 26,
+                "0x88": 6,
+                "0x89": 11,
+                "0x90": 8,
+                "0x98": 5,
+                "0xa0": 5,
+                "0xa8": 1,
+                "0xff": 1
+              },
+              "measurement": "static instruction stream; no cycle estimate",
+              "sram_peak_bytes": 42508,
+              "global_image_bytes": 65548
+            },
+            "selected": true
+          },
+          "applied": true
+        },
+        "schedules": {
+          "matmul": {
+            "kind": "matmul",
+            "extents": [
+              64,
+              128,
+              64
+            ],
+            "cost_model": "FP16 operand DMA per batch",
+            "attempts": [
+              {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 24576,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 55,
+                  "instructions": 46,
+                  "dma_packets": 3,
+                  "dma_load_bytes": 24576,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 18,
+                    "0x88": 6,
+                    "0x89": 9,
+                    "0x90": 4,
+                    "0x98": 4,
+                    "0xa0": 3
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "m_panel",
+                  "b_at": "n_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 24576,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 55,
+                  "instructions": 46,
+                  "dma_packets": 3,
+                  "dma_load_bytes": 24576,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 18,
+                    "0x88": 6,
+                    "0x89": 9,
+                    "0x90": 4,
+                    "0x98": 4,
+                    "0xa0": 3
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "m_panel",
+                  "b_at": "m_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 24576,
+                "sram_peak_nibbles": 68632,
+                "sram_allocator": "bump",
+                "status": "capacity_rejected",
+                "reason": "exceeds SRAM capacity"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "n_panel",
+                  "b_at": "n_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 32768,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 59,
+                  "instructions": 47,
+                  "dma_packets": 4,
+                  "dma_load_bytes": 32768,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 32768,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 18,
+                    "0x88": 6,
+                    "0x89": 9,
+                    "0x90": 4,
+                    "0x98": 4,
+                    "0xa0": 4
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "n_panel",
+                  "b_at": "m_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 32768,
+                "sram_peak_nibbles": 68632,
+                "sram_allocator": "bump",
+                "status": "capacity_rejected",
+                "reason": "exceeds SRAM capacity"
+              }
+            ],
+            "search_space": "space",
+            "generated_candidates": 4,
+            "selected": {
+              "mapping": [
+                "A",
+                64
+              ],
+              "tile_pad": false,
+              "estimated_operand_load_bytes": 24576,
+              "sram_peak_nibbles": 52248,
+              "sram_allocator": "bump",
+              "status": "selected",
+              "emitted": {
+                "words": 55,
+                "instructions": 46,
+                "dma_packets": 3,
+                "dma_load_bytes": 24576,
+                "dma_store_bytes": 0,
+                "dma_bytes": 24576,
+                "opcodes": {
+                  "0x42": 2,
+                  "0x80": 18,
+                  "0x88": 6,
+                  "0x89": 9,
+                  "0x90": 4,
+                  "0x98": 4,
+                  "0xa0": 3
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              },
+              "origin": "legacy_incumbent"
+            },
+            "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings",
+            "legal_candidates": 2,
+            "probe_words": 114,
+            "stop_reason": "exhausted"
+          },
+          "matmul1": {
+            "kind": "matmul",
+            "extents": [
+              64,
+              64,
+              128
+            ],
+            "cost_model": "FP16 operand DMA per batch",
+            "attempts": [
+              {
+                "mapping": [
+                  "B_stream",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 32768,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 43,
+                  "instructions": 37,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 16384,
+                  "dma_store_bytes": 8192,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 1,
+                    "0xa0": 1,
+                    "0xa8": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "k_group",
+                  "b_at": "k_group"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 16384,
+                "sram_peak_nibbles": 35864,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 45,
+                  "instructions": 36,
+                  "dma_packets": 3,
+                  "dma_load_bytes": 16384,
+                  "dma_store_bytes": 8192,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 14,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 1,
+                    "0xa0": 2,
+                    "0xa8": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "k_group",
+                  "b_at": "m_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 16384,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 43,
+                  "instructions": 37,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 16384,
+                  "dma_store_bytes": 8192,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 1,
+                    "0xa0": 1,
+                    "0xa8": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              }
+            ],
+            "search_space": "space",
+            "generated_candidates": 2,
+            "selected": {
+              "mapping": [
+                "B_stream",
+                64
+              ],
+              "tile_pad": false,
+              "estimated_operand_load_bytes": 32768,
+              "sram_peak_nibbles": 52248,
+              "sram_allocator": "bump",
+              "status": "selected",
+              "emitted": {
+                "words": 43,
+                "instructions": 37,
+                "dma_packets": 2,
+                "dma_load_bytes": 16384,
+                "dma_store_bytes": 8192,
+                "dma_bytes": 24576,
+                "opcodes": {
+                  "0x42": 2,
+                  "0x80": 16,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 4,
+                  "0x98": 1,
+                  "0xa0": 1,
+                  "0xa8": 1
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              },
+              "origin": "legacy_incumbent"
+            },
+            "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings",
+            "legal_candidates": 2,
+            "probe_words": 88,
+            "stop_reason": "exhausted"
+          }
+        },
+        "dram_compaction": null,
+        "numerical_check": "bit-exact; C-model DMA counters match ISA"
+      },
+      "after": {
+        "statistics": {
+          "words": 77,
+          "instructions": 62,
+          "dma_packets": 5,
+          "dma_load_bytes": 40972,
+          "dma_store_bytes": 8192,
+          "dma_bytes": 49164,
+          "opcodes": {
+            "0x42": 4,
+            "0x80": 26,
+            "0x88": 6,
+            "0x89": 9,
+            "0x90": 8,
+            "0x98": 3,
+            "0xa0": 4,
+            "0xa8": 1,
+            "0xff": 1
+          },
+          "measurement": "static instruction stream; no cycle estimate",
+          "sram_peak_bytes": 42508,
+          "global_image_bytes": 49164
+        },
+        "kernel_count": 2,
+        "compile_seconds": 0.8396231457591057,
+        "executed": true,
+        "selected_fusion": null,
+        "joint_memory": {
+          "policy": "bounded call-site schedule and retained-SRAM search",
+          "beam_width": 4,
+          "excluded": [],
+          "candidates": 1,
+          "trials": 4,
+          "rejections": [],
+          "calls": [
+            {
+              "index": 0,
+              "name": "matmul",
+              "parameter_sram_nibbles": {
+                "2": 52248
+              },
+              "workspace_limit_nibbles": 52248,
+              "retained_bytes": 16384,
+              "workspace_peak_bytes": 26124,
+              "sram_peak_bytes": 42508,
+              "selected": {
+                "mapping": [
+                  "B",
+                  128
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 24576,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 44,
+                  "instructions": 38,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 24576,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 2,
+                    "0xa0": 2
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 44,
+                "instructions": 38,
+                "dma_packets": 2,
+                "dma_load_bytes": 24576,
+                "dma_store_bytes": 0,
+                "dma_bytes": 24576,
+                "opcodes": {
+                  "0x42": 2,
+                  "0x80": 16,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 4,
+                  "0x98": 2,
+                  "0xa0": 2
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 1,
+              "name": "matmul1",
+              "parameter_sram_nibbles": {
+                "0": 52248
+              },
+              "workspace_limit_nibbles": 52248,
+              "retained_bytes": 16384,
+              "workspace_peak_bytes": 26124,
+              "sram_peak_bytes": 42508,
+              "selected": {
+                "mapping": [
+                  "B_stream",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 32768,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 43,
+                  "instructions": 37,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 16384,
+                  "dma_store_bytes": 8192,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 1,
+                    "0xa0": 1,
+                    "0xa8": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 43,
+                "instructions": 37,
+                "dma_packets": 2,
+                "dma_load_bytes": 16384,
+                "dma_store_bytes": 8192,
+                "dma_bytes": 24576,
+                "opcodes": {
+                  "0x42": 2,
+                  "0x80": 16,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 4,
+                  "0x98": 1,
+                  "0xa0": 1,
+                  "0xa8": 1
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            }
+          ],
+          "retained_values": [
+            {
+              "producer": 0,
+              "argument": 2,
+              "address_bytes": null,
+              "size_bytes": 16384,
+              "last_use": 1,
+              "readers": [
+                [
+                  1,
+                  0
+                ]
+              ],
+              "original_address_bytes": 40960
+            }
+          ],
+          "dma_bytes": 49152,
+          "words": 87,
+          "sram_peak_bytes": 42508,
+          "arena_relocation_bytes": 2548,
+          "program_comparison": {
+            "baseline": {
+              "words": 87,
+              "instructions": 60,
+              "dma_packets": 9,
+              "dma_load_bytes": 57356,
+              "dma_store_bytes": 24576,
+              "dma_bytes": 81932,
+              "opcodes": {
+                "0x42": 4,
+                "0x80": 22,
+                "0x88": 6,
+                "0x89": 7,
+                "0x90": 8,
+                "0x98": 3,
+                "0xa0": 6,
+                "0xa8": 3,
+                "0xff": 1
+              },
+              "measurement": "static instruction stream; no cycle estimate",
+              "sram_peak_bytes": 34316,
+              "global_image_bytes": 65548
+            },
+            "candidate": {
+              "words": 77,
+              "instructions": 62,
+              "dma_packets": 5,
+              "dma_load_bytes": 40972,
+              "dma_store_bytes": 8192,
+              "dma_bytes": 49164,
+              "opcodes": {
+                "0x42": 4,
+                "0x80": 26,
+                "0x88": 6,
+                "0x89": 9,
+                "0x90": 8,
+                "0x98": 3,
+                "0xa0": 4,
+                "0xa8": 1,
+                "0xff": 1
+              },
+              "measurement": "static instruction stream; no cycle estimate",
+              "sram_peak_bytes": 42508,
+              "global_image_bytes": 65548
+            },
+            "selected": true
+          },
+          "applied": true
+        },
+        "schedules": {
+          "matmul": {
+            "kind": "matmul",
+            "extents": [
+              64,
+              128,
+              64
+            ],
+            "cost_model": "FP16 operand DMA per batch",
+            "attempts": [
+              {
+                "mapping": [
+                  "B",
+                  128
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 24576,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 44,
+                  "instructions": 38,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 24576,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 2,
+                    "0xa0": 2
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "m_panel",
+                  "b_at": "n_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 24576,
+                "sram_peak_nibbles": 35864,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 46,
+                  "instructions": 37,
+                  "dma_packets": 3,
+                  "dma_load_bytes": 24576,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 14,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 2,
+                    "0xa0": 3
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "m_panel",
+                  "b_at": "m_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 24576,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 44,
+                  "instructions": 38,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 24576,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 2,
+                    "0xa0": 2
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "n_panel",
+                  "b_at": "n_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 32768,
+                "sram_peak_nibbles": 35864,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 50,
+                  "instructions": 38,
+                  "dma_packets": 4,
+                  "dma_load_bytes": 32768,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 32768,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 14,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 2,
+                    "0xa0": 4
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "n_panel",
+                  "b_at": "m_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 32768,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 48,
+                  "instructions": 39,
+                  "dma_packets": 3,
+                  "dma_load_bytes": 32768,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 32768,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 2,
+                    "0xa0": 3
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              }
+            ],
+            "search_space": "space",
+            "generated_candidates": 4,
+            "selected": {
+              "mapping": [
+                "B",
+                128
+              ],
+              "tile_pad": false,
+              "estimated_operand_load_bytes": 24576,
+              "sram_peak_nibbles": 52248,
+              "sram_allocator": "bump",
+              "status": "selected",
+              "emitted": {
+                "words": 44,
+                "instructions": 38,
+                "dma_packets": 2,
+                "dma_load_bytes": 24576,
+                "dma_store_bytes": 0,
+                "dma_bytes": 24576,
+                "opcodes": {
+                  "0x42": 2,
+                  "0x80": 16,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 4,
+                  "0x98": 2,
+                  "0xa0": 2
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              },
+              "origin": "legacy_incumbent"
+            },
+            "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings",
+            "legal_candidates": 4,
+            "probe_words": 188,
+            "stop_reason": "exhausted"
+          },
+          "matmul1": {
+            "kind": "matmul",
+            "extents": [
+              64,
+              64,
+              128
+            ],
+            "cost_model": "FP16 operand DMA per batch",
+            "attempts": [
+              {
+                "mapping": [
+                  "B_stream",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 32768,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 43,
+                  "instructions": 37,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 16384,
+                  "dma_store_bytes": 8192,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 1,
+                    "0xa0": 1,
+                    "0xa8": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "k_group",
+                  "b_at": "k_group"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 16384,
+                "sram_peak_nibbles": 35864,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 45,
+                  "instructions": 36,
+                  "dma_packets": 3,
+                  "dma_load_bytes": 16384,
+                  "dma_store_bytes": 8192,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 14,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 1,
+                    "0xa0": 2,
+                    "0xa8": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "k_group",
+                  "b_at": "m_panel"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 16384,
+                "sram_peak_nibbles": 52248,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 43,
+                  "instructions": 37,
+                  "dma_packets": 2,
+                  "dma_load_bytes": 16384,
+                  "dma_store_bytes": 8192,
+                  "dma_bytes": 24576,
+                  "opcodes": {
+                    "0x42": 2,
+                    "0x80": 16,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 4,
+                    "0x98": 1,
+                    "0xa0": 1,
+                    "0xa8": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              }
+            ],
+            "search_space": "space",
+            "generated_candidates": 2,
+            "selected": {
+              "mapping": [
+                "B_stream",
+                64
+              ],
+              "tile_pad": false,
+              "estimated_operand_load_bytes": 32768,
+              "sram_peak_nibbles": 52248,
+              "sram_allocator": "bump",
+              "status": "selected",
+              "emitted": {
+                "words": 43,
+                "instructions": 37,
+                "dma_packets": 2,
+                "dma_load_bytes": 16384,
+                "dma_store_bytes": 8192,
+                "dma_bytes": 24576,
+                "opcodes": {
+                  "0x42": 2,
+                  "0x80": 16,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 4,
+                  "0x98": 1,
+                  "0xa0": 1,
+                  "0xa8": 1
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              },
+              "origin": "legacy_incumbent"
+            },
+            "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings",
+            "legal_candidates": 2,
+            "probe_words": 88,
+            "stop_reason": "exhausted"
+          }
+        },
+        "dram_compaction": {
+          "policy": "remove wholly unused TVM storage pools",
+          "before_bytes": 65548,
+          "after_bytes": 49164,
+          "saved_bytes": 16384,
+          "removed_pools": [
+            {
+              "name": "storage",
+              "original_address_bytes": 40960,
+              "size_bytes": 16384
+            }
+          ],
+          "removed_tensors": {
+            "alloc": {
+              "original_address_bytes": 40960,
+              "size_bytes": 16384
+            },
+            "lv": {
+              "original_address_bytes": 40960,
+              "size_bytes": 16384
+            }
+          }
+        },
+        "numerical_check": "bit-exact; C-model DMA counters match ISA"
+      }
+    },
+    "llama_mlp_64x3072x8192": {
+      "before": {
+        "statistics": {
+          "words": 143404,
+          "instructions": 142441,
+          "dma_packets": 321,
+          "dma_load_bytes": 151781388,
+          "dma_store_bytes": 393216,
+          "dma_bytes": 152174604,
+          "opcodes": {
+            "0x01": 64,
+            "0x0a": 128,
+            "0x0b": 64,
+            "0x0f": 64,
+            "0x15": 128,
+            "0x16": 64,
+            "0x42": 18432,
+            "0x80": 84136,
+            "0x82": 1,
+            "0x88": 6,
+            "0x89": 520,
+            "0x90": 37504,
+            "0x98": 1008,
+            "0xa0": 273,
+            "0xa8": 48,
+            "0xff": 1
+          },
+          "measurement": "static instruction stream; no cycle estimate",
+          "sram_peak_bytes": 7446540,
+          "global_image_bytes": 154927116
+        },
+        "kernel_count": 5,
+        "compile_seconds": 42.13422505185008,
+        "executed": false,
+        "selected_fusion": {
+          "policy": "bounded graph alternatives; emitted DMA/words/SRAM",
+          "module_policy": "all entries nonregressing; shared ABI chosen atomically",
+          "candidates": [
+            {
+              "attention": false,
+              "repeated_gemv": false,
+              "matrix_producers": false,
+              "generic_fusion": false,
+              "status": "legal",
+              "costs": {
+                "forward": {
+                  "words": 143405,
+                  "instructions": 142442,
+                  "dma_packets": 321,
+                  "dma_load_bytes": 151781388,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 152174604,
+                  "opcodes": {
+                    "0x01": 64,
+                    "0x0a": 128,
+                    "0x0b": 64,
+                    "0x0f": 64,
+                    "0x15": 128,
+                    "0x16": 64,
+                    "0x42": 18432,
+                    "0x80": 84137,
+                    "0x82": 1,
+                    "0x88": 6,
+                    "0x89": 520,
+                    "0x90": 37504,
+                    "0x98": 1008,
+                    "0xa0": 273,
+                    "0xa8": 48,
+                    "0xff": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate",
+                  "sram_peak_bytes": 7446540,
+                  "global_image_bytes": 154927116
+                }
+              },
+              "regions": null,
+              "accepted": true,
+              "selected": false
+            },
+            {
+              "attention": false,
+              "repeated_gemv": false,
+              "matrix_producers": false,
+              "generic_fusion": "vectors",
+              "status": "legal",
+              "costs": {
+                "forward": {
+                  "words": 146619,
+                  "instructions": 145548,
+                  "dma_packets": 357,
+                  "dma_load_bytes": 151781388,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 152174604,
+                  "opcodes": {
+                    "0x01": 64,
+                    "0x0a": 128,
+                    "0x0b": 64,
+                    "0x0f": 64,
+                    "0x15": 128,
+                    "0x16": 64,
+                    "0x42": 18432,
+                    "0x80": 87208,
+                    "0x82": 1,
+                    "0x88": 6,
+                    "0x89": 519,
+                    "0x90": 37504,
+                    "0x98": 1008,
+                    "0xa0": 309,
+                    "0xa8": 48,
+                    "0xff": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate",
+                  "sram_peak_bytes": 4300812,
+                  "global_image_bytes": 154927116
+                }
+              },
+              "regions": {
+                "policy": "per-region emitted DMA/words/SRAM",
+                "boundaries": [
+                  "matmul",
+                  "matmul1"
+                ],
+                "regions": [
+                  {
+                    "region": "fused_silu_multiply",
+                    "unfused": {
+                      "words": 3203,
+                      "instructions": 3155,
+                      "dma_packets": 16,
+                      "dma_load_bytes": 2097160,
+                      "dma_store_bytes": 1048576,
+                      "dma_bytes": 3145736,
+                      "opcodes": {
+                        "0x01": 64,
+                        "0x0a": 128,
+                        "0x0b": 64,
+                        "0x0f": 64,
+                        "0x15": 128,
+                        "0x16": 64,
+                        "0x80": 1537,
+                        "0x82": 1,
+                        "0x90": 640,
+                        "0x98": 448,
+                        "0xa0": 11,
+                        "0xa8": 5,
+                        "0xff": 1
+                      },
+                      "measurement": "static instruction stream; no cycle estimate",
+                      "sram_peak_bytes": 3244040,
+                      "global_image_bytes": 4194312
+                    },
+                    "fused": {
+                      "words": 3203,
+                      "instructions": 3155,
+                      "dma_packets": 16,
+                      "dma_load_bytes": 2097160,
+                      "dma_store_bytes": 1048576,
+                      "dma_bytes": 3145736,
+                      "opcodes": {
+                        "0x01": 64,
+                        "0x0a": 128,
+                        "0x0b": 64,
+                        "0x0f": 64,
+                        "0x15": 128,
+                        "0x16": 64,
+                        "0x80": 1537,
+                        "0x82": 1,
+                        "0x90": 640,
+                        "0x98": 448,
+                        "0xa0": 11,
+                        "0xa8": 5,
+                        "0xff": 1
+                      },
+                      "measurement": "static instruction stream; no cycle estimate",
+                      "sram_peak_bytes": 4292616,
+                      "global_image_bytes": 3145736
+                    },
+                    "selected": false,
+                    "status": "unprofitable",
+                    "reason": "lexicographic DMA bytes, words, SRAM peak"
+                  }
+                ]
+              },
+              "accepted": false,
+              "selected": false
+            },
+            {
+              "attention": false,
+              "repeated_gemv": false,
+              "matrix_producers": false,
+              "generic_fusion": "matmul",
+              "status": "legal",
+              "costs": {
+                "forward": {
+                  "words": 143404,
+                  "instructions": 142441,
+                  "dma_packets": 321,
+                  "dma_load_bytes": 151781388,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 152174604,
+                  "opcodes": {
+                    "0x01": 64,
+                    "0x0a": 128,
+                    "0x0b": 64,
+                    "0x0f": 64,
+                    "0x15": 128,
+                    "0x16": 64,
+                    "0x42": 18432,
+                    "0x80": 84136,
+                    "0x82": 1,
+                    "0x88": 6,
+                    "0x89": 520,
+                    "0x90": 37504,
+                    "0x98": 1008,
+                    "0xa0": 273,
+                    "0xa8": 48,
+                    "0xff": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate",
+                  "sram_peak_bytes": 7446540,
+                  "global_image_bytes": 154927116
+                }
+              },
+              "regions": {
+                "policy": "per-region emitted DMA/words/SRAM",
+                "boundaries": [],
+                "regions": [
+                  {
+                    "region": "fused_matmul_silu_multiply",
+                    "unfused": {
+                      "words": 51583,
+                      "instructions": 51160,
+                      "dma_packets": 141,
+                      "dma_load_bytes": 51773452,
+                      "dma_store_bytes": 1048576,
+                      "dma_bytes": 52822028,
+                      "opcodes": {
+                        "0x01": 64,
+                        "0x0a": 128,
+                        "0x0b": 64,
+                        "0x0f": 64,
+                        "0x15": 128,
+                        "0x16": 64,
+                        "0x42": 6144,
+                        "0x80": 30462,
+                        "0x82": 1,
+                        "0x88": 6,
+                        "0x89": 261,
+                        "0x90": 12928,
+                        "0x98": 704,
+                        "0xa0": 136,
+                        "0xa8": 5,
+                        "0xff": 1
+                      },
+                      "measurement": "static instruction stream; no cycle estimate",
+                      "sram_peak_bytes": 4292620,
+                      "global_image_bytes": 54919180
+                    },
+                    "fused": {
+                      "words": 442269,
+                      "instructions": 441108,
+                      "dma_packets": 387,
+                      "dma_load_bytes": 51773452,
+                      "dma_store_bytes": 1048576,
+                      "dma_bytes": 52822028,
+                      "opcodes": {
+                        "0x01": 8192,
+                        "0x0a": 16384,
+                        "0x0b": 8192,
+                        "0x0f": 8192,
+                        "0x15": 16384,
+                        "0x16": 8192,
+                        "0x42": 6144,
+                        "0x80": 217219,
+                        "0x82": 1,
+                        "0x88": 6,
+                        "0x89": 6,
+                        "0x90": 94208,
+                        "0x98": 57600,
+                        "0xa0": 259,
+                        "0xa8": 128,
+                        "0xff": 1
+                      },
+                      "measurement": "static instruction stream; no cycle estimate",
+                      "sram_peak_bytes": 933900,
+                      "global_image_bytes": 52822028
+                    },
+                    "selected": false,
+                    "status": "unprofitable",
+                    "reason": "lexicographic DMA bytes, words, SRAM peak"
+                  }
+                ]
+              },
+              "accepted": true,
+              "selected": true
+            }
+          ],
+          "selected": {
+            "attention": false,
+            "repeated_gemv": false,
+            "matrix_producers": false,
+            "generic_fusion": "matmul"
+          },
+          "pareto_candidates": [
+            1,
+            2
+          ],
+          "boundaries": [],
+          "regions": [
+            {
+              "region": "fused_matmul_silu_multiply",
+              "unfused": {
+                "words": 51583,
+                "instructions": 51160,
+                "dma_packets": 141,
+                "dma_load_bytes": 51773452,
+                "dma_store_bytes": 1048576,
+                "dma_bytes": 52822028,
+                "opcodes": {
+                  "0x01": 64,
+                  "0x0a": 128,
+                  "0x0b": 64,
+                  "0x0f": 64,
+                  "0x15": 128,
+                  "0x16": 64,
+                  "0x42": 6144,
+                  "0x80": 30462,
+                  "0x82": 1,
+                  "0x88": 6,
+                  "0x89": 261,
+                  "0x90": 12928,
+                  "0x98": 704,
+                  "0xa0": 136,
+                  "0xa8": 5,
+                  "0xff": 1
+                },
+                "measurement": "static instruction stream; no cycle estimate",
+                "sram_peak_bytes": 4292620,
+                "global_image_bytes": 54919180
+              },
+              "fused": {
+                "words": 442269,
+                "instructions": 441108,
+                "dma_packets": 387,
+                "dma_load_bytes": 51773452,
+                "dma_store_bytes": 1048576,
+                "dma_bytes": 52822028,
+                "opcodes": {
+                  "0x01": 8192,
+                  "0x0a": 16384,
+                  "0x0b": 8192,
+                  "0x0f": 8192,
+                  "0x15": 16384,
+                  "0x16": 8192,
+                  "0x42": 6144,
+                  "0x80": 217219,
+                  "0x82": 1,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 94208,
+                  "0x98": 57600,
+                  "0xa0": 259,
+                  "0xa8": 128,
+                  "0xff": 1
+                },
+                "measurement": "static instruction stream; no cycle estimate",
+                "sram_peak_bytes": 933900,
+                "global_image_bytes": 52822028
+              },
+              "selected": false,
+              "status": "unprofitable",
+              "reason": "lexicographic DMA bytes, words, SRAM peak"
+            }
+          ]
+        },
+        "joint_memory": {
+          "policy": "bounded call-site schedule and retained-SRAM search",
+          "beam_width": 4,
+          "excluded": [],
+          "candidates": 4,
+          "trials": 28,
+          "rejections": [],
+          "calls": [
+            {
+              "index": 0,
+              "name": "matmul",
+              "parameter_sram_nibbles": {
+                "2": 12795928
+              },
+              "workspace_limit_nibbles": 12795928,
+              "retained_bytes": 1048576,
+              "workspace_peak_bytes": 892940,
+              "sram_peak_bytes": 7446540,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1785880,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 48405,
+                  "instructions": 48015,
+                  "dma_packets": 130,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 28930,
+                    "0x88": 6,
+                    "0x89": 261,
+                    "0x90": 12288,
+                    "0x98": 256,
+                    "0xa0": 130
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 48405,
+                "instructions": 48015,
+                "dma_packets": 130,
+                "dma_load_bytes": 50724864,
+                "dma_store_bytes": 0,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 28930,
+                  "0x88": 6,
+                  "0x89": 261,
+                  "0x90": 12288,
+                  "0x98": 256,
+                  "0xa0": 130
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 1,
+              "name": "matmul",
+              "parameter_sram_nibbles": {
+                "2": 10698776
+              },
+              "workspace_limit_nibbles": 10698776,
+              "retained_bytes": 2097152,
+              "workspace_peak_bytes": 892940,
+              "sram_peak_bytes": 7446540,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1785880,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 48405,
+                  "instructions": 48015,
+                  "dma_packets": 130,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 28930,
+                    "0x88": 6,
+                    "0x89": 261,
+                    "0x90": 12288,
+                    "0x98": 256,
+                    "0xa0": 130
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 48405,
+                "instructions": 48015,
+                "dma_packets": 130,
+                "dma_load_bytes": 50724864,
+                "dma_store_bytes": 0,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 28930,
+                  "0x88": 6,
+                  "0x89": 261,
+                  "0x90": 12288,
+                  "0x98": 256,
+                  "0xa0": 130
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 2,
+              "name": "silu",
+              "parameter_sram_nibbles": {
+                "0": 10698776,
+                "1": 8601624
+              },
+              "workspace_limit_nibbles": 8601624,
+              "retained_bytes": 3145728,
+              "workspace_peak_bytes": 1146892,
+              "sram_peak_bytes": 7446540,
+              "selected": {
+                "stripe_rows": null,
+                "sram_peak_nibbles": 2293784,
+                "sram_allocator": "bump",
+                "status": "selected"
+              },
+              "statistics": {
+                "words": 2658,
+                "instructions": 2658,
+                "dma_packets": 0,
+                "dma_load_bytes": 0,
+                "dma_store_bytes": 0,
+                "dma_bytes": 0,
+                "opcodes": {
+                  "0x01": 64,
+                  "0x0a": 64,
+                  "0x0b": 64,
+                  "0x0f": 64,
+                  "0x15": 128,
+                  "0x16": 64,
+                  "0x80": 1313,
+                  "0x82": 1,
+                  "0x90": 512,
+                  "0x98": 384
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 3,
+              "name": "multiply",
+              "parameter_sram_nibbles": {
+                "0": 8601624,
+                "1": 12795928,
+                "2": 10698776
+              },
+              "workspace_limit_nibbles": 8601624,
+              "retained_bytes": 3145728,
+              "workspace_peak_bytes": 98316,
+              "sram_peak_bytes": 7446540,
+              "selected": {
+                "stripe_rows": null,
+                "sram_peak_nibbles": 196632,
+                "sram_allocator": "bump",
+                "status": "selected"
+              },
+              "statistics": {
+                "words": 545,
+                "instructions": 545,
+                "dma_packets": 0,
+                "dma_load_bytes": 0,
+                "dma_store_bytes": 0,
+                "dma_bytes": 0,
+                "opcodes": {
+                  "0x0a": 64,
+                  "0x80": 288,
+                  "0x82": 1,
+                  "0x90": 128,
+                  "0x98": 64
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 4,
+              "name": "matmul1",
+              "parameter_sram_nibbles": {
+                "0": 10698776
+              },
+              "workspace_limit_nibbles": 10698776,
+              "retained_bytes": 1048576,
+              "workspace_peak_bytes": 4300812,
+              "sram_peak_bytes": 6397964,
+              "selected": {
+                "mapping": [
+                  "B",
+                  256
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 62914560,
+                "sram_peak_nibbles": 8601624,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 43410,
+                  "instructions": 43230,
+                  "dma_packets": 60,
+                  "dma_load_bytes": 50331648,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 24678,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 12,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 43410,
+                "instructions": 43230,
+                "dma_packets": 60,
+                "dma_load_bytes": 50331648,
+                "dma_store_bytes": 393216,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 24678,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 12288,
+                  "0x98": 48,
+                  "0xa0": 12,
+                  "0xa8": 48
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            }
+          ],
+          "retained_values": [
+            {
+              "producer": 0,
+              "argument": 2,
+              "address_bytes": 151388160,
+              "size_bytes": 1048576,
+              "last_use": 3,
+              "readers": [
+                [
+                  3,
+                  1
+                ]
+              ]
+            },
+            {
+              "producer": 1,
+              "argument": 2,
+              "address_bytes": 152436736,
+              "size_bytes": 1048576,
+              "last_use": 2,
+              "readers": [
+                [
+                  2,
+                  0
+                ]
+              ]
+            },
+            {
+              "producer": 2,
+              "argument": 1,
+              "address_bytes": 153485312,
+              "size_bytes": 1048576,
+              "last_use": 3,
+              "readers": [
+                [
+                  3,
+                  0
+                ]
+              ]
+            },
+            {
+              "producer": 3,
+              "argument": 2,
+              "address_bytes": 152436736,
+              "size_bytes": 1048576,
+              "last_use": 4,
+              "readers": [
+                [
+                  4,
+                  0
+                ]
+              ]
+            }
+          ],
+          "dma_bytes": 152174592,
+          "words": 143423,
+          "sram_peak_bytes": 7446540,
+          "arena_relocation_bytes": 942068,
+          "program_comparison": {
+            "baseline": {
+              "words": 144994,
+              "instructions": 143098,
+              "dma_packets": 632,
+              "dma_load_bytes": 153878524,
+              "dma_store_bytes": 4587520,
+              "dma_bytes": 158466044,
+              "opcodes": {
+                "0x01": 64,
+                "0x0a": 128,
+                "0x0b": 64,
+                "0x0f": 64,
+                "0x15": 128,
+                "0x16": 64,
+                "0x17": 10,
+                "0x42": 18432,
+                "0x80": 85161,
+                "0x82": 13,
+                "0x88": 30,
+                "0x89": 31,
+                "0x90": 37514,
+                "0x98": 762,
+                "0xa0": 318,
+                "0xa8": 314,
+                "0xff": 1
+              },
+              "measurement": "static instruction stream; no cycle estimate",
+              "sram_peak_bytes": 3244044,
+              "global_image_bytes": 154927116
+            },
+            "candidate": {
+              "words": 143404,
+              "instructions": 142441,
+              "dma_packets": 321,
+              "dma_load_bytes": 151781388,
+              "dma_store_bytes": 393216,
+              "dma_bytes": 152174604,
+              "opcodes": {
+                "0x01": 64,
+                "0x0a": 128,
+                "0x0b": 64,
+                "0x0f": 64,
+                "0x15": 128,
+                "0x16": 64,
+                "0x42": 18432,
+                "0x80": 84136,
+                "0x82": 1,
+                "0x88": 6,
+                "0x89": 520,
+                "0x90": 37504,
+                "0x98": 1008,
+                "0xa0": 273,
+                "0xa8": 48,
+                "0xff": 1
+              },
+              "measurement": "static instruction stream; no cycle estimate",
+              "sram_peak_bytes": 7446540,
+              "global_image_bytes": 154927116
+            },
+            "selected": true
+          },
+          "applied": true
+        },
+        "schedules": {
+          "matmul": {
+            "kind": "matmul",
+            "extents": [
+              64,
+              8192,
+              3072
+            ],
+            "cost_model": "FP16 operand DMA per batch",
+            "attempts": [
+              {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1785880,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 48405,
+                  "instructions": 48015,
+                  "dma_packets": 130,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 28930,
+                    "0x88": 6,
+                    "0x89": 261,
+                    "0x90": 12288,
+                    "0x98": 256,
+                    "0xa0": 130
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "m_panel",
+                  "b_at": "k_group"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1015832,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 56857,
+                  "instructions": 38419,
+                  "dma_packets": 6146,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 13318,
+                    "0x88": 6,
+                    "0x89": 261,
+                    "0x90": 12288,
+                    "0x98": 256,
+                    "0xa0": 6146
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 128,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "m_panel",
+                  "b_at": "k_tile"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1015832,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 56857,
+                  "instructions": 38419,
+                  "dma_packets": 6146,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 13318,
+                    "0x88": 6,
+                    "0x89": 261,
+                    "0x90": 12288,
+                    "0x98": 256,
+                    "0xa0": 6146
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              }
+            ],
+            "search_space": "space",
+            "generated_candidates": 1433,
+            "selected": {
+              "mapping": [
+                "A",
+                64
+              ],
+              "tile_pad": false,
+              "estimated_operand_load_bytes": 50724864,
+              "sram_peak_nibbles": 1785880,
+              "sram_allocator": "bump",
+              "status": "selected",
+              "emitted": {
+                "words": 48405,
+                "instructions": 48015,
+                "dma_packets": 130,
+                "dma_load_bytes": 50724864,
+                "dma_store_bytes": 0,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 28930,
+                  "0x88": 6,
+                  "0x89": 261,
+                  "0x90": 12288,
+                  "0x98": 256,
+                  "0xa0": 130
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              },
+              "origin": "legacy_incumbent"
+            },
+            "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings",
+            "legal_candidates": 2,
+            "probe_words": 113714,
+            "stop_reason": "budget"
+          },
+          "silu": {
+            "kind": "generic",
+            "attempts": [
+              {
+                "stripe_rows": null,
+                "sram_peak_nibbles": 2293784,
+                "sram_allocator": "bump",
+                "status": "selected"
+              }
+            ],
+            "selection_policy": "whole tensor, halving stripes on capacity overflow",
+            "selected": {
+              "stripe_rows": null,
+              "sram_peak_nibbles": 2293784,
+              "sram_allocator": "bump",
+              "status": "selected"
+            }
+          },
+          "multiply": {
+            "kind": "generic",
+            "attempts": [
+              {
+                "stripe_rows": null,
+                "sram_peak_nibbles": 196632,
+                "sram_allocator": "bump",
+                "status": "selected"
+              }
+            ],
+            "selection_policy": "whole tensor, halving stripes on capacity overflow",
+            "selected": {
+              "stripe_rows": null,
+              "sram_peak_nibbles": 196632,
+              "sram_allocator": "bump",
+              "status": "selected"
+            }
+          },
+          "matmul1": {
+            "kind": "matmul",
+            "extents": [
+              64,
+              3072,
+              8192
+            ],
+            "cost_model": "FP16 operand DMA per batch",
+            "attempts": [
+              {
+                "mapping": [
+                  "B",
+                  256
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 62914560,
+                "sram_peak_nibbles": 8601624,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 43410,
+                  "instructions": 43230,
+                  "dma_packets": 60,
+                  "dma_load_bytes": 50331648,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 24678,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 12,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "k_group",
+                  "b_at": "k_group"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50331648,
+                "sram_peak_nibbles": 229400,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 55558,
+                  "instructions": 36982,
+                  "dma_packets": 6192,
+                  "dma_load_bytes": 50331648,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 12298,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 6144,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 128,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "k_tile",
+                  "b_at": "k_tile"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50331648,
+                "sram_peak_nibbles": 229400,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 55558,
+                  "instructions": 36982,
+                  "dma_packets": 6192,
+                  "dma_load_bytes": 50331648,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 12298,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 6144,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              }
+            ],
+            "search_space": "space",
+            "generated_candidates": 299,
+            "selected": {
+              "mapping": [
+                "B",
+                256
+              ],
+              "tile_pad": false,
+              "estimated_operand_load_bytes": 62914560,
+              "sram_peak_nibbles": 8601624,
+              "sram_allocator": "bump",
+              "status": "selected",
+              "emitted": {
+                "words": 43410,
+                "instructions": 43230,
+                "dma_packets": 60,
+                "dma_load_bytes": 50331648,
+                "dma_store_bytes": 393216,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 24678,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 12288,
+                  "0x98": 48,
+                  "0xa0": 12,
+                  "0xa8": 48
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              },
+              "origin": "legacy_incumbent"
+            },
+            "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings",
+            "legal_candidates": 2,
+            "probe_words": 111116,
+            "stop_reason": "budget"
+          }
+        },
+        "dram_compaction": null
+      },
+      "after": {
+        "statistics": {
+          "words": 140594,
+          "instructions": 139631,
+          "dma_packets": 321,
+          "dma_load_bytes": 151781388,
+          "dma_store_bytes": 393216,
+          "dma_bytes": 152174604,
+          "opcodes": {
+            "0x01": 64,
+            "0x0a": 128,
+            "0x0b": 64,
+            "0x0f": 64,
+            "0x15": 128,
+            "0x16": 64,
+            "0x42": 18432,
+            "0x80": 82093,
+            "0x82": 1,
+            "0x88": 6,
+            "0x89": 9,
+            "0x90": 37504,
+            "0x98": 752,
+            "0xa0": 273,
+            "0xa8": 48,
+            "0xff": 1
+          },
+          "measurement": "static instruction stream; no cycle estimate",
+          "sram_peak_bytes": 7446540,
+          "global_image_bytes": 151781388
+        },
+        "kernel_count": 5,
+        "compile_seconds": 41.418934827670455,
+        "executed": false,
+        "selected_fusion": {
+          "policy": "bounded graph alternatives; emitted DMA/words/SRAM",
+          "module_policy": "all entries nonregressing; shared ABI chosen atomically",
+          "candidates": [
+            {
+              "attention": false,
+              "repeated_gemv": false,
+              "matrix_producers": false,
+              "generic_fusion": false,
+              "status": "legal",
+              "costs": {
+                "forward": {
+                  "words": 140594,
+                  "instructions": 139631,
+                  "dma_packets": 321,
+                  "dma_load_bytes": 151781388,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 152174604,
+                  "opcodes": {
+                    "0x01": 64,
+                    "0x0a": 128,
+                    "0x0b": 64,
+                    "0x0f": 64,
+                    "0x15": 128,
+                    "0x16": 64,
+                    "0x42": 18432,
+                    "0x80": 82093,
+                    "0x82": 1,
+                    "0x88": 6,
+                    "0x89": 9,
+                    "0x90": 37504,
+                    "0x98": 752,
+                    "0xa0": 273,
+                    "0xa8": 48,
+                    "0xff": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate",
+                  "sram_peak_bytes": 7446540,
+                  "global_image_bytes": 151781388
+                }
+              },
+              "regions": null,
+              "accepted": true,
+              "selected": true
+            },
+            {
+              "attention": false,
+              "repeated_gemv": false,
+              "matrix_producers": false,
+              "generic_fusion": "vectors",
+              "status": "legal",
+              "costs": {
+                "forward": {
+                  "words": 143809,
+                  "instructions": 142738,
+                  "dma_packets": 357,
+                  "dma_load_bytes": 151781388,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 152174604,
+                  "opcodes": {
+                    "0x01": 64,
+                    "0x0a": 128,
+                    "0x0b": 64,
+                    "0x0f": 64,
+                    "0x15": 128,
+                    "0x16": 64,
+                    "0x42": 18432,
+                    "0x80": 85165,
+                    "0x82": 1,
+                    "0x88": 6,
+                    "0x89": 8,
+                    "0x90": 37504,
+                    "0x98": 752,
+                    "0xa0": 309,
+                    "0xa8": 48,
+                    "0xff": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate",
+                  "sram_peak_bytes": 4300812,
+                  "global_image_bytes": 151781388
+                }
+              },
+              "regions": {
+                "policy": "per-region emitted DMA/words/SRAM",
+                "boundaries": [
+                  "matmul",
+                  "matmul1"
+                ],
+                "regions": [
+                  {
+                    "region": "fused_silu_multiply",
+                    "unfused": {
+                      "words": 3203,
+                      "instructions": 3155,
+                      "dma_packets": 16,
+                      "dma_load_bytes": 2097160,
+                      "dma_store_bytes": 1048576,
+                      "dma_bytes": 3145736,
+                      "opcodes": {
+                        "0x01": 64,
+                        "0x0a": 128,
+                        "0x0b": 64,
+                        "0x0f": 64,
+                        "0x15": 128,
+                        "0x16": 64,
+                        "0x80": 1537,
+                        "0x82": 1,
+                        "0x90": 640,
+                        "0x98": 448,
+                        "0xa0": 11,
+                        "0xa8": 5,
+                        "0xff": 1
+                      },
+                      "measurement": "static instruction stream; no cycle estimate",
+                      "sram_peak_bytes": 3244040,
+                      "global_image_bytes": 3145736
+                    },
+                    "fused": {
+                      "words": 3203,
+                      "instructions": 3155,
+                      "dma_packets": 16,
+                      "dma_load_bytes": 2097160,
+                      "dma_store_bytes": 1048576,
+                      "dma_bytes": 3145736,
+                      "opcodes": {
+                        "0x01": 64,
+                        "0x0a": 128,
+                        "0x0b": 64,
+                        "0x0f": 64,
+                        "0x15": 128,
+                        "0x16": 64,
+                        "0x80": 1537,
+                        "0x82": 1,
+                        "0x90": 640,
+                        "0x98": 448,
+                        "0xa0": 11,
+                        "0xa8": 5,
+                        "0xff": 1
+                      },
+                      "measurement": "static instruction stream; no cycle estimate",
+                      "sram_peak_bytes": 4292616,
+                      "global_image_bytes": 3145736
+                    },
+                    "selected": false,
+                    "status": "unprofitable",
+                    "reason": "lexicographic DMA bytes, words, SRAM peak"
+                  }
+                ]
+              },
+              "accepted": false,
+              "selected": false
+            },
+            {
+              "attention": false,
+              "repeated_gemv": false,
+              "matrix_producers": false,
+              "generic_fusion": "matmul",
+              "status": "legal",
+              "costs": {
+                "forward": {
+                  "words": 140594,
+                  "instructions": 139631,
+                  "dma_packets": 321,
+                  "dma_load_bytes": 151781388,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 152174604,
+                  "opcodes": {
+                    "0x01": 64,
+                    "0x0a": 128,
+                    "0x0b": 64,
+                    "0x0f": 64,
+                    "0x15": 128,
+                    "0x16": 64,
+                    "0x42": 18432,
+                    "0x80": 82093,
+                    "0x82": 1,
+                    "0x88": 6,
+                    "0x89": 9,
+                    "0x90": 37504,
+                    "0x98": 752,
+                    "0xa0": 273,
+                    "0xa8": 48,
+                    "0xff": 1
+                  },
+                  "measurement": "static instruction stream; no cycle estimate",
+                  "sram_peak_bytes": 7446540,
+                  "global_image_bytes": 151781388
+                }
+              },
+              "regions": {
+                "policy": "per-region emitted DMA/words/SRAM",
+                "boundaries": [],
+                "regions": [
+                  {
+                    "region": "fused_matmul_silu_multiply",
+                    "unfused": {
+                      "words": 50183,
+                      "instructions": 49760,
+                      "dma_packets": 141,
+                      "dma_load_bytes": 51773452,
+                      "dma_store_bytes": 1048576,
+                      "dma_bytes": 52822028,
+                      "opcodes": {
+                        "0x01": 64,
+                        "0x0a": 128,
+                        "0x0b": 64,
+                        "0x0f": 64,
+                        "0x15": 128,
+                        "0x16": 64,
+                        "0x42": 6144,
+                        "0x80": 29445,
+                        "0x82": 1,
+                        "0x88": 6,
+                        "0x89": 6,
+                        "0x90": 12928,
+                        "0x98": 576,
+                        "0xa0": 136,
+                        "0xa8": 5,
+                        "0xff": 1
+                      },
+                      "measurement": "static instruction stream; no cycle estimate",
+                      "sram_peak_bytes": 4292620,
+                      "global_image_bytes": 52822028
+                    },
+                    "fused": {
+                      "words": 54942,
+                      "instructions": 53781,
+                      "dma_packets": 387,
+                      "dma_load_bytes": 51773452,
+                      "dma_store_bytes": 1048576,
+                      "dma_bytes": 52822028,
+                      "opcodes": {
+                        "0x01": 128,
+                        "0x0a": 256,
+                        "0x0b": 128,
+                        "0x0f": 128,
+                        "0x15": 256,
+                        "0x16": 128,
+                        "0x42": 6144,
+                        "0x80": 31492,
+                        "0x82": 1,
+                        "0x88": 6,
+                        "0x89": 6,
+                        "0x90": 13568,
+                        "0x98": 1152,
+                        "0xa0": 259,
+                        "0xa8": 128,
+                        "0xff": 1
+                      },
+                      "measurement": "static instruction stream; no cycle estimate",
+                      "sram_peak_bytes": 933900,
+                      "global_image_bytes": 52822028
+                    },
+                    "selected": false,
+                    "status": "unprofitable",
+                    "reason": "lexicographic DMA bytes, words, SRAM peak"
+                  }
+                ]
+              },
+              "accepted": false,
+              "selected": false
+            }
+          ],
+          "selected": {
+            "attention": false,
+            "repeated_gemv": false,
+            "matrix_producers": false,
+            "generic_fusion": false
+          },
+          "pareto_candidates": [
+            0,
+            1,
+            2
+          ],
+          "regions": [],
+          "boundaries": []
+        },
+        "joint_memory": {
+          "policy": "bounded call-site schedule and retained-SRAM search",
+          "beam_width": 4,
+          "excluded": [],
+          "candidates": 4,
+          "trials": 26,
+          "rejections": [],
+          "calls": [
+            {
+              "index": 0,
+              "name": "matmul",
+              "parameter_sram_nibbles": {
+                "2": 12795928
+              },
+              "workspace_limit_nibbles": 12795928,
+              "retained_bytes": 1048576,
+              "workspace_peak_bytes": 884748,
+              "sram_peak_bytes": 7446540,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1769496,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 47000,
+                  "instructions": 46610,
+                  "dma_packets": 130,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 27908,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 128,
+                    "0xa0": 130
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 47000,
+                "instructions": 46610,
+                "dma_packets": 130,
+                "dma_load_bytes": 50724864,
+                "dma_store_bytes": 0,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 27908,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 12288,
+                  "0x98": 128,
+                  "0xa0": 130
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 1,
+              "name": "silu",
+              "parameter_sram_nibbles": {
+                "0": 12795928,
+                "1": 10698776
+              },
+              "workspace_limit_nibbles": 10698776,
+              "retained_bytes": 2097152,
+              "workspace_peak_bytes": 1146892,
+              "sram_peak_bytes": 7446540,
+              "selected": {
+                "stripe_rows": null,
+                "sram_peak_nibbles": 2293784,
+                "sram_allocator": "bump",
+                "status": "selected"
+              },
+              "statistics": {
+                "words": 2658,
+                "instructions": 2658,
+                "dma_packets": 0,
+                "dma_load_bytes": 0,
+                "dma_store_bytes": 0,
+                "dma_bytes": 0,
+                "opcodes": {
+                  "0x01": 64,
+                  "0x0a": 64,
+                  "0x0b": 64,
+                  "0x0f": 64,
+                  "0x15": 128,
+                  "0x16": 64,
+                  "0x80": 1313,
+                  "0x82": 1,
+                  "0x90": 512,
+                  "0x98": 384
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 2,
+              "name": "matmul",
+              "parameter_sram_nibbles": {
+                "2": 12795928
+              },
+              "workspace_limit_nibbles": 10698776,
+              "retained_bytes": 2097152,
+              "workspace_peak_bytes": 884748,
+              "sram_peak_bytes": 7446540,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1769496,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 47000,
+                  "instructions": 46610,
+                  "dma_packets": 130,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 27908,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 128,
+                    "0xa0": 130
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 47000,
+                "instructions": 46610,
+                "dma_packets": 130,
+                "dma_load_bytes": 50724864,
+                "dma_store_bytes": 0,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 27908,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 12288,
+                  "0x98": 128,
+                  "0xa0": 130
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 3,
+              "name": "multiply",
+              "parameter_sram_nibbles": {
+                "0": 10698776,
+                "1": 12795928,
+                "2": 8601624
+              },
+              "workspace_limit_nibbles": 8601624,
+              "retained_bytes": 3145728,
+              "workspace_peak_bytes": 98316,
+              "sram_peak_bytes": 7446540,
+              "selected": {
+                "stripe_rows": null,
+                "sram_peak_nibbles": 196632,
+                "sram_allocator": "bump",
+                "status": "selected"
+              },
+              "statistics": {
+                "words": 545,
+                "instructions": 545,
+                "dma_packets": 0,
+                "dma_load_bytes": 0,
+                "dma_store_bytes": 0,
+                "dma_bytes": 0,
+                "opcodes": {
+                  "0x0a": 64,
+                  "0x80": 288,
+                  "0x82": 1,
+                  "0x90": 128,
+                  "0x98": 64
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            },
+            {
+              "index": 4,
+              "name": "matmul1",
+              "parameter_sram_nibbles": {
+                "0": 8601624
+              },
+              "workspace_limit_nibbles": 8601624,
+              "retained_bytes": 1048576,
+              "workspace_peak_bytes": 4300812,
+              "sram_peak_bytes": 5349388,
+              "selected": {
+                "mapping": [
+                  "B",
+                  256
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 62914560,
+                "sram_peak_nibbles": 8601624,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 43410,
+                  "instructions": 43230,
+                  "dma_packets": 60,
+                  "dma_load_bytes": 50331648,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 24678,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 12,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "statistics": {
+                "words": 43410,
+                "instructions": 43230,
+                "dma_packets": 60,
+                "dma_load_bytes": 50331648,
+                "dma_store_bytes": 393216,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 24678,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 12288,
+                  "0x98": 48,
+                  "0xa0": 12,
+                  "0xa8": 48
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              }
+            }
+          ],
+          "retained_values": [
+            {
+              "producer": 0,
+              "argument": 2,
+              "address_bytes": null,
+              "size_bytes": 1048576,
+              "last_use": 1,
+              "readers": [
+                [
+                  1,
+                  0
+                ]
+              ],
+              "original_address_bytes": 151388160
+            },
+            {
+              "producer": 1,
+              "argument": 1,
+              "address_bytes": null,
+              "size_bytes": 1048576,
+              "last_use": 3,
+              "readers": [
+                [
+                  3,
+                  0
+                ]
+              ],
+              "original_address_bytes": 152436736
+            },
+            {
+              "producer": 2,
+              "argument": 2,
+              "address_bytes": null,
+              "size_bytes": 1048576,
+              "last_use": 3,
+              "readers": [
+                [
+                  3,
+                  1
+                ]
+              ],
+              "original_address_bytes": 151388160
+            },
+            {
+              "producer": 3,
+              "argument": 2,
+              "address_bytes": null,
+              "size_bytes": 1048576,
+              "last_use": 4,
+              "readers": [
+                [
+                  4,
+                  0
+                ]
+              ],
+              "original_address_bytes": 153485312
+            }
+          ],
+          "dma_bytes": 152174592,
+          "words": 140613,
+          "sram_peak_bytes": 7446540,
+          "arena_relocation_bytes": 942068,
+          "program_comparison": {
+            "baseline": {
+              "words": 145011,
+              "instructions": 143118,
+              "dma_packets": 631,
+              "dma_load_bytes": 153878508,
+              "dma_store_bytes": 4587520,
+              "dma_bytes": 158466028,
+              "opcodes": {
+                "0x01": 64,
+                "0x0a": 128,
+                "0x0b": 64,
+                "0x0f": 64,
+                "0x15": 128,
+                "0x16": 64,
+                "0x17": 11,
+                "0x42": 18432,
+                "0x80": 85169,
+                "0x82": 15,
+                "0x88": 34,
+                "0x89": 35,
+                "0x90": 37515,
+                "0x98": 763,
+                "0xa0": 317,
+                "0xa8": 314,
+                "0xff": 1
+              },
+              "measurement": "static instruction stream; no cycle estimate",
+              "sram_peak_bytes": 3244044,
+              "global_image_bytes": 154927116
+            },
+            "candidate": {
+              "words": 140594,
+              "instructions": 139631,
+              "dma_packets": 321,
+              "dma_load_bytes": 151781388,
+              "dma_store_bytes": 393216,
+              "dma_bytes": 152174604,
+              "opcodes": {
+                "0x01": 64,
+                "0x0a": 128,
+                "0x0b": 64,
+                "0x0f": 64,
+                "0x15": 128,
+                "0x16": 64,
+                "0x42": 18432,
+                "0x80": 82093,
+                "0x82": 1,
+                "0x88": 6,
+                "0x89": 9,
+                "0x90": 37504,
+                "0x98": 752,
+                "0xa0": 273,
+                "0xa8": 48,
+                "0xff": 1
+              },
+              "measurement": "static instruction stream; no cycle estimate",
+              "sram_peak_bytes": 7446540,
+              "global_image_bytes": 154927116
+            },
+            "selected": true
+          },
+          "applied": true
+        },
+        "schedules": {
+          "matmul": {
+            "kind": "matmul",
+            "extents": [
+              64,
+              8192,
+              3072
+            ],
+            "cost_model": "FP16 operand DMA per batch",
+            "attempts": [
+              {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1769496,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 47000,
+                  "instructions": 46610,
+                  "dma_packets": 130,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 27908,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 128,
+                    "0xa0": 130
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "m_panel",
+                  "b_at": "k_group"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 999448,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 55708,
+                  "instructions": 37270,
+                  "dma_packets": 6146,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 12552,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 128,
+                    "0xa0": 6146
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 128,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "m_panel",
+                  "b_at": "k_tile"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 999448,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 55708,
+                  "instructions": 37270,
+                  "dma_packets": 6146,
+                  "dma_load_bytes": 50724864,
+                  "dma_store_bytes": 0,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 12552,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 128,
+                    "0xa0": 6146
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              }
+            ],
+            "search_space": "space",
+            "generated_candidates": 1433,
+            "selected": {
+              "mapping": [
+                "A",
+                64
+              ],
+              "tile_pad": false,
+              "estimated_operand_load_bytes": 50724864,
+              "sram_peak_nibbles": 1769496,
+              "sram_allocator": "bump",
+              "status": "selected",
+              "emitted": {
+                "words": 47000,
+                "instructions": 46610,
+                "dma_packets": 130,
+                "dma_load_bytes": 50724864,
+                "dma_store_bytes": 0,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 27908,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 12288,
+                  "0x98": 128,
+                  "0xa0": 130
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              },
+              "origin": "legacy_incumbent"
+            },
+            "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings",
+            "legal_candidates": 2,
+            "probe_words": 111416,
+            "stop_reason": "budget"
+          },
+          "silu": {
+            "kind": "generic",
+            "attempts": [
+              {
+                "stripe_rows": null,
+                "sram_peak_nibbles": 2293784,
+                "sram_allocator": "bump",
+                "status": "selected"
+              }
+            ],
+            "selection_policy": "whole tensor, halving stripes on capacity overflow",
+            "selected": {
+              "stripe_rows": null,
+              "sram_peak_nibbles": 2293784,
+              "sram_allocator": "bump",
+              "status": "selected"
+            }
+          },
+          "multiply": {
+            "kind": "generic",
+            "attempts": [
+              {
+                "stripe_rows": null,
+                "sram_peak_nibbles": 196632,
+                "sram_allocator": "bump",
+                "status": "selected"
+              }
+            ],
+            "selection_policy": "whole tensor, halving stripes on capacity overflow",
+            "selected": {
+              "stripe_rows": null,
+              "sram_peak_nibbles": 196632,
+              "sram_allocator": "bump",
+              "status": "selected"
+            }
+          },
+          "matmul1": {
+            "kind": "matmul",
+            "extents": [
+              64,
+              3072,
+              8192
+            ],
+            "cost_model": "FP16 operand DMA per batch",
+            "attempts": [
+              {
+                "mapping": [
+                  "B",
+                  256
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 62914560,
+                "sram_peak_nibbles": 8601624,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 43410,
+                  "instructions": 43230,
+                  "dma_packets": 60,
+                  "dma_load_bytes": 50331648,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 24678,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 12,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 64,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "k_group",
+                  "b_at": "k_group"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50331648,
+                "sram_peak_nibbles": 229400,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 55558,
+                  "instructions": 36982,
+                  "dma_packets": 6192,
+                  "dma_load_bytes": 50331648,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 12298,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 6144,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              },
+              {
+                "mapping": {
+                  "m_panel": 64,
+                  "n_panel": 64,
+                  "k_chunk": 128,
+                  "outer_order": "mn",
+                  "inner_order": "mn",
+                  "a_at": "k_tile",
+                  "b_at": "k_tile"
+                },
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50331648,
+                "sram_peak_nibbles": 229400,
+                "sram_allocator": "bump",
+                "status": "legal",
+                "emitted": {
+                  "words": 55558,
+                  "instructions": 36982,
+                  "dma_packets": 6192,
+                  "dma_load_bytes": 50331648,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 50724864,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 12298,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 6144,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                }
+              }
+            ],
+            "search_space": "space",
+            "generated_candidates": 299,
+            "selected": {
+              "mapping": [
+                "B",
+                256
+              ],
+              "tile_pad": false,
+              "estimated_operand_load_bytes": 62914560,
+              "sram_peak_nibbles": 8601624,
+              "sram_allocator": "bump",
+              "status": "selected",
+              "emitted": {
+                "words": 43410,
+                "instructions": 43230,
+                "dma_packets": 60,
+                "dma_load_bytes": 50331648,
+                "dma_store_bytes": 393216,
+                "dma_bytes": 50724864,
+                "opcodes": {
+                  "0x42": 6144,
+                  "0x80": 24678,
+                  "0x88": 6,
+                  "0x89": 6,
+                  "0x90": 12288,
+                  "0x98": 48,
+                  "0xa0": 12,
+                  "0xa8": 48
+                },
+                "measurement": "static instruction stream; no cycle estimate"
+              },
+              "origin": "legacy_incumbent"
+            },
+            "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings",
+            "legal_candidates": 2,
+            "probe_words": 111116,
+            "stop_reason": "budget"
+          }
+        },
+        "dram_compaction": {
+          "policy": "remove wholly unused TVM storage pools",
+          "before_bytes": 154927116,
+          "after_bytes": 151781388,
+          "saved_bytes": 3145728,
+          "removed_pools": [
+            {
+              "name": "storage",
+              "original_address_bytes": 151388160,
+              "size_bytes": 1048576
+            },
+            {
+              "name": "storage1",
+              "original_address_bytes": 152436736,
+              "size_bytes": 1048576
+            },
+            {
+              "name": "storage2",
+              "original_address_bytes": 153485312,
+              "size_bytes": 1048576
+            }
+          ],
+          "removed_tensors": {
+            "alloc": {
+              "original_address_bytes": 151388160,
+              "size_bytes": 1048576
+            },
+            "matmul": {
+              "original_address_bytes": 151388160,
+              "size_bytes": 1048576
+            },
+            "alloc1": {
+              "original_address_bytes": 152436736,
+              "size_bytes": 1048576
+            },
+            "silu": {
+              "original_address_bytes": 152436736,
+              "size_bytes": 1048576
+            },
+            "alloc2": {
+              "original_address_bytes": 151388160,
+              "size_bytes": 1048576
+            },
+            "matmul1": {
+              "original_address_bytes": 151388160,
+              "size_bytes": 1048576
+            },
+            "alloc3": {
+              "original_address_bytes": 153485312,
+              "size_bytes": 1048576
+            },
+            "mul": {
+              "original_address_bytes": 153485312,
+              "size_bytes": 1048576
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+test_auto_fusion_selects_regions_by_actual_cost (__main__.CompletionTests.test_auto_fusion_selects_regions_by_actual_cost) ... ok
+test_forwarding_preserves_every_kernel_snapshot_and_counts (__main__.CompletionTests.test_forwarding_preserves_every_kernel_snapshot_and_counts) ... ok
+test_forwarding_rejects_stale_versions_and_noncanonical_copies (__main__.CompletionTests.test_forwarding_rejects_stale_versions_and_noncanonical_copies) ... ok
+test_image_binding_rejects_wrong_shape_and_dtype (__main__.CompletionTests.test_image_binding_rejects_wrong_shape_and_dtype) ... ok
+test_incremental_cache_dma_all_positions_and_cell_neighbours (__main__.CompletionTests.test_incremental_cache_dma_all_positions_and_cell_neighbours) ... ok
+test_rejected_fusion_region_is_inlined_without_losing_others (__main__.CompletionTests.test_rejected_fusion_region_is_inlined_without_losing_others) ... ok
+test_scaled_accumulator_protocol_errors_propagate (__main__.CompletionTests.test_scaled_accumulator_protocol_errors_propagate) ... ok
+test_static_analyzer_rejects_truncated_dma_payload (__main__.CompletionTests.test_static_analyzer_rejects_truncated_dma_payload) ... ok
+test_w8a8_tir_matches_reference_and_exposes_workspace (__main__.CompletionTests.test_w8a8_tir_matches_reference_and_exposes_workspace) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 6.350s
+
+OK

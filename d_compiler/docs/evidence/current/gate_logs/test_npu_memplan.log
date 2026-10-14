@@ -1,0 +1,4 @@
+  [PASS] all 92 tensors placed, 5 pools, 158,004 B
+  [PASS] footprint 158,004 B vs no-reuse 174,162 B (-9.3%)
+  [PASS] no address conflict among 34 planned tensors
+ALL NPU MEMPLAN (S2) TESTS PASSED

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5b70"/></marker></defs>
+<rect width="1200" height="700" fill="white"/>
+<g font-family="DejaVu Sans,Arial,sans-serif" fill="#142239">
+<text x="45" y="52" font-size="30" text-anchor="start" font-weight="bold">06  Query-blocked attention</text>
+<text x="45" y="89" font-size="17" text-anchor="start" font-weight="normal">Current fused attention path | scratch is reduced along Q; K context is still complete</text>
+<rect x="45" y="170" width="275" height="220" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="182.5" y="243.15" font-size="19" text-anchor="middle" font-weight="normal">Q block</text>
+<text x="182.5" y="272.15" font-size="19" text-anchor="middle" font-weight="normal">[query_rows,D]</text>
+<text x="182.5" y="301.15" font-size="19" text-anchor="middle" font-weight="normal"></text>
+<text x="182.5" y="330.15" font-size="19" text-anchor="middle" font-weight="normal">Next block later</text>
+<rect x="435" y="170" width="330" height="100" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="600.0" y="212.15" font-size="19" text-anchor="middle" font-weight="normal">Full K context</text>
+<text x="600.0" y="241.15" font-size="19" text-anchor="middle" font-weight="normal">[context,D]</text>
+<rect x="435" y="355" width="330" height="110" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="600.0" y="402.15" font-size="19" text-anchor="middle" font-weight="normal">Score + softmax</text>
+<text x="600.0" y="431.15" font-size="19" text-anchor="middle" font-weight="normal">[query_rows,context]</text>
+<rect x="865" y="170" width="290" height="100" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="1010.0" y="212.15" font-size="19" text-anchor="middle" font-weight="normal">Full V context</text>
+<text x="1010.0" y="241.15" font-size="19" text-anchor="middle" font-weight="normal">[context,D]</text>
+<rect x="865" y="355" width="290" height="110" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="1010.0" y="402.15" font-size="19" text-anchor="middle" font-weight="normal">Output block</text>
+<text x="1010.0" y="431.15" font-size="19" text-anchor="middle" font-weight="normal">[query_rows,D]</text>
+<path d="M320,280 L435,410" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="435,410 423.9667044833148,405.07390722362095 431.4566701082186,398.4481684015907" fill="#4b5b70"/>
+<text x="377.5" y="333.0" font-size="15" text-anchor="middle" font-weight="normal">QK^T</text>
+<path d="M600,270 L600,355" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="600,355 595.0,344.0 605.0,344.0" fill="#4b5b70"/>
+<path d="M765,410 L865,410" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="865,410 854.0,415.0 854.0,405.0" fill="#4b5b70"/>
+<text x="815.0" y="398.0" font-size="15" text-anchor="middle" font-weight="normal">PV</text>
+<path d="M1010,270 L1010,355" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="1010,355 1005.0,344.0 1015.0,344.0" fill="#4b5b70"/>
+<rect x="110" y="535" width="980" height="70" rx="12" fill="#fff3c7" stroke="#66758b" stroke-width="1.5"/>
+<text x="600.0" y="576.65" font-size="19" text-anchor="middle" font-weight="normal">Key-blocked online softmax (FlashAttention-style streaming) is not implemented.</text>
+<text x="45" y="662" font-size="16" text-anchor="start" font-weight="normal">This path has shape/scratch restrictions. Its existence does not mean full Llama always selects it.</text>
+</g></svg>

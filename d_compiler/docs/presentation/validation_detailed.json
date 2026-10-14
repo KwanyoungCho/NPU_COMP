@@ -1,0 +1,45 @@
+{
+  "status": "passed",
+  "checks": [
+    {
+      "edition": "detailed",
+      "slides": 89,
+      "pdf_pages_rendered": 89,
+      "speaker_notes": 89,
+      "replacement_glyph_pages": [],
+      "text_outside_pdf_bounds": [],
+      "files": {
+        "npu_compiler_detailed.pptx": "335d3dacf9c2b1a90c0646e5afc0932b885b8ca3012181cea31badd55eec62b5",
+        "npu_compiler_detailed.pdf": "6cd8bc316a1892e71e9d4fd17f48c725a3cbf19580e5f85d3a869a9ddcfc0908",
+        "speaker_notes_detailed.md": "61f938453283cc64398e6d996af3eee0f46c94ef64c9777c7ba74834a3d91b40"
+      }
+    },
+    {
+      "edition": "short",
+      "slides": 13,
+      "pdf_pages_rendered": 13,
+      "speaker_notes": 13,
+      "replacement_glyph_pages": [],
+      "text_outside_pdf_bounds": [],
+      "files": {
+        "npu_compiler_short.pptx": "4f3064129d4b6a9956fd0653ae87cee6c317d678ef0fb4018f9d6f5ac017cd41",
+        "npu_compiler_short.pdf": "d72c52f200e7511480b841d265cef993d9b4d0053ac4fd7830a29f97b5db3b4b",
+        "speaker_notes_short.md": "7ddcf0779dfa3a21e943e05f8d5f0c9db7f93baee3b7f188e938e41f23f4da34"
+      }
+    }
+  ],
+  "visual_review": {
+    "detailed": [
+      79
+    ],
+    "short": [
+      13
+    ],
+    "basic": [
+      46
+    ]
+  },
+  "scope": "PDF render/text bounds and PPTX reopen/notes; selected updated slides visually reviewed; native PowerPoint not tested",
+  "pdf_method": "LibreOffice headless with NanumGothic alias",
+  "compiler_or_model_executed": false
+}

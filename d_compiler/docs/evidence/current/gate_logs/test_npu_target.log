@@ -1,0 +1,4 @@
+  [PASS] target ext_dev -keys=npu -model=v09, profile v09 (8 MiB SRAM, tile 64)
+  [PASS] relax.get_pipeline("npu") resolves
+  [PASS] build -> run: cosine 1.000000, NpuExecutable(7,781 words, 19 kernels, 0.1 MiB image)
+ALL NPU TARGET (S6) TESTS PASSED

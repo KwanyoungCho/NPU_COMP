@@ -20,7 +20,7 @@ REFERENCE = HERE.parents[0] / "build" / "gemma4_layer_reference_hello.npz"
 
 
 def _assets():
-    from npu_compiler.gemma4_model import Gemma4Assets, ModelAssetError
+    from npu_compiler.assets.gemma import Gemma4Assets, ModelAssetError
     try:
         return Gemma4Assets()
     except (ModelAssetError, FileNotFoundError) as error:

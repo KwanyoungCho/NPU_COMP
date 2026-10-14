@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 
 import tvm
+from .v09_contract import NUMERIC_POLICY
 
 NPU_KEY = "npu"
 
@@ -26,6 +27,19 @@ class NpuProfile:
     lanes: int = 256               # vector lanes (longer vectors strip-mine)
     scratch_slots: int = 6         # temporaries for serializing expressions
     cell_bits: int = 32            # global memory addressing unit
+    numeric_policy: str = NUMERIC_POLICY
+    reuse_sram: bool = True       # TVM USMP lifetime reuse within each kernel
+    schedule_candidates: int = 2
+    schedule_probe_word_budget: int = 100000
+    schedule_search: str = "space"  # space, meta_schedule (ReplayFunc), or legacy
+    schedule_seed: int = 0
+    schedule_space_trials: int = 8
+    # Count failed and over-capacity candidates too. None permits exhaustive
+    # traversal until the existing legal-candidate / emitted-word limits.
+    schedule_max_attempts: int | None = 64
+    graph_search_seconds: float | None = 120.0  # additional search AFTER a legal module
+    joint_memory: bool = True
+    memory_beam_width: int = 4
 
     @property
     def sram_nibbles(self):

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "v09_asm.h"
+#include "build_identity.h"
 
 namespace npu {
 namespace {
@@ -101,6 +102,10 @@ TVM_REGISTER_GLOBAL("npu.encode_selftest").set_body_typed([]() -> NDArray {
 
 TVM_REGISTER_GLOBAL("npu.native_available").set_body_typed([]() -> bool {
   return true;
+});
+
+TVM_REGISTER_GLOBAL("npu.codegen_source_hash").set_body_typed([]() -> std::string {
+  return NPU_BUILD_SOURCE_HASH;
 });
 
 }  // namespace

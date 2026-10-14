@@ -33,16 +33,30 @@ def _writes(state, key, value):
     return True
 
 
-def eliminate_dead_stores(words):
-    """-> a shorter word stream that executes identically."""
+def eliminate_dead_stores(words, *, boundaries=None):
+    """Shorten the stream; optionally return a mapping of word boundaries.
+
+    ``boundaries`` are offsets into the original stream (including its end).
+    Tracking only requested offsets keeps memory proportional to call count,
+    rather than creating an integer map for millions of instruction words.
+    """
     out = []
+    requested = sorted(set(boundaries)) if boundaries is not None else []
+    if requested and (requested[0] < 0 or requested[-1] > len(words)):
+        raise ValueError("word boundary outside the input stream")
+    remap, boundary_index = {}, 0
     state = {}
     index, total = 0, len(words)
     while index < total:
         word = words[index]
         opcode = word & 0xFF
+        start = len(out)
         if opcode in (OP_GLOAD, OP_GSTORE):
             out.extend(words[index:index + DMA_WORDS])
+            while boundary_index < len(requested) and requested[boundary_index] <= index + DMA_WORDS:
+                boundary = requested[boundary_index]
+                remap[boundary] = start + boundary - index
+                boundary_index += 1
             index += DMA_WORDS
             continue
         keep = True
@@ -68,5 +82,11 @@ def eliminate_dead_stores(words):
                            (word >> 8) & 0xFFFF)
         if keep:
             out.append(word)
+        while boundary_index < len(requested) and requested[boundary_index] <= index + 1:
+            boundary = requested[boundary_index]
+            remap[boundary] = start + (boundary - index if keep else 0)
+            boundary_index += 1
         index += 1
-    return out
+    if not words and requested:
+        remap[0] = 0
+    return (out, remap) if boundaries is not None else out

@@ -33,6 +33,67 @@ class V09Error(RuntimeError):
         self.counters = counters or {}
 
 
+class PersistentTransport:
+    """Reuse the simulator's input files and patch only changed host inputs.
+
+    C-model execution and its mandatory full-image read/write are unchanged.
+    Atomic rename makes the last device image the next input without copying
+    immutable weights through Python on every token. This is transport reuse,
+    not a hardware latency model or an in-process simulator.
+    """
+    def __init__(self, image):
+        self.executable = build_v09_model()
+        self.temporary = tempfile.TemporaryDirectory(prefix="npu-v09-session-",
+            dir=os.environ.get("NPU_V09_TMPDIR") or None)
+        self.directory = Path(self.temporary.name)
+        array = np.ascontiguousarray(image).view(np.uint8).reshape(-1)
+        if array.size % 4:
+            raise ValueError("persistent global image must contain whole 32-bit cells")
+        self.image_bytes = array.size
+        array.tofile(self.directory / "global_memory.bin")
+        self.program = np.empty(0,dtype="<u4")
+        self.last_transfer = {}
+
+    def run(self, words, patches):
+        program = np.asarray(words,dtype="<u4")
+        if program.ndim != 1 or not len(program) or int(program[-1]) != 0xff:
+            raise ValueError("persistent program must terminate with HALT")
+        for offset, data in patches:
+            if offset < 0 or offset + np.asarray(data).nbytes > self.image_bytes:
+                raise ValueError("runtime input patch exceeds global image")
+        common = min(len(program),len(self.program))
+        changed = np.flatnonzero(program[:common] != self.program[:common])
+        first = int(changed[0]) if len(changed) else common
+        path = self.directory / "program_memory.bin"
+        with path.open("r+b" if path.exists() else "w+b") as file:
+            file.seek(first*4)
+            program[first:].tofile(file)
+            file.truncate(program.nbytes)
+        self.program = program.copy()
+        global_path = self.directory / "global_memory.bin"
+        with global_path.open("r+b") as file:
+            for offset, data in patches:
+                file.seek(offset)
+                np.ascontiguousarray(data).view(np.uint8).tofile(file)
+        proc = subprocess.run([str(self.executable)],cwd=self.directory,
+                              stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        counters = _read_counters(self.directory)
+        if proc.returncode:
+            raise V09Error(proc.stderr.decode(errors="replace").strip(),counters)
+        saved = self.directory / "saved_global_memory.bin"
+        if not saved.exists() or saved.stat().st_size != self.image_bytes:
+            raise V09Error("persistent decode requires exactly one final memory image",counters)
+        saved.replace(global_path)
+        self.last_transfer = dict(host_input_patch_bytes=sum(np.asarray(v).nbytes for _,v in patches),
+            host_program_patch_bytes=(len(program)-first)*4,
+            cmodel_image_read_bytes=self.image_bytes, cmodel_image_write_bytes=self.image_bytes,
+            host_weight_rewrite_bytes=0)
+        return np.memmap(global_path,dtype="<u4",mode="r+"),counters
+
+    def close(self):
+        self.temporary.cleanup()
+
+
 def build_v09_model(output=SOURCE_BIN):
     """Build the v09 simulator when its cached binary is stale."""
     output = Path(output).resolve()

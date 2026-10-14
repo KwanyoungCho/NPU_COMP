@@ -1,0 +1,3424 @@
+{
+  "date": "2026-09-29",
+  "status": "passed",
+  "scope": "four actual Llama 3.2 3B frontend kernels, layer-0 checkpoint weights, synthetic activations; no full-model generation",
+  "measurement": "one timing sample per mode/case; each case in fresh worker, space then meta_schedule; no hardware inference latency",
+  "total_worker_seconds": 89.69790310226381,
+  "baseline": "space: estimated-DMA ordered search",
+  "experiment": "meta_schedule: TVM ReplayFunc uniform sampling with NPU ScheduleFn",
+  "setup_timing": {
+    "description": "Setup only, two TuneContexts in one process; no candidates compiled",
+    "rows": [
+      {
+        "index": 0,
+        "construct_seconds": 5.107304651290178,
+        "pre_tuning_seconds": 7.61318951845169e-05,
+        "post_tuning_seconds": 2.092123031616211e-05
+      },
+      {
+        "index": 1,
+        "construct_seconds": 0.00017151236534118652,
+        "pre_tuning_seconds": 4.66369092464447e-05,
+        "post_tuning_seconds": 1.697055995464325e-05
+      }
+    ]
+  },
+  "limitations": [
+    "one seed (0)",
+    "same existing normalized search space and NPU rules; not EvolutionarySearch or learned cost model",
+    "shared legacy incumbent remains eligible",
+    "16 extension attempts, at most 4 legal extension candidates, 250000 emitted probe words; limits stop after a complete candidate and word cap can overshoot",
+    "512-token ordered extension found no feasible candidate within its 16 attempts; ReplayFunc extension stopped after one legal candidate on word budget",
+    "no fusion boundary search or cross-kernel SRAM residency comparison",
+    "no full-layer or full-28-layer generation; real checkpoint weights and synthetic normalized activations",
+    "MetaSchedule cold-start time included per worker; setup-only warm context timing is not a warm full compile benchmark"
+  ],
+  "cases": [
+    {
+      "status": "passed",
+      "case": "decode_gate",
+      "model": "meta-llama/Llama-3.2-3B",
+      "revision": "13afe5124825b4f3751f836b40dafda64c1ed062",
+      "checkpoint_path": "/home/chokwans99/NPU_cmodel/d_compiler/build/llama32_3b_hf",
+      "checkpoint_weights": true,
+      "activation_input": "seeded synthetic, actual layer-0 norm",
+      "end_to_end_generation": false,
+      "full_layer_executed": false,
+      "extraction": {
+        "source_function": "matmul4",
+        "entry": "decode",
+        "extents": [
+          1,
+          8192,
+          3072
+        ],
+        "model_layers": 28,
+        "exported_layers": 1,
+        "entry_unique_tasks": 41,
+        "entry_call_sites": 50
+      },
+      "profile": {
+        "model": "v09",
+        "sram_bytes": 8388608,
+        "tile": 64,
+        "lanes": 256,
+        "scratch_slots": 6,
+        "cell_bits": 32,
+        "numeric_policy": "fp16_storage_fp32_accum",
+        "reuse_sram": true,
+        "schedule_candidates": 1,
+        "schedule_probe_word_budget": 250000,
+        "schedule_search": "space",
+        "schedule_seed": 0,
+        "schedule_space_trials": 4,
+        "schedule_max_attempts": 16,
+        "graph_search_seconds": 0,
+        "joint_memory": false,
+        "memory_beam_width": 4
+      },
+      "scope": "isolated actual frontend kernels; DRAM input/output ABI; residency disabled; fixed fusion boundaries",
+      "meta_strategy": "TVM ReplayFunc; uniform configuration sampling; not evolutionary/learned",
+      "fairness": "same normalized candidate pool, shared legacy incumbent, equal attempt/legal/word caps; independent build contexts",
+      "rows": [
+        {
+          "mode": "space",
+          "compile_seconds": 4.962952172383666,
+          "statistics": {
+            "words": 47313,
+            "instructions": 46539,
+            "dma_packets": 258,
+            "dma_load_bytes": 50337804,
+            "dma_store_bytes": 16384,
+            "dma_bytes": 50354188,
+            "opcodes": {
+              "0x15": 6,
+              "0x17": 5,
+              "0x42": 6144,
+              "0x80": 27679,
+              "0x82": 5,
+              "0x88": 6,
+              "0x89": 6,
+              "0x90": 12293,
+              "0x98": 136,
+              "0xa0": 130,
+              "0xa8": 128,
+              "0xff": 1
+            },
+            "measurement": "static instruction stream; no cycle estimate",
+            "sram_peak_bytes": 899084,
+            "global_image_bytes": 50354188
+          },
+          "word_sha256": "3bbf13fdf2dfc771b65731ec0cfa6dd1c0040218d4e7b1521d5ba62febe0f361",
+          "schedules": {
+            "kernel": {
+              "kind": "matmul",
+              "extents": [
+                1,
+                8192,
+                3072
+              ],
+              "cost_model": "FP16 operand DMA per batch",
+              "attempts": [
+                {
+                  "mapping": [
+                    "A",
+                    64
+                  ],
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_size",
+                  "status": "selected",
+                  "emitted": {
+                    "words": 47308,
+                    "instructions": 46537,
+                    "dma_packets": 257,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 27679,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 129,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  },
+                  "origin": "legacy_incumbent"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 64,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_conflicts",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 56015,
+                    "instructions": 37196,
+                    "dma_packets": 6273,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 12322,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 6145,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 128,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_conflicts",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 56015,
+                    "instructions": 37196,
+                    "dma_packets": 6273,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 12322,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 6145,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 192,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_conflicts",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 56015,
+                    "instructions": 37196,
+                    "dma_packets": 6273,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 12322,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 6145,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 256,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_conflicts",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 56015,
+                    "instructions": 37196,
+                    "dma_packets": 6273,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 12322,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 6145,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                }
+              ],
+              "incumbent_search": {
+                "examined_candidates": 2,
+                "generated_candidates": 19,
+                "stop_reason": "legal_budget",
+                "attempt_limit": 16
+              },
+              "search_space": "space",
+              "generated_candidates": 1433,
+              "examined_candidates": 4,
+              "attempt_limit": 16,
+              "stop_reason": "legal_budget",
+              "legal_candidates": 4,
+              "probe_words": 224060,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": true,
+                "estimated_operand_load_bytes": 50337792,
+                "sram_peak_nibbles": 1798168,
+                "sram_allocator": "usmp.greedy_by_size",
+                "status": "selected",
+                "emitted": {
+                  "words": 47308,
+                  "instructions": 46537,
+                  "dma_packets": 257,
+                  "dma_load_bytes": 50337792,
+                  "dma_store_bytes": 16384,
+                  "dma_bytes": 50354176,
+                  "opcodes": {
+                    "0x15": 6,
+                    "0x17": 5,
+                    "0x42": 6144,
+                    "0x80": 27679,
+                    "0x82": 5,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12293,
+                    "0x98": 136,
+                    "0xa0": 129,
+                    "0xa8": 128
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings"
+            }
+          },
+          "compilation": {
+            "scope": "one build; structural recipes, costs and identical entry artifacts",
+            "elapsed_seconds": 4.936074826866388,
+            "schedule_hits": 0,
+            "schedule_misses": 1,
+            "trial_hits": 0,
+            "trial_misses": 6,
+            "cached_recipes": 1,
+            "cost_probe_hits": 0,
+            "cost_probe_misses": 0,
+            "native_fallbacks": {},
+            "native_rejections": {},
+            "entry_hits": 0,
+            "entry_misses": 0,
+            "region_hits": 0,
+            "region_misses": 0,
+            "seconds": {
+              "memory_planning": 0.01265907846391201,
+              "schedule_tir": 0.19919406063854694,
+              "schedule_sram": 0.0355437807738781,
+              "schedule_probe_codegen": 3.606675958260894,
+              "schedule_probe_peephole": 0.30119495652616024,
+              "schedule_probe_statistics": 0.11128186620771885,
+              "schedule_and_sram": 4.3267326802015305,
+              "native_codegen": 0.49796328507363796,
+              "peephole": 0.06267671100795269,
+              "dram_compaction": 0.016659555956721306
+            },
+            "self_seconds": {
+              "memory_planning": 0.01265907846391201,
+              "schedule_tir": 0.19919406063854694,
+              "schedule_sram": 0.0355437807738781,
+              "schedule_probe_codegen": 3.606675958260894,
+              "schedule_probe_peephole": 0.30119495652616024,
+              "schedule_probe_statistics": 0.11128186620771885,
+              "schedule_and_sram": 0.0728420577943325,
+              "native_codegen": 0.49796328507363796,
+              "peephole": 0.06267671100795269,
+              "dram_compaction": 0.016659555956721306
+            },
+            "phase_calls": {
+              "memory_planning": 1,
+              "schedule_tir": 6,
+              "schedule_sram": 6,
+              "schedule_probe_codegen": 5,
+              "schedule_probe_peephole": 5,
+              "schedule_probe_statistics": 5,
+              "schedule_and_sram": 1,
+              "native_codegen": 1,
+              "peephole": 1,
+              "dram_compaction": 1
+            },
+            "meta_schedule": {
+              "enabled": false
+            }
+          }
+        },
+        {
+          "mode": "meta_schedule",
+          "compile_seconds": 9.84536967240274,
+          "statistics": {
+            "words": 47313,
+            "instructions": 46539,
+            "dma_packets": 258,
+            "dma_load_bytes": 50337804,
+            "dma_store_bytes": 16384,
+            "dma_bytes": 50354188,
+            "opcodes": {
+              "0x15": 6,
+              "0x17": 5,
+              "0x42": 6144,
+              "0x80": 27679,
+              "0x82": 5,
+              "0x88": 6,
+              "0x89": 6,
+              "0x90": 12293,
+              "0x98": 136,
+              "0xa0": 130,
+              "0xa8": 128,
+              "0xff": 1
+            },
+            "measurement": "static instruction stream; no cycle estimate",
+            "sram_peak_bytes": 899084,
+            "global_image_bytes": 50354188
+          },
+          "word_sha256": "3bbf13fdf2dfc771b65731ec0cfa6dd1c0040218d4e7b1521d5ba62febe0f361",
+          "schedules": {
+            "kernel": {
+              "kind": "matmul",
+              "extents": [
+                1,
+                8192,
+                3072
+              ],
+              "cost_model": "FP16 operand DMA per batch",
+              "attempts": [
+                {
+                  "mapping": [
+                    "A",
+                    64
+                  ],
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_size",
+                  "status": "selected",
+                  "emitted": {
+                    "words": 47308,
+                    "instructions": 46537,
+                    "dma_packets": 257,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 27679,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 129,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  },
+                  "origin": "legacy_incumbent"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 128,
+                    "k_chunk": 512,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sample_index": 92,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_size",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 49868,
+                    "instructions": 47177,
+                    "dma_packets": 897,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 27679,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 769,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 512,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sample_index": 124,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_size",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 47308,
+                    "instructions": 46537,
+                    "dma_packets": 257,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 27679,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 129,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 256,
+                    "k_chunk": 256,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "k_tile",
+                    "b_at": "m_panel"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 51118080,
+                  "sample_index": 1272,
+                  "sram_peak_nibbles": 100921368,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 4096,
+                    "k_chunk": 1024,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "n_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50343936,
+                  "sample_index": 306,
+                  "sram_peak_nibbles": 1814552,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 56068,
+                    "instructions": 37249,
+                    "dma_packets": 6273,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 12,
+                      "0x17": 10,
+                      "0x42": 6144,
+                      "0x80": 12346,
+                      "0x82": 10,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12298,
+                      "0x98": 144,
+                      "0xa0": 6145,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 192,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": true,
+                  "estimated_operand_load_bytes": 50337792,
+                  "sample_index": 70,
+                  "sram_peak_nibbles": 1798168,
+                  "sram_allocator": "usmp.greedy_by_size",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 51918,
+                    "instructions": 45387,
+                    "dma_packets": 2177,
+                    "dma_load_bytes": 50337792,
+                    "dma_store_bytes": 16384,
+                    "dma_bytes": 50354176,
+                    "opcodes": {
+                      "0x15": 6,
+                      "0x17": 5,
+                      "0x42": 6144,
+                      "0x80": 24609,
+                      "0x82": 5,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12293,
+                      "0x98": 136,
+                      "0xa0": 2049,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                }
+              ],
+              "incumbent_search": {
+                "examined_candidates": 2,
+                "generated_candidates": 19,
+                "stop_reason": "legal_budget",
+                "attempt_limit": 16
+              },
+              "search_space": "meta_schedule",
+              "generated_candidates": 1433,
+              "strategy": "TVM MetaSchedule ReplayFunc",
+              "seed": 0,
+              "latency_feedback": false,
+              "examined_candidates": 5,
+              "attempt_limit": 16,
+              "stop_reason": "legal_budget",
+              "legal_candidates": 4,
+              "probe_words": 205162,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": true,
+                "estimated_operand_load_bytes": 50337792,
+                "sram_peak_nibbles": 1798168,
+                "sram_allocator": "usmp.greedy_by_size",
+                "status": "selected",
+                "emitted": {
+                  "words": 47308,
+                  "instructions": 46537,
+                  "dma_packets": 257,
+                  "dma_load_bytes": 50337792,
+                  "dma_store_bytes": 16384,
+                  "dma_bytes": 50354176,
+                  "opcodes": {
+                    "0x15": 6,
+                    "0x17": 5,
+                    "0x42": 6144,
+                    "0x80": 27679,
+                    "0x82": 5,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12293,
+                    "0x98": 136,
+                    "0xa0": 129,
+                    "0xa8": 128
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings"
+            }
+          },
+          "compilation": {
+            "scope": "one build; structural recipes, costs and identical entry artifacts",
+            "elapsed_seconds": 9.819247150793672,
+            "schedule_hits": 0,
+            "schedule_misses": 1,
+            "trial_hits": 0,
+            "trial_misses": 7,
+            "cached_recipes": 1,
+            "cost_probe_hits": 0,
+            "cost_probe_misses": 0,
+            "native_fallbacks": {},
+            "native_rejections": {},
+            "entry_hits": 0,
+            "entry_misses": 0,
+            "region_hits": 0,
+            "region_misses": 0,
+            "seconds": {
+              "memory_planning": 0.003060281276702881,
+              "schedule_tir": 0.1592718493193388,
+              "schedule_sram": 0.039850203320384026,
+              "schedule_probe_codegen": 3.4372233655303717,
+              "schedule_probe_peephole": 0.3040300998836756,
+              "schedule_probe_statistics": 0.11965933628380299,
+              "meta_schedule_generate": 0.10955641604959965,
+              "schedule_and_sram": 9.193780088797212,
+              "native_codegen": 0.520801505073905,
+              "peephole": 0.06459494680166245,
+              "dram_compaction": 0.017324399203062057
+            },
+            "self_seconds": {
+              "memory_planning": 0.003060281276702881,
+              "schedule_tir": 0.1592718493193388,
+              "schedule_sram": 0.039850203320384026,
+              "schedule_probe_codegen": 3.4372233655303717,
+              "schedule_probe_peephole": 0.3040300998836756,
+              "schedule_probe_statistics": 0.11965933628380299,
+              "meta_schedule_generate": 0.10955641604959965,
+              "schedule_and_sram": 5.024188818410039,
+              "native_codegen": 0.520801505073905,
+              "peephole": 0.06459494680166245,
+              "dram_compaction": 0.017324399203062057
+            },
+            "phase_calls": {
+              "memory_planning": 1,
+              "schedule_tir": 7,
+              "schedule_sram": 7,
+              "schedule_probe_codegen": 5,
+              "schedule_probe_peephole": 5,
+              "schedule_probe_statistics": 5,
+              "meta_schedule_generate": 5,
+              "schedule_and_sram": 1,
+              "native_codegen": 1,
+              "peephole": 1,
+              "dram_compaction": 1
+            },
+            "meta_schedule": {
+              "enabled": false
+            }
+          }
+        }
+      ],
+      "validation": [
+        {
+          "mode": "space",
+          "executed": true,
+          "seconds": 1.6555194351822138,
+          "max_abs": 7.62939453125e-06,
+          "rtol": 0.02,
+          "atol": 0.005,
+          "counters_match": true
+        },
+        {
+          "mode": "meta_schedule",
+          "same_program_as": "space",
+          "executed": false
+        }
+      ],
+      "outputs_bit_exact": true,
+      "meta_result": "equal",
+      "total_seconds": 19.12353713810444,
+      "provenance": {
+        "python": "3.11.15",
+        "packages": {
+          "numpy": "2.4.6",
+          "torch": "2.12.0+cpu",
+          "transformers": "5.12.1",
+          "safetensors": "0.8.0"
+        },
+        "tvm_version": "0.19.0",
+        "tvm_commit": "c4dc0c29ff81ddae688da24625a603da3b4a2c0e",
+        "llvm_version": "18.1.8",
+        "compiler_head": "2f0e081b45ebb4cd271c47796fc304cd10ceb67f",
+        "compiler_source_sha256": "4674f31bfc20f07552585fc1e8b0a59e41494840b27111f61687fe574a53411c",
+        "sources": {
+          "d_compiler/npu_codegen/build_identity.h": "ad92f1556c1c92bb527732209474aabddbb784ecb2d7b3ffb0990314affd2554",
+          "d_compiler/npu_codegen/codegen_v09.cc": "6936eddc4c96e7e60b06a116be516a518b3197d29a96e8d5c180b20b058c522c",
+          "d_compiler/npu_codegen/v09_asm.h": "713a2bfcdcb3b662b2421d9423bad388cc44b3e017f0f2dc17a9e38ab1fc452c",
+          "d_compiler/npu_codegen/v09_contract.h": "693fcd7ae1bcd73a070bd00214bf74d41ba30fcb525ef4cb0c955e35bc0bc2b1",
+          "d_compiler/npu_codegen/v09_isa.h": "610ca18be66c0206c05be1bb1b57c03b7f27b21e07c1f0e649325eeac4cf3264",
+          "d_compiler/npu_codegen/v09_walker.cc": "d903e45cdd05f6ef79ed3319edf93a3f13621163abee2375696018780085d631",
+          "d_compiler/npu_compiler/__init__.py": "bc81ca3d0f3a2b3cef7db62a820b82e21442e728c0b73c0474cb442b78a0efa2",
+          "d_compiler/npu_compiler/assets/__init__.py": "0da5ebb016d674e47f568fc28d0f7fd95108218940f1e830ce099da94571c474",
+          "d_compiler/npu_compiler/assets/gemma.py": "8d49ccdfc1384bae4110b5750d84146f8c7b552140bde89a3f3253a1d3091f84",
+          "d_compiler/npu_compiler/assets/gemma_ple.py": "6a5f21a66d034018b0b092acc0c93f55b0b8247e676d31a21b2d75b538be43c1",
+          "d_compiler/npu_compiler/assets/llama.py": "c46885fa85c0c9b54daa6d584c53ee9ffc86dc382c09b63a1a9fd74840a0ff7d",
+          "d_compiler/npu_compiler/assets/qwen3.py": "2980392dc3ae9c76a6d2aa04fd7ffef72735d30e5b9871ad56f3bbcb2e8a81ab",
+          "d_compiler/npu_compiler/assets/spec.py": "1f878ee996e9f5b0d0d41f2712cfcf8f5580f3ac97ad1cf81d1989ac039c479d",
+          "d_compiler/npu_compiler/device.py": "585d89466ada0e7551f4d13aafb96b67320ea774a02823affdb2f4da707ee1ff",
+          "d_compiler/npu_compiler/isa_compute.py": "7f88bc329dde2a7bf6cbcfa4599fa3d133e3f863ea687ec86fdad8a6fb1a599a",
+          "d_compiler/npu_compiler/isa_v09.py": "25990fad3b4c9209a1024a6424af682bfe96f2611b742ba2e141ff514d5e485f",
+          "d_compiler/npu_compiler/native.py": "f9e03340692fb89ddf2a75d3f8550f999734b5a6d442fa21ae9785c092f8b731",
+          "d_compiler/npu_compiler/nn_models/__init__.py": "535fcf43378bf06f189cae1c5a05362e57f32134935f08e7111703c12e201504",
+          "d_compiler/npu_compiler/nn_models/gemma.py": "df7f62b9ac4b3bc6ce8f231003a17ebbf65bddbc27efa792f65a8305aaf291af",
+          "d_compiler/npu_compiler/nn_models/hf.py": "5127270e98af60f86a2d8e01ebdaf3f34f20c511fdfe2a02ac096585a77d1036",
+          "d_compiler/npu_compiler/nn_models/llama.py": "1cd20eabe72104f11f276f7effa51cea8c774b972812f168a8f306945ddd2c6b",
+          "d_compiler/npu_compiler/nn_models/qwen3.py": "0d0974b5cfa24b96c385a35193256d6f071b3665f7fd7e79f6ce68c211dc0171",
+          "d_compiler/npu_compiler/npu_abi.py": "06319244047b7e97b35d60c800d299d8bc4c90b0a3b2e3778e834e02d5ce9eb5",
+          "d_compiler/npu_compiler/npu_accumulator.py": "e68bd8e9164ed28d99484decbff2a76f7b4f3cb4e9c65e67c3c53bc2f4a326fb",
+          "d_compiler/npu_compiler/npu_attention.py": "c952e6c0056ae831c4d87fac7461a6f7b2373f7b79ce2544ce040109b8a58221",
+          "d_compiler/npu_compiler/npu_build.py": "497b4b5bd1d3a3d3fdec0aed1c113aabf3b2114a02312d8a58431e75205b35a9",
+          "d_compiler/npu_compiler/npu_cache.py": "fcf5eca54b03da60c7e7eeac2adc706e4b404d5efa9b055cbd9a8396e67f64a0",
+          "d_compiler/npu_compiler/npu_compilation.py": "4a29b428e0a380917992d70f248f02b4264f69be2b367bfdde0fe6b4bf928853",
+          "d_compiler/npu_compiler/npu_errors.py": "df62dd34edb1e92842299ef2d91232041b224fbfee223c587c1a4f5ddcb1c76d",
+          "d_compiler/npu_compiler/npu_fusion.py": "8d087c4633ea68954661f236491c4a323d541fcac1a8bb9939902f4d2d53a395",
+          "d_compiler/npu_compiler/npu_generate.py": "0008848456f1589b8e0f0b7449298a57a11737b0946aa1a2ddb5dacbdc55ddad",
+          "d_compiler/npu_compiler/npu_graph_opt.py": "74d79b4f0617a790411f43c9216bf9bd621d55a3df2a772bcebc14900562ce22",
+          "d_compiler/npu_compiler/npu_intrin.py": "0b8e6e74ee643d37dfd0ddaa8d53238d12697e95dcf6b4b6413e0583473f5ed1",
+          "d_compiler/npu_compiler/npu_kernel.py": "882147564fd801a64a45ac55ebdf55e5adce6236340ba5499e0eb74355ae788c",
+          "d_compiler/npu_compiler/npu_legalize.py": "5a3897072b97fd9c774f7f78a2c50f06f73870065b1217205d3acc44c7b3858d",
+          "d_compiler/npu_compiler/npu_link.py": "0919c4a60a80af0a5bf5df3fc74f6daaa8ff080c0960129ab5432419f344fd85",
+          "d_compiler/npu_compiler/npu_memory_search.py": "b4a8f6718e4d4b0246ee89adeb0cdc93d16b36c52a10bed556c313f3b6ba5655",
+          "d_compiler/npu_compiler/npu_memplan.py": "db740fa78541f839293273f6759d248f16176b58e9151c7d040d6195943a3348",
+          "d_compiler/npu_compiler/npu_meta_schedule.py": "04791dabe8c3815066f996f865d18865fd0ce3788e2a2e1981b6406284c864f4",
+          "d_compiler/npu_compiler/npu_numeric.py": "5e590eaf28ecf4391b4244b7524efc6d9bfabefcfba743082b27aa379a87a1a5",
+          "d_compiler/npu_compiler/npu_provenance.py": "1f8e5fe42edaf0f9d628cabcda6eb6287e503914eb4f156434695b4a0d9eb58e",
+          "d_compiler/npu_compiler/npu_quantize.py": "5ae2da936c50d859cb357686e0257f82318ad302db79adf6175740b601289c3d",
+          "d_compiler/npu_compiler/npu_residency.py": "83af7b2dd7e29c5ad1515371326f846bf123fcc8b76ad1a560573c8c671a66b6",
+          "d_compiler/npu_compiler/npu_schedule.py": "c228c2871db1b40aae18b1480ea8a255432d7b9f0e26329bda7fca23d13f8200",
+          "d_compiler/npu_compiler/npu_schedule_space.py": "b500e9cd5aded43d6d4407692c87d6cd625f4cfbf8d628eb8ba746ee6010ac96",
+          "d_compiler/npu_compiler/npu_sram.py": "90262594121b7192434261242f472e0985bf2ee8f5daa3ea96b277a63bde0474",
+          "d_compiler/npu_compiler/npu_target.py": "ffee395d5fdbc0ce3f87cfe671a84c6d5e5214d44d4eb64394ed7eda8f1daffb",
+          "d_compiler/npu_compiler/npu_verify.py": "7f8e277794c92ac058929de28b16bd96445b362c5385c041a854b99338ebabee",
+          "d_compiler/npu_compiler/npu_views.py": "d1e74e439b902c04cd42b352685495312a1452b912b7b7d03f26e9248951c59f",
+          "d_compiler/npu_compiler/npu_w8a8.py": "4e5e4a072619c9079d05bba0ccf239c385ca08896fc4b4bddc8dd1e07e7e99b4",
+          "d_compiler/npu_compiler/npu_w8a8_intrin.py": "e465188b910ca2da1081b18463e98d5baff0485fadc4343d7ea030c5ea74083a",
+          "d_compiler/npu_compiler/npu_w8a8_schedule.py": "81816aecf064cae1f0a0b1c422af4f23af658656490947442fcb7807fe9db093",
+          "d_compiler/npu_compiler/peephole.py": "1a63d787038e52060bd4b80eaf029cf514069e34ecc5fb7af6a005720b901fe0",
+          "d_compiler/npu_compiler/tir_codegen_v09.py": "44c374d640dea30bb2da9df8ced0dbc3ecb4fc1682c9911e44abdc427c7c8db3",
+          "d_compiler/npu_compiler/tvm_pipeline.py": "52a7fc3cbf72d39dd4ee28a5df6201143f6a73f3061c8dad3fb7ece759631a7a",
+          "d_compiler/npu_compiler/v09_asm.py": "0af40ed93905ceba4803d515683783ccb4c73f6739505ae901177ae88cf09d54",
+          "d_compiler/npu_compiler/v09_contract.py": "9bae9c93275127e89a5c3b0ba606b09868d5a5644b5d98e0af697fa00fa95be2",
+          "d_compiler/npu_compiler/v09_effects.py": "b623435242447b9001acba94917f04b011b328b619391594a92b3897feca0eb6",
+          "d_compiler/npu_compiler/v09_runtime.py": "788f0444effa7f1ee3a8daafcbb09f41179e3f86a8ab9074a934063c8ce60edd",
+          "d_compiler/npu_compiler/v09_stats.py": "24e9d7051dba0f7c5734f7bbc9aa3cc0c7465fc0a17e48a8e60f5be7162fce83"
+        },
+        "contract_sha256": "7a7167f2a5353843ff911dd03cbc8e04181cb9f3b6af2f83a49a27c95342f3e9",
+        "native_path": "/home/chokwans99/NPU_cmodel/d_compiler/npu_codegen/libnpu_codegen.so",
+        "native_sha256": "b71fca2fe4d2a0a648f3a07b78ecbf81340fca0c5237894589f35361398205ee",
+        "cmodel_source_sha256": "f5a40d0040a060d105e5f0c02f1e0c8ee809d2ad4cde012ae3bb27cb36800c00"
+      },
+      "semantic_tir_sha256": "640ea0878b79bbb2075044549945a4affba924776ea01300a41931973435dccc",
+      "minimum_dense_tensor_io_bytes": 50354176,
+      "lower_bound_note": "Read every dense input once, write output once; excludes 12 runtime constant bytes. An IO lower bound, not a proof of SRAM feasibility."
+    },
+    {
+      "status": "passed",
+      "case": "prefill_gate_silu_multiply",
+      "model": "meta-llama/Llama-3.2-3B",
+      "revision": "13afe5124825b4f3751f836b40dafda64c1ed062",
+      "checkpoint_path": "/home/chokwans99/NPU_cmodel/d_compiler/build/llama32_3b_hf",
+      "checkpoint_weights": true,
+      "activation_input": "seeded synthetic, actual layer-0 norm",
+      "end_to_end_generation": false,
+      "full_layer_executed": false,
+      "extraction": {
+        "source_function": "fused_matmul11_silu1_multiply7",
+        "entry": "prefill_cache",
+        "extents": [
+          64,
+          8192,
+          3072
+        ],
+        "model_layers": 28,
+        "exported_layers": 1,
+        "entry_unique_tasks": 21,
+        "entry_call_sites": 23
+      },
+      "profile": {
+        "model": "v09",
+        "sram_bytes": 8388608,
+        "tile": 64,
+        "lanes": 256,
+        "scratch_slots": 6,
+        "cell_bits": 32,
+        "numeric_policy": "fp16_storage_fp32_accum",
+        "reuse_sram": true,
+        "schedule_candidates": 1,
+        "schedule_probe_word_budget": 250000,
+        "schedule_search": "space",
+        "schedule_seed": 0,
+        "schedule_space_trials": 4,
+        "schedule_max_attempts": 16,
+        "graph_search_seconds": 0,
+        "joint_memory": false,
+        "memory_beam_width": 4
+      },
+      "scope": "isolated actual frontend kernels; DRAM input/output ABI; residency disabled; fixed fusion boundaries",
+      "meta_strategy": "TVM ReplayFunc; uniform configuration sampling; not evolutionary/learned",
+      "fairness": "same normalized candidate pool, shared legacy incumbent, equal attempt/legal/word caps; independent build contexts",
+      "rows": [
+        {
+          "mode": "space",
+          "compile_seconds": 5.281932579353452,
+          "statistics": {
+            "words": 54942,
+            "instructions": 53781,
+            "dma_packets": 387,
+            "dma_load_bytes": 51773452,
+            "dma_store_bytes": 1048576,
+            "dma_bytes": 52822028,
+            "opcodes": {
+              "0x01": 128,
+              "0x0a": 256,
+              "0x0b": 128,
+              "0x0f": 128,
+              "0x15": 256,
+              "0x16": 128,
+              "0x42": 6144,
+              "0x80": 31492,
+              "0x82": 1,
+              "0x88": 6,
+              "0x89": 6,
+              "0x90": 13568,
+              "0x98": 1152,
+              "0xa0": 259,
+              "0xa8": 128,
+              "0xff": 1
+            },
+            "measurement": "static instruction stream; no cycle estimate",
+            "sram_peak_bytes": 933900,
+            "global_image_bytes": 52822028
+          },
+          "word_sha256": "842afee89e0c6d2075dfdec2995a4c2a63bed838226d6b83f82b437d5bc71071",
+          "schedules": {
+            "kernel": {
+              "kind": "matmul",
+              "extents": [
+                64,
+                8192,
+                3072
+              ],
+              "cost_model": "FP16 operand DMA per batch",
+              "attempts": [
+                {
+                  "mapping": [
+                    "A",
+                    64
+                  ],
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sram_peak_nibbles": 1867800,
+                  "sram_allocator": "bump",
+                  "status": "selected",
+                  "emitted": {
+                    "words": 54937,
+                    "instructions": 53779,
+                    "dma_packets": 386,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 31492,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 258,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  },
+                  "origin": "legacy_incumbent"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 64,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sram_peak_nibbles": 1097752,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 64026,
+                    "instructions": 44820,
+                    "dma_packets": 6402,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 16517,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 6274,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 128,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sram_peak_nibbles": 1097752,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 64026,
+                    "instructions": 44820,
+                    "dma_packets": 6402,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 16517,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 6274,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 192,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sram_peak_nibbles": 1097752,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 64026,
+                    "instructions": 44820,
+                    "dma_packets": 6402,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 16517,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 6274,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 256,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sram_peak_nibbles": 1097752,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 64026,
+                    "instructions": 44820,
+                    "dma_packets": 6402,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 16517,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 6274,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                }
+              ],
+              "incumbent_search": {
+                "examined_candidates": 1,
+                "generated_candidates": 18,
+                "stop_reason": "legal_budget",
+                "attempt_limit": 16
+              },
+              "search_space": "space",
+              "generated_candidates": 1433,
+              "examined_candidates": 4,
+              "attempt_limit": 16,
+              "stop_reason": "legal_budget",
+              "legal_candidates": 4,
+              "probe_words": 256104,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1867800,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 54937,
+                  "instructions": 53779,
+                  "dma_packets": 386,
+                  "dma_load_bytes": 51773440,
+                  "dma_store_bytes": 1048576,
+                  "dma_bytes": 52822016,
+                  "opcodes": {
+                    "0x01": 128,
+                    "0x0a": 256,
+                    "0x0b": 128,
+                    "0x0f": 128,
+                    "0x15": 256,
+                    "0x16": 128,
+                    "0x42": 6144,
+                    "0x80": 31492,
+                    "0x82": 1,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 13568,
+                    "0x98": 1152,
+                    "0xa0": 258,
+                    "0xa8": 128
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings"
+            }
+          },
+          "compilation": {
+            "scope": "one build; structural recipes, costs and identical entry artifacts",
+            "elapsed_seconds": 5.250938514247537,
+            "schedule_hits": 0,
+            "schedule_misses": 1,
+            "trial_hits": 0,
+            "trial_misses": 5,
+            "cached_recipes": 1,
+            "cost_probe_hits": 0,
+            "cost_probe_misses": 0,
+            "native_fallbacks": {},
+            "native_rejections": {},
+            "entry_hits": 0,
+            "entry_misses": 0,
+            "region_hits": 0,
+            "region_misses": 0,
+            "seconds": {
+              "memory_planning": 0.011908350512385368,
+              "schedule_tir": 0.24707931280136108,
+              "schedule_sram": 0.0405648835003376,
+              "schedule_probe_codegen": 3.781887136399746,
+              "schedule_probe_peephole": 0.3176377657800913,
+              "schedule_probe_statistics": 0.13290286622941494,
+              "schedule_and_sram": 4.604515068233013,
+              "native_codegen": 0.5277356617152691,
+              "peephole": 0.06657412275671959,
+              "dram_compaction": 0.01912817545235157
+            },
+            "self_seconds": {
+              "memory_planning": 0.011908350512385368,
+              "schedule_tir": 0.24707931280136108,
+              "schedule_sram": 0.0405648835003376,
+              "schedule_probe_codegen": 3.781887136399746,
+              "schedule_probe_peephole": 0.3176377657800913,
+              "schedule_probe_statistics": 0.13290286622941494,
+              "schedule_and_sram": 0.0844431035220623,
+              "native_codegen": 0.5277356617152691,
+              "peephole": 0.06657412275671959,
+              "dram_compaction": 0.01912817545235157
+            },
+            "phase_calls": {
+              "memory_planning": 1,
+              "schedule_tir": 5,
+              "schedule_sram": 5,
+              "schedule_probe_codegen": 5,
+              "schedule_probe_peephole": 5,
+              "schedule_probe_statistics": 5,
+              "schedule_and_sram": 1,
+              "native_codegen": 1,
+              "peephole": 1,
+              "dram_compaction": 1
+            },
+            "meta_schedule": {
+              "enabled": false
+            }
+          }
+        },
+        {
+          "mode": "meta_schedule",
+          "compile_seconds": 9.993915002793074,
+          "statistics": {
+            "words": 54942,
+            "instructions": 53781,
+            "dma_packets": 387,
+            "dma_load_bytes": 51773452,
+            "dma_store_bytes": 1048576,
+            "dma_bytes": 52822028,
+            "opcodes": {
+              "0x01": 128,
+              "0x0a": 256,
+              "0x0b": 128,
+              "0x0f": 128,
+              "0x15": 256,
+              "0x16": 128,
+              "0x42": 6144,
+              "0x80": 31492,
+              "0x82": 1,
+              "0x88": 6,
+              "0x89": 6,
+              "0x90": 13568,
+              "0x98": 1152,
+              "0xa0": 259,
+              "0xa8": 128,
+              "0xff": 1
+            },
+            "measurement": "static instruction stream; no cycle estimate",
+            "sram_peak_bytes": 933900,
+            "global_image_bytes": 52822028
+          },
+          "word_sha256": "842afee89e0c6d2075dfdec2995a4c2a63bed838226d6b83f82b437d5bc71071",
+          "schedules": {
+            "kernel": {
+              "kind": "matmul",
+              "extents": [
+                64,
+                8192,
+                3072
+              ],
+              "cost_model": "FP16 operand DMA per batch",
+              "attempts": [
+                {
+                  "mapping": [
+                    "A",
+                    64
+                  ],
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sram_peak_nibbles": 1867800,
+                  "sram_allocator": "bump",
+                  "status": "selected",
+                  "emitted": {
+                    "words": 54937,
+                    "instructions": 53779,
+                    "dma_packets": 386,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 31492,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 258,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  },
+                  "origin": "legacy_incumbent"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 128,
+                    "k_chunk": 512,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sample_index": 92,
+                  "sram_peak_nibbles": 1212440,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 57368,
+                    "instructions": 54290,
+                    "dma_packets": 1026,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 31363,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 898,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 512,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sample_index": 124,
+                  "sram_peak_nibbles": 1867800,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 54937,
+                    "instructions": 53779,
+                    "dma_packets": 386,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 31492,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 258,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 256,
+                    "k_chunk": 256,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "k_tile",
+                    "b_at": "m_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 100663296,
+                  "sample_index": 1272,
+                  "sram_peak_nibbles": 100974616,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 4096,
+                    "k_chunk": 1024,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "n_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51118080,
+                  "sample_index": 306,
+                  "sram_peak_nibbles": 1097752,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 64034,
+                    "instructions": 44822,
+                    "dma_packets": 6404,
+                    "dma_load_bytes": 52166656,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 53215232,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 16517,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 6276,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 192,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 50724864,
+                  "sample_index": 70,
+                  "sram_peak_nibbles": 1130520,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 60058,
+                    "instructions": 53140,
+                    "dma_packets": 2306,
+                    "dma_load_bytes": 51773440,
+                    "dma_store_bytes": 1048576,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x01": 128,
+                      "0x0a": 256,
+                      "0x0b": 128,
+                      "0x0f": 128,
+                      "0x15": 256,
+                      "0x16": 128,
+                      "0x42": 6144,
+                      "0x80": 28933,
+                      "0x82": 1,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 13568,
+                      "0x98": 1152,
+                      "0xa0": 2178,
+                      "0xa8": 128
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                }
+              ],
+              "incumbent_search": {
+                "examined_candidates": 1,
+                "generated_candidates": 18,
+                "stop_reason": "legal_budget",
+                "attempt_limit": 16
+              },
+              "search_space": "meta_schedule",
+              "generated_candidates": 1433,
+              "strategy": "TVM MetaSchedule ReplayFunc",
+              "seed": 0,
+              "latency_feedback": false,
+              "examined_candidates": 5,
+              "attempt_limit": 16,
+              "stop_reason": "legal_budget",
+              "legal_candidates": 4,
+              "probe_words": 236397,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 50724864,
+                "sram_peak_nibbles": 1867800,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 54937,
+                  "instructions": 53779,
+                  "dma_packets": 386,
+                  "dma_load_bytes": 51773440,
+                  "dma_store_bytes": 1048576,
+                  "dma_bytes": 52822016,
+                  "opcodes": {
+                    "0x01": 128,
+                    "0x0a": 256,
+                    "0x0b": 128,
+                    "0x0f": 128,
+                    "0x15": 256,
+                    "0x16": 128,
+                    "0x42": 6144,
+                    "0x80": 31492,
+                    "0x82": 1,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 13568,
+                    "0x98": 1152,
+                    "0xa0": 258,
+                    "0xa8": 128
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings"
+            }
+          },
+          "compilation": {
+            "scope": "one build; structural recipes, costs and identical entry artifacts",
+            "elapsed_seconds": 9.964116273447871,
+            "schedule_hits": 0,
+            "schedule_misses": 1,
+            "trial_hits": 0,
+            "trial_misses": 6,
+            "cached_recipes": 1,
+            "cost_probe_hits": 0,
+            "cost_probe_misses": 0,
+            "native_fallbacks": {},
+            "native_rejections": {},
+            "entry_hits": 0,
+            "entry_misses": 0,
+            "region_hits": 0,
+            "region_misses": 0,
+            "seconds": {
+              "memory_planning": 0.003234587609767914,
+              "schedule_tir": 0.19724810682237148,
+              "schedule_sram": 0.04847394675016403,
+              "schedule_probe_codegen": 3.5274965595453978,
+              "schedule_probe_peephole": 0.3211265727877617,
+              "schedule_probe_statistics": 0.13557550124824047,
+              "meta_schedule_generate": 0.12798462808132172,
+              "schedule_and_sram": 9.318392226472497,
+              "native_codegen": 0.5353134926408529,
+              "peephole": 0.06652604043483734,
+              "dram_compaction": 0.019481128081679344
+            },
+            "self_seconds": {
+              "memory_planning": 0.003234587609767914,
+              "schedule_tir": 0.19724810682237148,
+              "schedule_sram": 0.04847394675016403,
+              "schedule_probe_codegen": 3.5274965595453978,
+              "schedule_probe_peephole": 0.3211265727877617,
+              "schedule_probe_statistics": 0.13557550124824047,
+              "meta_schedule_generate": 0.12798462808132172,
+              "schedule_and_sram": 4.96048691123724,
+              "native_codegen": 0.5353134926408529,
+              "peephole": 0.06652604043483734,
+              "dram_compaction": 0.019481128081679344
+            },
+            "phase_calls": {
+              "memory_planning": 1,
+              "schedule_tir": 6,
+              "schedule_sram": 6,
+              "schedule_probe_codegen": 5,
+              "schedule_probe_peephole": 5,
+              "schedule_probe_statistics": 5,
+              "meta_schedule_generate": 5,
+              "schedule_and_sram": 1,
+              "native_codegen": 1,
+              "peephole": 1,
+              "dram_compaction": 1
+            },
+            "meta_schedule": {
+              "enabled": false
+            }
+          }
+        }
+      ],
+      "validation": [
+        {
+          "mode": "space",
+          "executed": true,
+          "seconds": 1.7517325729131699,
+          "max_abs": 0.0001220703125,
+          "rtol": 0.02,
+          "atol": 0.005,
+          "counters_match": true
+        },
+        {
+          "mode": "meta_schedule",
+          "same_program_as": "space",
+          "executed": false
+        }
+      ],
+      "outputs_bit_exact": true,
+      "meta_result": "equal",
+      "total_seconds": 19.73219035938382,
+      "provenance": {
+        "python": "3.11.15",
+        "packages": {
+          "numpy": "2.4.6",
+          "torch": "2.12.0+cpu",
+          "transformers": "5.12.1",
+          "safetensors": "0.8.0"
+        },
+        "tvm_version": "0.19.0",
+        "tvm_commit": "c4dc0c29ff81ddae688da24625a603da3b4a2c0e",
+        "llvm_version": "18.1.8",
+        "compiler_head": "2f0e081b45ebb4cd271c47796fc304cd10ceb67f",
+        "compiler_source_sha256": "4674f31bfc20f07552585fc1e8b0a59e41494840b27111f61687fe574a53411c",
+        "sources": {
+          "d_compiler/npu_codegen/build_identity.h": "ad92f1556c1c92bb527732209474aabddbb784ecb2d7b3ffb0990314affd2554",
+          "d_compiler/npu_codegen/codegen_v09.cc": "6936eddc4c96e7e60b06a116be516a518b3197d29a96e8d5c180b20b058c522c",
+          "d_compiler/npu_codegen/v09_asm.h": "713a2bfcdcb3b662b2421d9423bad388cc44b3e017f0f2dc17a9e38ab1fc452c",
+          "d_compiler/npu_codegen/v09_contract.h": "693fcd7ae1bcd73a070bd00214bf74d41ba30fcb525ef4cb0c955e35bc0bc2b1",
+          "d_compiler/npu_codegen/v09_isa.h": "610ca18be66c0206c05be1bb1b57c03b7f27b21e07c1f0e649325eeac4cf3264",
+          "d_compiler/npu_codegen/v09_walker.cc": "d903e45cdd05f6ef79ed3319edf93a3f13621163abee2375696018780085d631",
+          "d_compiler/npu_compiler/__init__.py": "bc81ca3d0f3a2b3cef7db62a820b82e21442e728c0b73c0474cb442b78a0efa2",
+          "d_compiler/npu_compiler/assets/__init__.py": "0da5ebb016d674e47f568fc28d0f7fd95108218940f1e830ce099da94571c474",
+          "d_compiler/npu_compiler/assets/gemma.py": "8d49ccdfc1384bae4110b5750d84146f8c7b552140bde89a3f3253a1d3091f84",
+          "d_compiler/npu_compiler/assets/gemma_ple.py": "6a5f21a66d034018b0b092acc0c93f55b0b8247e676d31a21b2d75b538be43c1",
+          "d_compiler/npu_compiler/assets/llama.py": "c46885fa85c0c9b54daa6d584c53ee9ffc86dc382c09b63a1a9fd74840a0ff7d",
+          "d_compiler/npu_compiler/assets/qwen3.py": "2980392dc3ae9c76a6d2aa04fd7ffef72735d30e5b9871ad56f3bbcb2e8a81ab",
+          "d_compiler/npu_compiler/assets/spec.py": "1f878ee996e9f5b0d0d41f2712cfcf8f5580f3ac97ad1cf81d1989ac039c479d",
+          "d_compiler/npu_compiler/device.py": "585d89466ada0e7551f4d13aafb96b67320ea774a02823affdb2f4da707ee1ff",
+          "d_compiler/npu_compiler/isa_compute.py": "7f88bc329dde2a7bf6cbcfa4599fa3d133e3f863ea687ec86fdad8a6fb1a599a",
+          "d_compiler/npu_compiler/isa_v09.py": "25990fad3b4c9209a1024a6424af682bfe96f2611b742ba2e141ff514d5e485f",
+          "d_compiler/npu_compiler/native.py": "f9e03340692fb89ddf2a75d3f8550f999734b5a6d442fa21ae9785c092f8b731",
+          "d_compiler/npu_compiler/nn_models/__init__.py": "535fcf43378bf06f189cae1c5a05362e57f32134935f08e7111703c12e201504",
+          "d_compiler/npu_compiler/nn_models/gemma.py": "df7f62b9ac4b3bc6ce8f231003a17ebbf65bddbc27efa792f65a8305aaf291af",
+          "d_compiler/npu_compiler/nn_models/hf.py": "5127270e98af60f86a2d8e01ebdaf3f34f20c511fdfe2a02ac096585a77d1036",
+          "d_compiler/npu_compiler/nn_models/llama.py": "1cd20eabe72104f11f276f7effa51cea8c774b972812f168a8f306945ddd2c6b",
+          "d_compiler/npu_compiler/nn_models/qwen3.py": "0d0974b5cfa24b96c385a35193256d6f071b3665f7fd7e79f6ce68c211dc0171",
+          "d_compiler/npu_compiler/npu_abi.py": "06319244047b7e97b35d60c800d299d8bc4c90b0a3b2e3778e834e02d5ce9eb5",
+          "d_compiler/npu_compiler/npu_accumulator.py": "e68bd8e9164ed28d99484decbff2a76f7b4f3cb4e9c65e67c3c53bc2f4a326fb",
+          "d_compiler/npu_compiler/npu_attention.py": "c952e6c0056ae831c4d87fac7461a6f7b2373f7b79ce2544ce040109b8a58221",
+          "d_compiler/npu_compiler/npu_build.py": "497b4b5bd1d3a3d3fdec0aed1c113aabf3b2114a02312d8a58431e75205b35a9",
+          "d_compiler/npu_compiler/npu_cache.py": "fcf5eca54b03da60c7e7eeac2adc706e4b404d5efa9b055cbd9a8396e67f64a0",
+          "d_compiler/npu_compiler/npu_compilation.py": "4a29b428e0a380917992d70f248f02b4264f69be2b367bfdde0fe6b4bf928853",
+          "d_compiler/npu_compiler/npu_errors.py": "df62dd34edb1e92842299ef2d91232041b224fbfee223c587c1a4f5ddcb1c76d",
+          "d_compiler/npu_compiler/npu_fusion.py": "8d087c4633ea68954661f236491c4a323d541fcac1a8bb9939902f4d2d53a395",
+          "d_compiler/npu_compiler/npu_generate.py": "0008848456f1589b8e0f0b7449298a57a11737b0946aa1a2ddb5dacbdc55ddad",
+          "d_compiler/npu_compiler/npu_graph_opt.py": "74d79b4f0617a790411f43c9216bf9bd621d55a3df2a772bcebc14900562ce22",
+          "d_compiler/npu_compiler/npu_intrin.py": "0b8e6e74ee643d37dfd0ddaa8d53238d12697e95dcf6b4b6413e0583473f5ed1",
+          "d_compiler/npu_compiler/npu_kernel.py": "882147564fd801a64a45ac55ebdf55e5adce6236340ba5499e0eb74355ae788c",
+          "d_compiler/npu_compiler/npu_legalize.py": "5a3897072b97fd9c774f7f78a2c50f06f73870065b1217205d3acc44c7b3858d",
+          "d_compiler/npu_compiler/npu_link.py": "0919c4a60a80af0a5bf5df3fc74f6daaa8ff080c0960129ab5432419f344fd85",
+          "d_compiler/npu_compiler/npu_memory_search.py": "b4a8f6718e4d4b0246ee89adeb0cdc93d16b36c52a10bed556c313f3b6ba5655",
+          "d_compiler/npu_compiler/npu_memplan.py": "db740fa78541f839293273f6759d248f16176b58e9151c7d040d6195943a3348",
+          "d_compiler/npu_compiler/npu_meta_schedule.py": "04791dabe8c3815066f996f865d18865fd0ce3788e2a2e1981b6406284c864f4",
+          "d_compiler/npu_compiler/npu_numeric.py": "5e590eaf28ecf4391b4244b7524efc6d9bfabefcfba743082b27aa379a87a1a5",
+          "d_compiler/npu_compiler/npu_provenance.py": "1f8e5fe42edaf0f9d628cabcda6eb6287e503914eb4f156434695b4a0d9eb58e",
+          "d_compiler/npu_compiler/npu_quantize.py": "5ae2da936c50d859cb357686e0257f82318ad302db79adf6175740b601289c3d",
+          "d_compiler/npu_compiler/npu_residency.py": "83af7b2dd7e29c5ad1515371326f846bf123fcc8b76ad1a560573c8c671a66b6",
+          "d_compiler/npu_compiler/npu_schedule.py": "c228c2871db1b40aae18b1480ea8a255432d7b9f0e26329bda7fca23d13f8200",
+          "d_compiler/npu_compiler/npu_schedule_space.py": "b500e9cd5aded43d6d4407692c87d6cd625f4cfbf8d628eb8ba746ee6010ac96",
+          "d_compiler/npu_compiler/npu_sram.py": "90262594121b7192434261242f472e0985bf2ee8f5daa3ea96b277a63bde0474",
+          "d_compiler/npu_compiler/npu_target.py": "ffee395d5fdbc0ce3f87cfe671a84c6d5e5214d44d4eb64394ed7eda8f1daffb",
+          "d_compiler/npu_compiler/npu_verify.py": "7f8e277794c92ac058929de28b16bd96445b362c5385c041a854b99338ebabee",
+          "d_compiler/npu_compiler/npu_views.py": "d1e74e439b902c04cd42b352685495312a1452b912b7b7d03f26e9248951c59f",
+          "d_compiler/npu_compiler/npu_w8a8.py": "4e5e4a072619c9079d05bba0ccf239c385ca08896fc4b4bddc8dd1e07e7e99b4",
+          "d_compiler/npu_compiler/npu_w8a8_intrin.py": "e465188b910ca2da1081b18463e98d5baff0485fadc4343d7ea030c5ea74083a",
+          "d_compiler/npu_compiler/npu_w8a8_schedule.py": "81816aecf064cae1f0a0b1c422af4f23af658656490947442fcb7807fe9db093",
+          "d_compiler/npu_compiler/peephole.py": "1a63d787038e52060bd4b80eaf029cf514069e34ecc5fb7af6a005720b901fe0",
+          "d_compiler/npu_compiler/tir_codegen_v09.py": "44c374d640dea30bb2da9df8ced0dbc3ecb4fc1682c9911e44abdc427c7c8db3",
+          "d_compiler/npu_compiler/tvm_pipeline.py": "52a7fc3cbf72d39dd4ee28a5df6201143f6a73f3061c8dad3fb7ece759631a7a",
+          "d_compiler/npu_compiler/v09_asm.py": "0af40ed93905ceba4803d515683783ccb4c73f6739505ae901177ae88cf09d54",
+          "d_compiler/npu_compiler/v09_contract.py": "9bae9c93275127e89a5c3b0ba606b09868d5a5644b5d98e0af697fa00fa95be2",
+          "d_compiler/npu_compiler/v09_effects.py": "b623435242447b9001acba94917f04b011b328b619391594a92b3897feca0eb6",
+          "d_compiler/npu_compiler/v09_runtime.py": "788f0444effa7f1ee3a8daafcbb09f41179e3f86a8ab9074a934063c8ce60edd",
+          "d_compiler/npu_compiler/v09_stats.py": "24e9d7051dba0f7c5734f7bbc9aa3cc0c7465fc0a17e48a8e60f5be7162fce83"
+        },
+        "contract_sha256": "7a7167f2a5353843ff911dd03cbc8e04181cb9f3b6af2f83a49a27c95342f3e9",
+        "native_path": "/home/chokwans99/NPU_cmodel/d_compiler/npu_codegen/libnpu_codegen.so",
+        "native_sha256": "b71fca2fe4d2a0a648f3a07b78ecbf81340fca0c5237894589f35361398205ee",
+        "cmodel_source_sha256": "f5a40d0040a060d105e5f0c02f1e0c8ee809d2ad4cde012ae3bb27cb36800c00"
+      },
+      "semantic_tir_sha256": "1aae8ed704d2fa0d01b940bf37ecda36ead63850ae7e92139a825d4038530232",
+      "minimum_dense_tensor_io_bytes": 52822016,
+      "lower_bound_note": "Read every dense input once, write output once; excludes 12 runtime constant bytes. An IO lower bound, not a proof of SRAM feasibility."
+    },
+    {
+      "status": "passed",
+      "case": "prefill_down",
+      "model": "meta-llama/Llama-3.2-3B",
+      "revision": "13afe5124825b4f3751f836b40dafda64c1ed062",
+      "checkpoint_path": "/home/chokwans99/NPU_cmodel/d_compiler/build/llama32_3b_hf",
+      "checkpoint_weights": true,
+      "activation_input": "seeded synthetic, actual layer-0 norm",
+      "end_to_end_generation": false,
+      "full_layer_executed": false,
+      "extraction": {
+        "source_function": "matmul12",
+        "entry": "prefill_cache",
+        "extents": [
+          64,
+          3072,
+          8192
+        ],
+        "model_layers": 28,
+        "exported_layers": 1,
+        "entry_unique_tasks": 40,
+        "entry_call_sites": 52
+      },
+      "profile": {
+        "model": "v09",
+        "sram_bytes": 8388608,
+        "tile": 64,
+        "lanes": 256,
+        "scratch_slots": 6,
+        "cell_bits": 32,
+        "numeric_policy": "fp16_storage_fp32_accum",
+        "reuse_sram": true,
+        "schedule_candidates": 1,
+        "schedule_probe_word_budget": 250000,
+        "schedule_search": "space",
+        "schedule_seed": 0,
+        "schedule_space_trials": 4,
+        "schedule_max_attempts": 16,
+        "graph_search_seconds": 0,
+        "joint_memory": false,
+        "memory_beam_width": 4
+      },
+      "scope": "isolated actual frontend kernels; DRAM input/output ABI; residency disabled; fixed fusion boundaries",
+      "meta_strategy": "TVM ReplayFunc; uniform configuration sampling; not evolutionary/learned",
+      "fairness": "same normalized candidate pool, shared legacy incumbent, equal attempt/legal/word caps; independent build contexts",
+      "rows": [
+        {
+          "mode": "space",
+          "compile_seconds": 4.7314574755728245,
+          "statistics": {
+            "words": 46651,
+            "instructions": 46345,
+            "dma_packets": 102,
+            "dma_load_bytes": 51380236,
+            "dma_store_bytes": 393216,
+            "dma_bytes": 51773452,
+            "opcodes": {
+              "0x42": 6144,
+              "0x80": 27750,
+              "0x88": 6,
+              "0x89": 6,
+              "0x90": 12288,
+              "0x98": 48,
+              "0xa0": 54,
+              "0xa8": 48,
+              "0xff": 1
+            },
+            "measurement": "static instruction stream; no cycle estimate",
+            "sram_peak_bytes": 2203660,
+            "global_image_bytes": 51773452
+          },
+          "word_sha256": "eeac7ea1b534ff49a88f1df8768cb8af8d8e941ffae78f5432e1cae07aceeb2d",
+          "schedules": {
+            "kernel": {
+              "kind": "matmul",
+              "extents": [
+                64,
+                3072,
+                8192
+              ],
+              "cost_model": "FP16 operand DMA per batch",
+              "attempts": [
+                {
+                  "mapping": [
+                    "A",
+                    64
+                  ],
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sram_peak_nibbles": 4407320,
+                  "sram_allocator": "bump",
+                  "status": "selected",
+                  "emitted": {
+                    "words": 46646,
+                    "instructions": 46343,
+                    "dma_packets": 101,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 27750,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 53,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  },
+                  "origin": "legacy_incumbent"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 64,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sram_peak_nibbles": 2326552,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 55578,
+                    "instructions": 36987,
+                    "dma_packets": 6197,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 12298,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 6149,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 128,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sram_peak_nibbles": 2326552,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 55578,
+                    "instructions": 36987,
+                    "dma_packets": 6197,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 12298,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 6149,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 256,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sram_peak_nibbles": 2326552,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 55578,
+                    "instructions": 36987,
+                    "dma_packets": 6197,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 12298,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 6149,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 64,
+                    "k_chunk": 512,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sram_peak_nibbles": 2326552,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 55578,
+                    "instructions": 36987,
+                    "dma_packets": 6197,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 12298,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 6149,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                }
+              ],
+              "incumbent_search": {
+                "examined_candidates": 1,
+                "generated_candidates": 22,
+                "stop_reason": "legal_budget",
+                "attempt_limit": 16
+              },
+              "search_space": "space",
+              "generated_candidates": 1433,
+              "examined_candidates": 4,
+              "attempt_limit": 16,
+              "stop_reason": "legal_budget",
+              "legal_candidates": 4,
+              "probe_words": 222312,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 51380224,
+                "sram_peak_nibbles": 4407320,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 46646,
+                  "instructions": 46343,
+                  "dma_packets": 101,
+                  "dma_load_bytes": 51380224,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 51773440,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 27750,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 53,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings"
+            }
+          },
+          "compilation": {
+            "scope": "one build; structural recipes, costs and identical entry artifacts",
+            "elapsed_seconds": 4.7052119839936495,
+            "schedule_hits": 0,
+            "schedule_misses": 1,
+            "trial_hits": 0,
+            "trial_misses": 5,
+            "cached_recipes": 1,
+            "cost_probe_hits": 0,
+            "cost_probe_misses": 0,
+            "native_fallbacks": {},
+            "native_rejections": {},
+            "entry_hits": 0,
+            "entry_misses": 0,
+            "region_hits": 0,
+            "region_misses": 0,
+            "seconds": {
+              "memory_planning": 0.012230761349201202,
+              "schedule_tir": 0.14750984869897366,
+              "schedule_sram": 0.022850345820188522,
+              "schedule_probe_codegen": 3.478608600795269,
+              "schedule_probe_peephole": 0.2958112098276615,
+              "schedule_probe_statistics": 0.11180433630943298,
+              "schedule_and_sram": 4.125905342400074,
+              "native_codegen": 0.4697354193776846,
+              "peephole": 0.06215938925743103,
+              "dram_compaction": 0.01730494201183319
+            },
+            "self_seconds": {
+              "memory_planning": 0.012230761349201202,
+              "schedule_tir": 0.14750984869897366,
+              "schedule_sram": 0.022850345820188522,
+              "schedule_probe_codegen": 3.478608600795269,
+              "schedule_probe_peephole": 0.2958112098276615,
+              "schedule_probe_statistics": 0.11180433630943298,
+              "schedule_and_sram": 0.06932100094854832,
+              "native_codegen": 0.4697354193776846,
+              "peephole": 0.06215938925743103,
+              "dram_compaction": 0.01730494201183319
+            },
+            "phase_calls": {
+              "memory_planning": 1,
+              "schedule_tir": 5,
+              "schedule_sram": 5,
+              "schedule_probe_codegen": 5,
+              "schedule_probe_peephole": 5,
+              "schedule_probe_statistics": 5,
+              "schedule_and_sram": 1,
+              "native_codegen": 1,
+              "peephole": 1,
+              "dram_compaction": 1
+            },
+            "meta_schedule": {
+              "enabled": false
+            }
+          }
+        },
+        {
+          "mode": "meta_schedule",
+          "compile_seconds": 9.545073313638568,
+          "statistics": {
+            "words": 46651,
+            "instructions": 46345,
+            "dma_packets": 102,
+            "dma_load_bytes": 51380236,
+            "dma_store_bytes": 393216,
+            "dma_bytes": 51773452,
+            "opcodes": {
+              "0x42": 6144,
+              "0x80": 27750,
+              "0x88": 6,
+              "0x89": 6,
+              "0x90": 12288,
+              "0x98": 48,
+              "0xa0": 54,
+              "0xa8": 48,
+              "0xff": 1
+            },
+            "measurement": "static instruction stream; no cycle estimate",
+            "sram_peak_bytes": 2203660,
+            "global_image_bytes": 51773452
+          },
+          "word_sha256": "eeac7ea1b534ff49a88f1df8768cb8af8d8e941ffae78f5432e1cae07aceeb2d",
+          "schedules": {
+            "kernel": {
+              "kind": "matmul",
+              "extents": [
+                64,
+                3072,
+                8192
+              ],
+              "cost_model": "FP16 operand DMA per batch",
+              "attempts": [
+                {
+                  "mapping": [
+                    "A",
+                    64
+                  ],
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sram_peak_nibbles": 4407320,
+                  "sram_allocator": "bump",
+                  "status": "selected",
+                  "emitted": {
+                    "words": 46646,
+                    "instructions": 46343,
+                    "dma_packets": 101,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 27750,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 53,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  },
+                  "origin": "legacy_incumbent"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 192,
+                    "k_chunk": 1024,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sample_index": 92,
+                  "sram_peak_nibbles": 2572312,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 47894,
+                    "instructions": 46583,
+                    "dma_packets": 437,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 27654,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 389,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 128,
+                    "k_chunk": 64,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sample_index": 124,
+                  "sram_peak_nibbles": 4407320,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 46646,
+                    "instructions": 46343,
+                    "dma_packets": 101,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 27750,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 53,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 192,
+                    "k_chunk": 2048,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "k_tile",
+                    "b_at": "m_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 100663296,
+                  "sample_index": 1272,
+                  "sram_peak_nibbles": 100892696,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 1536,
+                    "k_chunk": 128,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "n_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 52428800,
+                  "sample_index": 306,
+                  "sram_peak_nibbles": 2342936,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 55786,
+                    "instructions": 46396,
+                    "dma_packets": 3130,
+                    "dma_load_bytes": 52428800,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 52822016,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 24774,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 3082,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                },
+                {
+                  "mapping": {
+                    "m_panel": 64,
+                    "n_panel": 1024,
+                    "k_chunk": 128,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "k_group"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 51380224,
+                  "sample_index": 70,
+                  "sram_peak_nibbles": 2342936,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 55766,
+                    "instructions": 46391,
+                    "dma_packets": 3125,
+                    "dma_load_bytes": 51380224,
+                    "dma_store_bytes": 393216,
+                    "dma_bytes": 51773440,
+                    "opcodes": {
+                      "0x42": 6144,
+                      "0x80": 24774,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 12288,
+                      "0x98": 48,
+                      "0xa0": 3077,
+                      "0xa8": 48
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                }
+              ],
+              "incumbent_search": {
+                "examined_candidates": 1,
+                "generated_candidates": 22,
+                "stop_reason": "legal_budget",
+                "attempt_limit": 16
+              },
+              "search_space": "meta_schedule",
+              "generated_candidates": 1433,
+              "strategy": "TVM MetaSchedule ReplayFunc",
+              "seed": 0,
+              "latency_feedback": false,
+              "examined_candidates": 5,
+              "attempt_limit": 16,
+              "stop_reason": "legal_budget",
+              "legal_candidates": 4,
+              "probe_words": 206092,
+              "selected": {
+                "mapping": [
+                  "A",
+                  64
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 51380224,
+                "sram_peak_nibbles": 4407320,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 46646,
+                  "instructions": 46343,
+                  "dma_packets": 101,
+                  "dma_load_bytes": 51380224,
+                  "dma_store_bytes": 393216,
+                  "dma_bytes": 51773440,
+                  "opcodes": {
+                    "0x42": 6144,
+                    "0x80": 27750,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 12288,
+                    "0x98": 48,
+                    "0xa0": 53,
+                    "0xa8": 48
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings"
+            }
+          },
+          "compilation": {
+            "scope": "one build; structural recipes, costs and identical entry artifacts",
+            "elapsed_seconds": 9.51932674832642,
+            "schedule_hits": 0,
+            "schedule_misses": 1,
+            "trial_hits": 0,
+            "trial_misses": 6,
+            "cached_recipes": 1,
+            "cost_probe_hits": 0,
+            "cost_probe_misses": 0,
+            "native_fallbacks": {},
+            "native_rejections": {},
+            "entry_hits": 0,
+            "entry_misses": 0,
+            "region_hits": 0,
+            "region_misses": 0,
+            "seconds": {
+              "memory_planning": 0.002912849187850952,
+              "schedule_tir": 0.11220128834247589,
+              "schedule_sram": 0.02705472521483898,
+              "schedule_probe_codegen": 3.3611826859414577,
+              "schedule_probe_peephole": 0.30069174617528915,
+              "schedule_probe_statistics": 0.1229778304696083,
+              "meta_schedule_generate": 0.09709725715219975,
+              "schedule_and_sram": 8.93732400611043,
+              "native_codegen": 0.4825427923351526,
+              "peephole": 0.06223289109766483,
+              "dram_compaction": 0.016594385728240013
+            },
+            "self_seconds": {
+              "memory_planning": 0.002912849187850952,
+              "schedule_tir": 0.11220128834247589,
+              "schedule_sram": 0.02705472521483898,
+              "schedule_probe_codegen": 3.3611826859414577,
+              "schedule_probe_peephole": 0.30069174617528915,
+              "schedule_probe_statistics": 0.1229778304696083,
+              "meta_schedule_generate": 0.09709725715219975,
+              "schedule_and_sram": 4.91611847281456,
+              "native_codegen": 0.4825427923351526,
+              "peephole": 0.06223289109766483,
+              "dram_compaction": 0.016594385728240013
+            },
+            "phase_calls": {
+              "memory_planning": 1,
+              "schedule_tir": 6,
+              "schedule_sram": 6,
+              "schedule_probe_codegen": 5,
+              "schedule_probe_peephole": 5,
+              "schedule_probe_statistics": 5,
+              "meta_schedule_generate": 5,
+              "schedule_and_sram": 1,
+              "native_codegen": 1,
+              "peephole": 1,
+              "dram_compaction": 1
+            },
+            "meta_schedule": {
+              "enabled": false
+            }
+          }
+        }
+      ],
+      "validation": [
+        {
+          "mode": "space",
+          "executed": true,
+          "seconds": 1.650279564782977,
+          "max_abs": 3.0517578125e-05,
+          "rtol": 0.02,
+          "atol": 0.005,
+          "counters_match": true
+        },
+        {
+          "mode": "meta_schedule",
+          "same_program_as": "space",
+          "executed": false
+        }
+      ],
+      "outputs_bit_exact": true,
+      "meta_result": "equal",
+      "total_seconds": 18.933612011373043,
+      "provenance": {
+        "python": "3.11.15",
+        "packages": {
+          "numpy": "2.4.6",
+          "torch": "2.12.0+cpu",
+          "transformers": "5.12.1",
+          "safetensors": "0.8.0"
+        },
+        "tvm_version": "0.19.0",
+        "tvm_commit": "c4dc0c29ff81ddae688da24625a603da3b4a2c0e",
+        "llvm_version": "18.1.8",
+        "compiler_head": "2f0e081b45ebb4cd271c47796fc304cd10ceb67f",
+        "compiler_source_sha256": "4674f31bfc20f07552585fc1e8b0a59e41494840b27111f61687fe574a53411c",
+        "sources": {
+          "d_compiler/npu_codegen/build_identity.h": "ad92f1556c1c92bb527732209474aabddbb784ecb2d7b3ffb0990314affd2554",
+          "d_compiler/npu_codegen/codegen_v09.cc": "6936eddc4c96e7e60b06a116be516a518b3197d29a96e8d5c180b20b058c522c",
+          "d_compiler/npu_codegen/v09_asm.h": "713a2bfcdcb3b662b2421d9423bad388cc44b3e017f0f2dc17a9e38ab1fc452c",
+          "d_compiler/npu_codegen/v09_contract.h": "693fcd7ae1bcd73a070bd00214bf74d41ba30fcb525ef4cb0c955e35bc0bc2b1",
+          "d_compiler/npu_codegen/v09_isa.h": "610ca18be66c0206c05be1bb1b57c03b7f27b21e07c1f0e649325eeac4cf3264",
+          "d_compiler/npu_codegen/v09_walker.cc": "d903e45cdd05f6ef79ed3319edf93a3f13621163abee2375696018780085d631",
+          "d_compiler/npu_compiler/__init__.py": "bc81ca3d0f3a2b3cef7db62a820b82e21442e728c0b73c0474cb442b78a0efa2",
+          "d_compiler/npu_compiler/assets/__init__.py": "0da5ebb016d674e47f568fc28d0f7fd95108218940f1e830ce099da94571c474",
+          "d_compiler/npu_compiler/assets/gemma.py": "8d49ccdfc1384bae4110b5750d84146f8c7b552140bde89a3f3253a1d3091f84",
+          "d_compiler/npu_compiler/assets/gemma_ple.py": "6a5f21a66d034018b0b092acc0c93f55b0b8247e676d31a21b2d75b538be43c1",
+          "d_compiler/npu_compiler/assets/llama.py": "c46885fa85c0c9b54daa6d584c53ee9ffc86dc382c09b63a1a9fd74840a0ff7d",
+          "d_compiler/npu_compiler/assets/qwen3.py": "2980392dc3ae9c76a6d2aa04fd7ffef72735d30e5b9871ad56f3bbcb2e8a81ab",
+          "d_compiler/npu_compiler/assets/spec.py": "1f878ee996e9f5b0d0d41f2712cfcf8f5580f3ac97ad1cf81d1989ac039c479d",
+          "d_compiler/npu_compiler/device.py": "585d89466ada0e7551f4d13aafb96b67320ea774a02823affdb2f4da707ee1ff",
+          "d_compiler/npu_compiler/isa_compute.py": "7f88bc329dde2a7bf6cbcfa4599fa3d133e3f863ea687ec86fdad8a6fb1a599a",
+          "d_compiler/npu_compiler/isa_v09.py": "25990fad3b4c9209a1024a6424af682bfe96f2611b742ba2e141ff514d5e485f",
+          "d_compiler/npu_compiler/native.py": "f9e03340692fb89ddf2a75d3f8550f999734b5a6d442fa21ae9785c092f8b731",
+          "d_compiler/npu_compiler/nn_models/__init__.py": "535fcf43378bf06f189cae1c5a05362e57f32134935f08e7111703c12e201504",
+          "d_compiler/npu_compiler/nn_models/gemma.py": "df7f62b9ac4b3bc6ce8f231003a17ebbf65bddbc27efa792f65a8305aaf291af",
+          "d_compiler/npu_compiler/nn_models/hf.py": "5127270e98af60f86a2d8e01ebdaf3f34f20c511fdfe2a02ac096585a77d1036",
+          "d_compiler/npu_compiler/nn_models/llama.py": "1cd20eabe72104f11f276f7effa51cea8c774b972812f168a8f306945ddd2c6b",
+          "d_compiler/npu_compiler/nn_models/qwen3.py": "0d0974b5cfa24b96c385a35193256d6f071b3665f7fd7e79f6ce68c211dc0171",
+          "d_compiler/npu_compiler/npu_abi.py": "06319244047b7e97b35d60c800d299d8bc4c90b0a3b2e3778e834e02d5ce9eb5",
+          "d_compiler/npu_compiler/npu_accumulator.py": "e68bd8e9164ed28d99484decbff2a76f7b4f3cb4e9c65e67c3c53bc2f4a326fb",
+          "d_compiler/npu_compiler/npu_attention.py": "c952e6c0056ae831c4d87fac7461a6f7b2373f7b79ce2544ce040109b8a58221",
+          "d_compiler/npu_compiler/npu_build.py": "497b4b5bd1d3a3d3fdec0aed1c113aabf3b2114a02312d8a58431e75205b35a9",
+          "d_compiler/npu_compiler/npu_cache.py": "fcf5eca54b03da60c7e7eeac2adc706e4b404d5efa9b055cbd9a8396e67f64a0",
+          "d_compiler/npu_compiler/npu_compilation.py": "4a29b428e0a380917992d70f248f02b4264f69be2b367bfdde0fe6b4bf928853",
+          "d_compiler/npu_compiler/npu_errors.py": "df62dd34edb1e92842299ef2d91232041b224fbfee223c587c1a4f5ddcb1c76d",
+          "d_compiler/npu_compiler/npu_fusion.py": "8d087c4633ea68954661f236491c4a323d541fcac1a8bb9939902f4d2d53a395",
+          "d_compiler/npu_compiler/npu_generate.py": "0008848456f1589b8e0f0b7449298a57a11737b0946aa1a2ddb5dacbdc55ddad",
+          "d_compiler/npu_compiler/npu_graph_opt.py": "74d79b4f0617a790411f43c9216bf9bd621d55a3df2a772bcebc14900562ce22",
+          "d_compiler/npu_compiler/npu_intrin.py": "0b8e6e74ee643d37dfd0ddaa8d53238d12697e95dcf6b4b6413e0583473f5ed1",
+          "d_compiler/npu_compiler/npu_kernel.py": "882147564fd801a64a45ac55ebdf55e5adce6236340ba5499e0eb74355ae788c",
+          "d_compiler/npu_compiler/npu_legalize.py": "5a3897072b97fd9c774f7f78a2c50f06f73870065b1217205d3acc44c7b3858d",
+          "d_compiler/npu_compiler/npu_link.py": "0919c4a60a80af0a5bf5df3fc74f6daaa8ff080c0960129ab5432419f344fd85",
+          "d_compiler/npu_compiler/npu_memory_search.py": "b4a8f6718e4d4b0246ee89adeb0cdc93d16b36c52a10bed556c313f3b6ba5655",
+          "d_compiler/npu_compiler/npu_memplan.py": "db740fa78541f839293273f6759d248f16176b58e9151c7d040d6195943a3348",
+          "d_compiler/npu_compiler/npu_meta_schedule.py": "04791dabe8c3815066f996f865d18865fd0ce3788e2a2e1981b6406284c864f4",
+          "d_compiler/npu_compiler/npu_numeric.py": "5e590eaf28ecf4391b4244b7524efc6d9bfabefcfba743082b27aa379a87a1a5",
+          "d_compiler/npu_compiler/npu_provenance.py": "1f8e5fe42edaf0f9d628cabcda6eb6287e503914eb4f156434695b4a0d9eb58e",
+          "d_compiler/npu_compiler/npu_quantize.py": "5ae2da936c50d859cb357686e0257f82318ad302db79adf6175740b601289c3d",
+          "d_compiler/npu_compiler/npu_residency.py": "83af7b2dd7e29c5ad1515371326f846bf123fcc8b76ad1a560573c8c671a66b6",
+          "d_compiler/npu_compiler/npu_schedule.py": "c228c2871db1b40aae18b1480ea8a255432d7b9f0e26329bda7fca23d13f8200",
+          "d_compiler/npu_compiler/npu_schedule_space.py": "b500e9cd5aded43d6d4407692c87d6cd625f4cfbf8d628eb8ba746ee6010ac96",
+          "d_compiler/npu_compiler/npu_sram.py": "90262594121b7192434261242f472e0985bf2ee8f5daa3ea96b277a63bde0474",
+          "d_compiler/npu_compiler/npu_target.py": "ffee395d5fdbc0ce3f87cfe671a84c6d5e5214d44d4eb64394ed7eda8f1daffb",
+          "d_compiler/npu_compiler/npu_verify.py": "7f8e277794c92ac058929de28b16bd96445b362c5385c041a854b99338ebabee",
+          "d_compiler/npu_compiler/npu_views.py": "d1e74e439b902c04cd42b352685495312a1452b912b7b7d03f26e9248951c59f",
+          "d_compiler/npu_compiler/npu_w8a8.py": "4e5e4a072619c9079d05bba0ccf239c385ca08896fc4b4bddc8dd1e07e7e99b4",
+          "d_compiler/npu_compiler/npu_w8a8_intrin.py": "e465188b910ca2da1081b18463e98d5baff0485fadc4343d7ea030c5ea74083a",
+          "d_compiler/npu_compiler/npu_w8a8_schedule.py": "81816aecf064cae1f0a0b1c422af4f23af658656490947442fcb7807fe9db093",
+          "d_compiler/npu_compiler/peephole.py": "1a63d787038e52060bd4b80eaf029cf514069e34ecc5fb7af6a005720b901fe0",
+          "d_compiler/npu_compiler/tir_codegen_v09.py": "44c374d640dea30bb2da9df8ced0dbc3ecb4fc1682c9911e44abdc427c7c8db3",
+          "d_compiler/npu_compiler/tvm_pipeline.py": "52a7fc3cbf72d39dd4ee28a5df6201143f6a73f3061c8dad3fb7ece759631a7a",
+          "d_compiler/npu_compiler/v09_asm.py": "0af40ed93905ceba4803d515683783ccb4c73f6739505ae901177ae88cf09d54",
+          "d_compiler/npu_compiler/v09_contract.py": "9bae9c93275127e89a5c3b0ba606b09868d5a5644b5d98e0af697fa00fa95be2",
+          "d_compiler/npu_compiler/v09_effects.py": "b623435242447b9001acba94917f04b011b328b619391594a92b3897feca0eb6",
+          "d_compiler/npu_compiler/v09_runtime.py": "788f0444effa7f1ee3a8daafcbb09f41179e3f86a8ab9074a934063c8ce60edd",
+          "d_compiler/npu_compiler/v09_stats.py": "24e9d7051dba0f7c5734f7bbc9aa3cc0c7465fc0a17e48a8e60f5be7162fce83"
+        },
+        "contract_sha256": "7a7167f2a5353843ff911dd03cbc8e04181cb9f3b6af2f83a49a27c95342f3e9",
+        "native_path": "/home/chokwans99/NPU_cmodel/d_compiler/npu_codegen/libnpu_codegen.so",
+        "native_sha256": "b71fca2fe4d2a0a648f3a07b78ecbf81340fca0c5237894589f35361398205ee",
+        "cmodel_source_sha256": "f5a40d0040a060d105e5f0c02f1e0c8ee809d2ad4cde012ae3bb27cb36800c00"
+      },
+      "semantic_tir_sha256": "94ea95dc7a39fd5b45c5018cf5381374536bd8a880c82bd468787fdbd45491dd",
+      "minimum_dense_tensor_io_bytes": 51773440,
+      "lower_bound_note": "Read every dense input once, write output once; excludes 12 runtime constant bytes. An IO lower bound, not a proof of SRAM feasibility."
+    },
+    {
+      "status": "passed",
+      "case": "prefill_down_512",
+      "model": "meta-llama/Llama-3.2-3B",
+      "revision": "13afe5124825b4f3751f836b40dafda64c1ed062",
+      "checkpoint_path": "/home/chokwans99/NPU_cmodel/d_compiler/build/llama32_3b_hf",
+      "checkpoint_weights": true,
+      "activation_input": "seeded synthetic, actual layer-0 norm",
+      "end_to_end_generation": false,
+      "full_layer_executed": false,
+      "extraction": {
+        "source_function": "matmul12",
+        "entry": "prefill_cache",
+        "extents": [
+          512,
+          3072,
+          8192
+        ],
+        "model_layers": 28,
+        "exported_layers": 1,
+        "entry_unique_tasks": 40,
+        "entry_call_sites": 52
+      },
+      "profile": {
+        "model": "v09",
+        "sram_bytes": 8388608,
+        "tile": 64,
+        "lanes": 256,
+        "scratch_slots": 6,
+        "cell_bits": 32,
+        "numeric_policy": "fp16_storage_fp32_accum",
+        "reuse_sram": true,
+        "schedule_candidates": 1,
+        "schedule_probe_word_budget": 250000,
+        "schedule_search": "space",
+        "schedule_seed": 0,
+        "schedule_space_trials": 4,
+        "schedule_max_attempts": 16,
+        "graph_search_seconds": 0,
+        "joint_memory": false,
+        "memory_beam_width": 4
+      },
+      "scope": "isolated actual frontend kernels; DRAM input/output ABI; residency disabled; fixed fusion boundaries",
+      "meta_strategy": "TVM ReplayFunc; uniform configuration sampling; not evolutionary/learned",
+      "fairness": "same normalized candidate pool, shared legacy incumbent, equal attempt/legal/word caps; independent build contexts",
+      "rows": [
+        {
+          "mode": "space",
+          "compile_seconds": 5.131744651123881,
+          "statistics": {
+            "words": 372637,
+            "instructions": 371092,
+            "dma_packets": 515,
+            "dma_load_bytes": 109051916,
+            "dma_store_bytes": 3145728,
+            "dma_bytes": 112197644,
+            "opcodes": {
+              "0x42": 49152,
+              "0x80": 222724,
+              "0x88": 6,
+              "0x89": 6,
+              "0x90": 98304,
+              "0x98": 384,
+              "0xa0": 131,
+              "0xa8": 384,
+              "0xff": 1
+            },
+            "measurement": "static instruction stream; no cycle estimate",
+            "sram_peak_bytes": 5349388,
+            "global_image_bytes": 61865996
+          },
+          "word_sha256": "27b948ff540fc02e1f6872b7b597ec5cd0b0a91afbbd78703ed1ed596df58cc3",
+          "schedules": {
+            "kernel": {
+              "kind": "matmul",
+              "extents": [
+                512,
+                3072,
+                8192
+              ],
+              "cost_model": "FP16 operand DMA per batch",
+              "attempts": [
+                {
+                  "mapping": [
+                    "A",
+                    256
+                  ],
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 109051904,
+                  "sram_peak_nibbles": 10698776,
+                  "sram_allocator": "bump",
+                  "status": "selected",
+                  "emitted": {
+                    "words": 372632,
+                    "instructions": 371090,
+                    "dma_packets": 514,
+                    "dma_load_bytes": 109051904,
+                    "dma_store_bytes": 3145728,
+                    "dma_bytes": 112197632,
+                    "opcodes": {
+                      "0x42": 49152,
+                      "0x80": 222724,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 98304,
+                      "0x98": 384,
+                      "0xa0": 130,
+                      "0xa8": 384
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  },
+                  "origin": "legacy_incumbent"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 64,
+                    "k_chunk": 64,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 64,
+                    "k_chunk": 128,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 64,
+                    "k_chunk": 256,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 64,
+                    "k_chunk": 512,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 64,
+                    "k_chunk": 1024,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 64,
+                    "k_chunk": 2048,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 64,
+                    "k_chunk": 4096,
+                    "outer_order": "mn",
+                    "inner_order": "mn",
+                    "a_at": "m_panel",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 128,
+                    "k_chunk": 64,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 128,
+                    "k_chunk": 128,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 128,
+                    "k_chunk": 256,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 128,
+                    "k_chunk": 512,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 128,
+                    "k_chunk": 1024,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 128,
+                    "k_chunk": 2048,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 128,
+                    "k_chunk": 4096,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 192,
+                    "k_chunk": 64,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 512,
+                    "n_panel": 192,
+                    "k_chunk": 128,
+                    "outer_order": "mn",
+                    "inner_order": "nm",
+                    "a_at": "m_panel",
+                    "b_at": "n_tile"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 58720256,
+                  "sram_peak_nibbles": 19087384,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                }
+              ],
+              "incumbent_search": {
+                "examined_candidates": 7,
+                "generated_candidates": 25,
+                "stop_reason": "legal_budget",
+                "attempt_limit": 16
+              },
+              "search_space": "space",
+              "generated_candidates": 22236,
+              "examined_candidates": 16,
+              "attempt_limit": 16,
+              "stop_reason": "attempt_budget",
+              "legal_candidates": 0,
+              "probe_words": 0,
+              "selected": {
+                "mapping": [
+                  "A",
+                  256
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 109051904,
+                "sram_peak_nibbles": 10698776,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 372632,
+                  "instructions": 371090,
+                  "dma_packets": 514,
+                  "dma_load_bytes": 109051904,
+                  "dma_store_bytes": 3145728,
+                  "dma_bytes": 112197632,
+                  "opcodes": {
+                    "0x42": 49152,
+                    "0x80": 222724,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 98304,
+                    "0x98": 384,
+                    "0xa0": 130,
+                    "0xa8": 384
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings"
+            }
+          },
+          "compilation": {
+            "scope": "one build; structural recipes, costs and identical entry artifacts",
+            "elapsed_seconds": 4.908974496647716,
+            "schedule_hits": 0,
+            "schedule_misses": 1,
+            "trial_hits": 0,
+            "trial_misses": 23,
+            "cached_recipes": 1,
+            "cost_probe_hits": 0,
+            "cost_probe_misses": 0,
+            "native_fallbacks": {},
+            "native_rejections": {},
+            "entry_hits": 0,
+            "entry_misses": 0,
+            "region_hits": 0,
+            "region_misses": 0,
+            "seconds": {
+              "memory_planning": 0.0125834159553051,
+              "schedule_tir": 0.6706784628331661,
+              "schedule_sram": 0.10325239412486553,
+              "schedule_probe_codegen": 1.1821892149746418,
+              "schedule_probe_peephole": 0.47590009681880474,
+              "schedule_probe_statistics": 0.19226548820734024,
+              "schedule_and_sram": 3.018835300579667,
+              "native_codegen": 1.1200770679861307,
+              "peephole": 0.5132646057754755,
+              "dram_compaction": 0.1301120650023222
+            },
+            "self_seconds": {
+              "memory_planning": 0.0125834159553051,
+              "schedule_tir": 0.6706784628331661,
+              "schedule_sram": 0.10325239412486553,
+              "schedule_probe_codegen": 1.1821892149746418,
+              "schedule_probe_peephole": 0.47590009681880474,
+              "schedule_probe_statistics": 0.19226548820734024,
+              "schedule_and_sram": 0.39454964362084866,
+              "native_codegen": 1.1200770679861307,
+              "peephole": 0.5132646057754755,
+              "dram_compaction": 0.1301120650023222
+            },
+            "phase_calls": {
+              "memory_planning": 1,
+              "schedule_tir": 23,
+              "schedule_sram": 23,
+              "schedule_probe_codegen": 1,
+              "schedule_probe_peephole": 1,
+              "schedule_probe_statistics": 1,
+              "schedule_and_sram": 1,
+              "native_codegen": 1,
+              "peephole": 1,
+              "dram_compaction": 1
+            },
+            "meta_schedule": {
+              "enabled": false
+            }
+          }
+        },
+        {
+          "mode": "meta_schedule",
+          "compile_seconds": 11.091684021055698,
+          "statistics": {
+            "words": 372637,
+            "instructions": 371092,
+            "dma_packets": 515,
+            "dma_load_bytes": 109051916,
+            "dma_store_bytes": 3145728,
+            "dma_bytes": 112197644,
+            "opcodes": {
+              "0x42": 49152,
+              "0x80": 222724,
+              "0x88": 6,
+              "0x89": 6,
+              "0x90": 98304,
+              "0x98": 384,
+              "0xa0": 131,
+              "0xa8": 384,
+              "0xff": 1
+            },
+            "measurement": "static instruction stream; no cycle estimate",
+            "sram_peak_bytes": 5349388,
+            "global_image_bytes": 61865996
+          },
+          "word_sha256": "27b948ff540fc02e1f6872b7b597ec5cd0b0a91afbbd78703ed1ed596df58cc3",
+          "schedules": {
+            "kernel": {
+              "kind": "matmul",
+              "extents": [
+                512,
+                3072,
+                8192
+              ],
+              "cost_model": "FP16 operand DMA per batch",
+              "attempts": [
+                {
+                  "mapping": [
+                    "A",
+                    256
+                  ],
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 109051904,
+                  "sram_peak_nibbles": 10698776,
+                  "sram_allocator": "bump",
+                  "status": "selected",
+                  "emitted": {
+                    "words": 372632,
+                    "instructions": 371090,
+                    "dma_packets": 514,
+                    "dma_load_bytes": 109051904,
+                    "dma_store_bytes": 3145728,
+                    "dma_bytes": 112197632,
+                    "opcodes": {
+                      "0x42": 49152,
+                      "0x80": 222724,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 98304,
+                      "0x98": 384,
+                      "0xa0": 130,
+                      "0xa8": 384
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  },
+                  "origin": "legacy_incumbent"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 256,
+                    "n_panel": 1024,
+                    "k_chunk": 512,
+                    "outer_order": "nm",
+                    "inner_order": "mn",
+                    "a_at": "m_tile",
+                    "b_at": "m_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 125829120,
+                  "sample_index": 1428,
+                  "sram_peak_nibbles": 35864600,
+                  "sram_allocator": "bump",
+                  "status": "capacity_rejected",
+                  "reason": "exceeds SRAM capacity"
+                },
+                {
+                  "mapping": {
+                    "m_panel": 256,
+                    "n_panel": 192,
+                    "k_chunk": 1024,
+                    "outer_order": "nm",
+                    "inner_order": "mn",
+                    "a_at": "m_tile",
+                    "b_at": "n_panel"
+                  },
+                  "tile_pad": false,
+                  "estimated_operand_load_bytes": 184549376,
+                  "sample_index": 1929,
+                  "sram_peak_nibbles": 8601624,
+                  "sram_allocator": "bump",
+                  "status": "legal",
+                  "emitted": {
+                    "words": 422354,
+                    "instructions": 419234,
+                    "dma_packets": 1040,
+                    "dma_load_bytes": 184549376,
+                    "dma_store_bytes": 3145728,
+                    "dma_bytes": 187695104,
+                    "opcodes": {
+                      "0x42": 49152,
+                      "0x80": 270342,
+                      "0x88": 6,
+                      "0x89": 6,
+                      "0x90": 98304,
+                      "0x98": 384,
+                      "0xa0": 656,
+                      "0xa8": 384
+                    },
+                    "measurement": "static instruction stream; no cycle estimate"
+                  }
+                }
+              ],
+              "incumbent_search": {
+                "examined_candidates": 7,
+                "generated_candidates": 25,
+                "stop_reason": "legal_budget",
+                "attempt_limit": 16
+              },
+              "search_space": "meta_schedule",
+              "generated_candidates": 22236,
+              "strategy": "TVM MetaSchedule ReplayFunc",
+              "seed": 0,
+              "latency_feedback": false,
+              "examined_candidates": 2,
+              "attempt_limit": 16,
+              "stop_reason": "word_budget",
+              "legal_candidates": 1,
+              "probe_words": 422354,
+              "selected": {
+                "mapping": [
+                  "A",
+                  256
+                ],
+                "tile_pad": false,
+                "estimated_operand_load_bytes": 109051904,
+                "sram_peak_nibbles": 10698776,
+                "sram_allocator": "bump",
+                "status": "selected",
+                "emitted": {
+                  "words": 372632,
+                  "instructions": 371090,
+                  "dma_packets": 514,
+                  "dma_load_bytes": 109051904,
+                  "dma_store_bytes": 3145728,
+                  "dma_bytes": 112197632,
+                  "opcodes": {
+                    "0x42": 49152,
+                    "0x80": 222724,
+                    "0x88": 6,
+                    "0x89": 6,
+                    "0x90": 98304,
+                    "0x98": 384,
+                    "0xa0": 130,
+                    "0xa8": 384
+                  },
+                  "measurement": "static instruction stream; no cycle estimate"
+                },
+                "origin": "legacy_incumbent"
+              },
+              "selection_policy": "bounded emitted DMA/words/SRAM with aligned parameter bindings"
+            }
+          },
+          "compilation": {
+            "scope": "one build; structural recipes, costs and identical entry artifacts",
+            "elapsed_seconds": 10.85664520971477,
+            "schedule_hits": 0,
+            "schedule_misses": 1,
+            "trial_hits": 0,
+            "trial_misses": 9,
+            "cached_recipes": 1,
+            "cost_probe_hits": 0,
+            "cost_probe_misses": 0,
+            "native_fallbacks": {},
+            "native_rejections": {},
+            "entry_hits": 0,
+            "entry_misses": 0,
+            "region_hits": 0,
+            "region_misses": 0,
+            "seconds": {
+              "memory_planning": 0.003808053210377693,
+              "schedule_tir": 0.23981084860861301,
+              "schedule_sram": 0.04039456136524677,
+              "schedule_probe_codegen": 1.651420932263136,
+              "schedule_probe_peephole": 0.947851050645113,
+              "schedule_probe_statistics": 0.4018700923770666,
+              "meta_schedule_generate": 0.2698132749646902,
+              "schedule_and_sram": 8.949763724580407,
+              "native_codegen": 1.1103498600423336,
+              "peephole": 0.530681774020195,
+              "dram_compaction": 0.14103945158421993
+            },
+            "self_seconds": {
+              "memory_planning": 0.003808053210377693,
+              "schedule_tir": 0.23981084860861301,
+              "schedule_sram": 0.04039456136524677,
+              "schedule_probe_codegen": 1.651420932263136,
+              "schedule_probe_peephole": 0.947851050645113,
+              "schedule_probe_statistics": 0.4018700923770666,
+              "meta_schedule_generate": 0.2698132749646902,
+              "schedule_and_sram": 5.398602964356542,
+              "native_codegen": 1.1103498600423336,
+              "peephole": 0.530681774020195,
+              "dram_compaction": 0.14103945158421993
+            },
+            "phase_calls": {
+              "memory_planning": 1,
+              "schedule_tir": 9,
+              "schedule_sram": 9,
+              "schedule_probe_codegen": 2,
+              "schedule_probe_peephole": 2,
+              "schedule_probe_statistics": 2,
+              "meta_schedule_generate": 2,
+              "schedule_and_sram": 1,
+              "native_codegen": 1,
+              "peephole": 1,
+              "dram_compaction": 1
+            },
+            "meta_schedule": {
+              "enabled": false
+            }
+          }
+        }
+      ],
+      "validation": [
+        {
+          "mode": "space",
+          "executed": true,
+          "seconds": 11.78268718905747,
+          "max_abs": 3.0517578125e-05,
+          "rtol": 0.02,
+          "atol": 0.005,
+          "counters_match": true
+        },
+        {
+          "mode": "meta_schedule",
+          "same_program_as": "space",
+          "executed": false
+        }
+      ],
+      "outputs_bit_exact": true,
+      "meta_result": "equal",
+      "total_seconds": 31.908563593402505,
+      "provenance": {
+        "python": "3.11.15",
+        "packages": {
+          "numpy": "2.4.6",
+          "torch": "2.12.0+cpu",
+          "transformers": "5.12.1",
+          "safetensors": "0.8.0"
+        },
+        "tvm_version": "0.19.0",
+        "tvm_commit": "c4dc0c29ff81ddae688da24625a603da3b4a2c0e",
+        "llvm_version": "18.1.8",
+        "compiler_head": "2f0e081b45ebb4cd271c47796fc304cd10ceb67f",
+        "compiler_source_sha256": "4674f31bfc20f07552585fc1e8b0a59e41494840b27111f61687fe574a53411c",
+        "sources": {
+          "d_compiler/npu_codegen/build_identity.h": "ad92f1556c1c92bb527732209474aabddbb784ecb2d7b3ffb0990314affd2554",
+          "d_compiler/npu_codegen/codegen_v09.cc": "6936eddc4c96e7e60b06a116be516a518b3197d29a96e8d5c180b20b058c522c",
+          "d_compiler/npu_codegen/v09_asm.h": "713a2bfcdcb3b662b2421d9423bad388cc44b3e017f0f2dc17a9e38ab1fc452c",
+          "d_compiler/npu_codegen/v09_contract.h": "693fcd7ae1bcd73a070bd00214bf74d41ba30fcb525ef4cb0c955e35bc0bc2b1",
+          "d_compiler/npu_codegen/v09_isa.h": "610ca18be66c0206c05be1bb1b57c03b7f27b21e07c1f0e649325eeac4cf3264",
+          "d_compiler/npu_codegen/v09_walker.cc": "d903e45cdd05f6ef79ed3319edf93a3f13621163abee2375696018780085d631",
+          "d_compiler/npu_compiler/__init__.py": "bc81ca3d0f3a2b3cef7db62a820b82e21442e728c0b73c0474cb442b78a0efa2",
+          "d_compiler/npu_compiler/assets/__init__.py": "0da5ebb016d674e47f568fc28d0f7fd95108218940f1e830ce099da94571c474",
+          "d_compiler/npu_compiler/assets/gemma.py": "8d49ccdfc1384bae4110b5750d84146f8c7b552140bde89a3f3253a1d3091f84",
+          "d_compiler/npu_compiler/assets/gemma_ple.py": "6a5f21a66d034018b0b092acc0c93f55b0b8247e676d31a21b2d75b538be43c1",
+          "d_compiler/npu_compiler/assets/llama.py": "c46885fa85c0c9b54daa6d584c53ee9ffc86dc382c09b63a1a9fd74840a0ff7d",
+          "d_compiler/npu_compiler/assets/qwen3.py": "2980392dc3ae9c76a6d2aa04fd7ffef72735d30e5b9871ad56f3bbcb2e8a81ab",
+          "d_compiler/npu_compiler/assets/spec.py": "1f878ee996e9f5b0d0d41f2712cfcf8f5580f3ac97ad1cf81d1989ac039c479d",
+          "d_compiler/npu_compiler/device.py": "585d89466ada0e7551f4d13aafb96b67320ea774a02823affdb2f4da707ee1ff",
+          "d_compiler/npu_compiler/isa_compute.py": "7f88bc329dde2a7bf6cbcfa4599fa3d133e3f863ea687ec86fdad8a6fb1a599a",
+          "d_compiler/npu_compiler/isa_v09.py": "25990fad3b4c9209a1024a6424af682bfe96f2611b742ba2e141ff514d5e485f",
+          "d_compiler/npu_compiler/native.py": "f9e03340692fb89ddf2a75d3f8550f999734b5a6d442fa21ae9785c092f8b731",
+          "d_compiler/npu_compiler/nn_models/__init__.py": "535fcf43378bf06f189cae1c5a05362e57f32134935f08e7111703c12e201504",
+          "d_compiler/npu_compiler/nn_models/gemma.py": "df7f62b9ac4b3bc6ce8f231003a17ebbf65bddbc27efa792f65a8305aaf291af",
+          "d_compiler/npu_compiler/nn_models/hf.py": "5127270e98af60f86a2d8e01ebdaf3f34f20c511fdfe2a02ac096585a77d1036",
+          "d_compiler/npu_compiler/nn_models/llama.py": "1cd20eabe72104f11f276f7effa51cea8c774b972812f168a8f306945ddd2c6b",
+          "d_compiler/npu_compiler/nn_models/qwen3.py": "0d0974b5cfa24b96c385a35193256d6f071b3665f7fd7e79f6ce68c211dc0171",
+          "d_compiler/npu_compiler/npu_abi.py": "06319244047b7e97b35d60c800d299d8bc4c90b0a3b2e3778e834e02d5ce9eb5",
+          "d_compiler/npu_compiler/npu_accumulator.py": "e68bd8e9164ed28d99484decbff2a76f7b4f3cb4e9c65e67c3c53bc2f4a326fb",
+          "d_compiler/npu_compiler/npu_attention.py": "c952e6c0056ae831c4d87fac7461a6f7b2373f7b79ce2544ce040109b8a58221",
+          "d_compiler/npu_compiler/npu_build.py": "497b4b5bd1d3a3d3fdec0aed1c113aabf3b2114a02312d8a58431e75205b35a9",
+          "d_compiler/npu_compiler/npu_cache.py": "fcf5eca54b03da60c7e7eeac2adc706e4b404d5efa9b055cbd9a8396e67f64a0",
+          "d_compiler/npu_compiler/npu_compilation.py": "4a29b428e0a380917992d70f248f02b4264f69be2b367bfdde0fe6b4bf928853",
+          "d_compiler/npu_compiler/npu_errors.py": "df62dd34edb1e92842299ef2d91232041b224fbfee223c587c1a4f5ddcb1c76d",
+          "d_compiler/npu_compiler/npu_fusion.py": "8d087c4633ea68954661f236491c4a323d541fcac1a8bb9939902f4d2d53a395",
+          "d_compiler/npu_compiler/npu_generate.py": "0008848456f1589b8e0f0b7449298a57a11737b0946aa1a2ddb5dacbdc55ddad",
+          "d_compiler/npu_compiler/npu_graph_opt.py": "74d79b4f0617a790411f43c9216bf9bd621d55a3df2a772bcebc14900562ce22",
+          "d_compiler/npu_compiler/npu_intrin.py": "0b8e6e74ee643d37dfd0ddaa8d53238d12697e95dcf6b4b6413e0583473f5ed1",
+          "d_compiler/npu_compiler/npu_kernel.py": "882147564fd801a64a45ac55ebdf55e5adce6236340ba5499e0eb74355ae788c",
+          "d_compiler/npu_compiler/npu_legalize.py": "5a3897072b97fd9c774f7f78a2c50f06f73870065b1217205d3acc44c7b3858d",
+          "d_compiler/npu_compiler/npu_link.py": "0919c4a60a80af0a5bf5df3fc74f6daaa8ff080c0960129ab5432419f344fd85",
+          "d_compiler/npu_compiler/npu_memory_search.py": "b4a8f6718e4d4b0246ee89adeb0cdc93d16b36c52a10bed556c313f3b6ba5655",
+          "d_compiler/npu_compiler/npu_memplan.py": "db740fa78541f839293273f6759d248f16176b58e9151c7d040d6195943a3348",
+          "d_compiler/npu_compiler/npu_meta_schedule.py": "04791dabe8c3815066f996f865d18865fd0ce3788e2a2e1981b6406284c864f4",
+          "d_compiler/npu_compiler/npu_numeric.py": "5e590eaf28ecf4391b4244b7524efc6d9bfabefcfba743082b27aa379a87a1a5",
+          "d_compiler/npu_compiler/npu_provenance.py": "1f8e5fe42edaf0f9d628cabcda6eb6287e503914eb4f156434695b4a0d9eb58e",
+          "d_compiler/npu_compiler/npu_quantize.py": "5ae2da936c50d859cb357686e0257f82318ad302db79adf6175740b601289c3d",
+          "d_compiler/npu_compiler/npu_residency.py": "83af7b2dd7e29c5ad1515371326f846bf123fcc8b76ad1a560573c8c671a66b6",
+          "d_compiler/npu_compiler/npu_schedule.py": "c228c2871db1b40aae18b1480ea8a255432d7b9f0e26329bda7fca23d13f8200",
+          "d_compiler/npu_compiler/npu_schedule_space.py": "b500e9cd5aded43d6d4407692c87d6cd625f4cfbf8d628eb8ba746ee6010ac96",
+          "d_compiler/npu_compiler/npu_sram.py": "90262594121b7192434261242f472e0985bf2ee8f5daa3ea96b277a63bde0474",
+          "d_compiler/npu_compiler/npu_target.py": "ffee395d5fdbc0ce3f87cfe671a84c6d5e5214d44d4eb64394ed7eda8f1daffb",
+          "d_compiler/npu_compiler/npu_verify.py": "7f8e277794c92ac058929de28b16bd96445b362c5385c041a854b99338ebabee",
+          "d_compiler/npu_compiler/npu_views.py": "d1e74e439b902c04cd42b352685495312a1452b912b7b7d03f26e9248951c59f",
+          "d_compiler/npu_compiler/npu_w8a8.py": "4e5e4a072619c9079d05bba0ccf239c385ca08896fc4b4bddc8dd1e07e7e99b4",
+          "d_compiler/npu_compiler/npu_w8a8_intrin.py": "e465188b910ca2da1081b18463e98d5baff0485fadc4343d7ea030c5ea74083a",
+          "d_compiler/npu_compiler/npu_w8a8_schedule.py": "81816aecf064cae1f0a0b1c422af4f23af658656490947442fcb7807fe9db093",
+          "d_compiler/npu_compiler/peephole.py": "1a63d787038e52060bd4b80eaf029cf514069e34ecc5fb7af6a005720b901fe0",
+          "d_compiler/npu_compiler/tir_codegen_v09.py": "44c374d640dea30bb2da9df8ced0dbc3ecb4fc1682c9911e44abdc427c7c8db3",
+          "d_compiler/npu_compiler/tvm_pipeline.py": "52a7fc3cbf72d39dd4ee28a5df6201143f6a73f3061c8dad3fb7ece759631a7a",
+          "d_compiler/npu_compiler/v09_asm.py": "0af40ed93905ceba4803d515683783ccb4c73f6739505ae901177ae88cf09d54",
+          "d_compiler/npu_compiler/v09_contract.py": "9bae9c93275127e89a5c3b0ba606b09868d5a5644b5d98e0af697fa00fa95be2",
+          "d_compiler/npu_compiler/v09_effects.py": "b623435242447b9001acba94917f04b011b328b619391594a92b3897feca0eb6",
+          "d_compiler/npu_compiler/v09_runtime.py": "788f0444effa7f1ee3a8daafcbb09f41179e3f86a8ab9074a934063c8ce60edd",
+          "d_compiler/npu_compiler/v09_stats.py": "24e9d7051dba0f7c5734f7bbc9aa3cc0c7465fc0a17e48a8e60f5be7162fce83"
+        },
+        "contract_sha256": "7a7167f2a5353843ff911dd03cbc8e04181cb9f3b6af2f83a49a27c95342f3e9",
+        "native_path": "/home/chokwans99/NPU_cmodel/d_compiler/npu_codegen/libnpu_codegen.so",
+        "native_sha256": "b71fca2fe4d2a0a648f3a07b78ecbf81340fca0c5237894589f35361398205ee",
+        "cmodel_source_sha256": "f5a40d0040a060d105e5f0c02f1e0c8ee809d2ad4cde012ae3bb27cb36800c00"
+      },
+      "semantic_tir_sha256": "98e971d36a6258fa506bc1c8ae6c50c9b42d4c37360e33a7dc53d030e6c86eb1",
+      "minimum_dense_tensor_io_bytes": 61865984,
+      "lower_bound_note": "Read every dense input once, write output once; excludes 12 runtime constant bytes. An IO lower bound, not a proof of SRAM feasibility."
+    }
+  ],
+  "regression": {
+    "command": "python -m unittest discover -s d_compiler/tests -p test_meta_schedule.py -v",
+    "tests": 5,
+    "status": "passed",
+    "seconds": 10.101,
+    "checks": [
+      "sampled trace disk replay without resampling",
+      "fixed-seed reproducibility and bounded attempts",
+      "unchanged instructions and C-model outputs",
+      "workload compatibility boundaries",
+      "nested compilation context"
+    ]
+  },
+  "runner_sha256": "16aee2a6a8c26067334cc7184a234aee39eaa0faa3bdcc1186affed14c94851b"
+}

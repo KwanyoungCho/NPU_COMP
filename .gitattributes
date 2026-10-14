@@ -1,0 +1,5 @@
+# Preserve generated presentation and example artifacts as binary files.
+*.pdf binary
+*.pptx binary
+*.bin binary
+*.npz binary

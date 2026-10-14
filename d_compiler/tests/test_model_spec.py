@@ -6,7 +6,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, "d_compiler"))
 
-from npu_compiler.model_spec import (
+from npu_compiler.assets.spec import (
     AttentionSpec, LayerSpec, ModelSpec,
     build_cache_plan, gemma4_e2b_spec, llama32_spec, qwen3_spec,
 )
@@ -26,7 +26,7 @@ QWEN3_4B_CONFIG = {
     "sliding_window": None,
     "use_sliding_window": False,
 }
-from npu_compiler.v3_model import Llama32Assets
+from npu_compiler.assets.llama import Llama32Assets
 
 
 LLAMA_CONFIG = dict(Llama32Assets.EXPECTED)
@@ -165,7 +165,7 @@ def test_gemma4_spec_matches_downloaded_config():
     path = os.path.join(
         ROOT, "d_compiler", "build", "gemma4_e2b_hf", "config.json")
     if not os.path.exists(path):
-        print("  (skip: gemma4_e2b_hf/config.json not downloaded)")
+        print("  [SKIP] gemma4_e2b_hf/config.json not downloaded)")
         return
     with open(path) as file:
         text_config = json.load(file)["text_config"]

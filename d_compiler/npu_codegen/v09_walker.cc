@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include "v09_asm.h"
+#include "v09_contract.h"
 
 namespace npu {
 namespace {
@@ -44,6 +46,13 @@ class Unsupported : public std::runtime_error {
   explicit Unsupported(const std::string& what) : std::runtime_error(what) {}
 };
 
+// The hardware cannot resume a lost FP32 accumulator from FP16 SRAM.
+// This is an invalid schedule, not missing native codegen coverage.
+class InvalidSchedule : public std::runtime_error {
+ public:
+  explicit InvalidSchedule(const std::string& what) : std::runtime_error(what) {}
+};
+
 // SRAM nibbles and global bytes per element, by dtype -- tir_codegen_v09.py's
 // _SRAM_WIDTH / _ITEMSIZE.  A buffer with no recorded dtype is fp16, which is
 // what every staged activation is.
@@ -53,11 +62,24 @@ struct Unit {
 };
 
 Unit UnitOf(DataType dtype) {
-  if (dtype.is_float() && dtype.bits() == 16) return {4, 2};
-  if (dtype.is_float() && dtype.bits() == 32) return {8, 4};
-  if (dtype.is_int() && dtype.bits() == 8) return {2, 1};
-  if (dtype.is_int() && dtype.bits() == 4) return {1, 1};
+#define STORAGE_ENTRY(name, width, size) \
+  if (DLDataType2String(dtype) == name) return {width, size};
+  NPU_STORAGE(STORAGE_ENTRY)
+#undef STORAGE_ENTRY
   throw Unsupported("no SRAM width for dtype " + DLDataType2String(dtype));
+}
+
+bool IsVectorLoad(DataType dtype) {
+#define DTYPE_MATCH(name) if (DLDataType2String(dtype) == name) return true;
+  NPU_VECTOR_LOAD(DTYPE_MATCH)
+#undef DTYPE_MATCH
+  return false;
+}
+bool IsGenericStorage(DataType dtype) {
+#define DTYPE_MATCH(name) if (DLDataType2String(dtype) == name) return true;
+  NPU_GENERIC_STORE(DTYPE_MATCH)
+#undef DTYPE_MATCH
+  return false;
 }
 
 // ---------------------------------------------------------------- walker
@@ -74,6 +96,8 @@ class Walker {
   std::map<double, int64_t> constants;                 // value -> SRAM nibble
   std::vector<int64_t> scratch_slots;
   int64_t one_fp32 = -1;
+  const VarNode* scaled_pending = nullptr;
+  int64_t scaled_rows = 0;
 
   int depth = 0;
   int64_t inner_base = 0;
@@ -272,6 +296,9 @@ class Walker {
   void EmitMovement(const BufferStore& store,
                     const std::vector<const VarNode*>& spatial,
                     const std::unordered_map<const VarNode*, int64_t>& extents);
+  bool TryMatrixCopy(const BufferStore& store,
+                    const std::vector<const VarNode*>& spatial,
+                    const std::unordered_map<const VarNode*, int64_t>& extents);
   void EmitDma(const BufferStore& store, const BufferLoad& load,
                const std::vector<const VarNode*>& spatial,
                const std::unordered_map<const VarNode*, int64_t>& extents,
@@ -294,12 +321,15 @@ class Walker {
                              int64_t length, int64_t into);
   int64_t MaterializeTanh(const CallNode* call, const VarNode* inner,
                           int64_t length, int64_t into);
+  int64_t MaterializeAbs(const CallNode* call, const VarNode* inner,
+                        int64_t length, int64_t into);
   int64_t MaterializeRsqrt(const CallNode* call, const VarNode* inner,
                            int64_t length, int64_t into);
 
   // ---- tensorized markers ---------------------------------------------
 
   void Call(const PrimExpr& expr);
+  void W8A8Call(const std::string& name, const CallNode* call);
   void EmitGemm(int64_t c, int64_t sc, int64_t a_addr, int64_t sa,
                 int64_t b_addr, int64_t sb);
   void BindMatch(const MatchBufferRegion& match);
@@ -315,6 +345,7 @@ class Walker {
   void Run(const PrimFunc& func) {
     Visit(func->body);
     Flush();
+    if (scaled_pending) throw std::logic_error("unsaved scaled accumulator");
   }
 };
 
@@ -405,6 +436,13 @@ bool Walker::MatchNest(const Stmt& stmt) {
     return it->second;
   };
   BufferStore store = Downcast<BufferStore>(Substitute(body, lookup));
+  const auto* direct_load = store->value.as<BufferLoadNode>();
+  bool is_dma = direct_load != nullptr &&
+      (InSram(store->buffer->data.get()) != InSram(direct_load->buffer->data.get()));
+  if (!is_dma && !IsGenericStorage(store->buffer->dtype)) {
+    throw Unsupported("v09 generic vector lowering requires FP16 storage; got " +
+                      DLDataType2String(store->buffer->dtype));
+  }
 
   std::unordered_set<const VarNode*> reduce_vars;
   if (has_guard) {
@@ -523,11 +561,15 @@ void Walker::EmitReduction(
     const std::vector<const VarNode*>& spatial, const VarNode* axis,
     const std::unordered_map<const VarNode*, int64_t>& extents) {
   PrimExpr value = store->value;
-  bool is_sum = value.as<AddNode>() != nullptr;
+  const auto* marker = value.as<CallNode>();
+  bool explicit_sum = marker && marker->op.same_as(builtin::call_pure_extern()) &&
+      marker->args.size() == 3 && marker->args[0].as<StringImmNode>() &&
+      marker->args[0].as<StringImmNode>()->value == kSumUpdate;
+  bool is_sum = value.as<AddNode>() != nullptr || explicit_sum;
   bool is_max = value.as<MaxNode>() != nullptr;
   if (!is_sum && !is_max) throw Unsupported("unsupported reduction");
-  PrimExpr left = is_sum ? value.as<AddNode>()->a : value.as<MaxNode>()->a;
-  PrimExpr right = is_sum ? value.as<AddNode>()->b : value.as<MaxNode>()->b;
+  PrimExpr left = explicit_sum ? marker->args[1] : (is_sum ? value.as<AddNode>()->a : value.as<MaxNode>()->a);
+  PrimExpr right = explicit_sum ? marker->args[2] : (is_sum ? value.as<AddNode>()->b : value.as<MaxNode>()->b);
 
   const VarNode* accumulator = store->buffer->data.get();
   PrimExpr summand;
@@ -542,6 +584,10 @@ void Walker::EmitReduction(
   if (!found) throw Unsupported("reduction has no summand");
 
   int64_t length = extents.at(axis);
+  if (length <= 0 || length > kMaxVlen) {
+    throw Unsupported("v09 reduction length " + std::to_string(length) +
+                      " requires a segmented reduction");
+  }
   Flush();
   Positions positions(spatial, extents);
   for (int64_t flat = 0; flat < positions.total(); ++flat) {
@@ -633,9 +679,119 @@ std::vector<Piece> Pieces(Walker* w, const PrimExpr& value,
   return pieces;
 }
 
+bool TryBulkCopyFill(Walker* w, const BufferStore& store,
+                    const std::vector<const VarNode*>& spatial,
+                    const std::unordered_map<const VarNode*, int64_t>& extents) {
+  std::function<bool(const PrimExpr&)> eligible = [&](const PrimExpr& expr) {
+    if (expr.as<BufferLoadNode>() || expr.as<FloatImmNode>() || expr.as<IntImmNode>()) return true;
+    const auto* call = expr.as<CallNode>();
+    return call && call->op.same_as(builtin::if_then_else()) &&
+           eligible(call->args[1]) && eligible(call->args[2]);
+  };
+  if (spatial.empty() || !w->InSram(store->buffer->data.get()) ||
+      !IsGenericStorage(store->buffer->dtype) || !eligible(store->value)) return false;
+  struct Run { bool fill; double value; int64_t src, dst, count; };
+  std::vector<Run> runs;
+  const VarNode* inner = spatial.back();
+  std::vector<const VarNode*> outer(spatial.begin(), spatial.end() - 1);
+  Positions positions(outer, extents);
+  for (int64_t flat = 0; flat < positions.total(); ++flat) {
+    const auto& position = positions.at(flat);
+    for (size_t i = 0; i < outer.size(); ++i) w->env[outer[i]] = position[i];
+    for (const Piece& piece : Pieces(w, store->value, inner, extents.at(inner))) {
+      if (piece.count <= 0) continue;
+      w->inner_base = piece.lo;
+      auto [dst, stride] = w->AffineFlat(store->buffer, store->indices, inner);
+      if (stride != 4) { w->inner_base = 0; return false; }
+      Run run{true, 0., 0, dst, piece.count};
+      if (const auto* load = piece.expr.as<BufferLoadNode>()) {
+        if (!w->InSram(load->buffer->data.get()) || !IsVectorLoad(load->buffer->dtype)) {
+          w->inner_base = 0; return false;
+        }
+        auto [src, src_stride] = w->AffineFlat(load->buffer, load->indices, inner);
+        if (src_stride != 4) { w->inner_base = 0; return false; }
+        run.fill = false; run.src = src;
+      } else if (const auto* imm = piece.expr.as<FloatImmNode>()) {
+        run.value = imm->value;
+      } else {
+        run.value = piece.expr.as<IntImmNode>()->value;
+      }
+      if (!runs.empty() && runs.back().fill == run.fill) {
+        Run& prev = runs.back();
+        bool adjacent = run.dst == prev.dst + prev.count * 4;
+        bool same = run.fill ? run.value == prev.value : run.src == prev.src + prev.count * 4;
+        int64_t length = prev.count + run.count;
+        bool disjoint = run.fill || prev.src + length * 4 <= prev.dst ||
+                        prev.dst + length * 4 <= prev.src;
+        if (adjacent && same && disjoint) { prev.count = length; continue; }
+      }
+      runs.push_back(run);
+    }
+  }
+  w->inner_base = 0;
+  w->Flush();
+  for (const Run& run : runs) {
+    for (int64_t offset = 0; offset < run.count;) {
+      int64_t part = std::min<int64_t>(kMaxVlen, run.count - offset);
+      w->a.vlen(part);
+      if (run.fill) {
+        auto it = w->constants.find(run.value);
+        if (it == w->constants.end()) throw Unsupported("constant not in the pool");
+        w->stage.broadcast(it->second);
+      } else {
+        w->stage.vector(kSrc1, run.src + offset * 4);
+        w->a.load(0, kSrc1);
+        w->a.v_copy();
+      }
+      w->stage.vector(kDst, run.dst + offset * 4);
+      w->a.save(0);
+      offset += part;
+    }
+  }
+  return true;
+}
+
+bool Walker::TryMatrixCopy(
+    const BufferStore& store, const std::vector<const VarNode*>& spatial,
+    const std::unordered_map<const VarNode*, int64_t>& extents) {
+  if (!has_pending || !store->value.as<BufferLoadNode>() || spatial.size() != 2 ||
+      extents.at(spatial[0]) != kTile || extents.at(spatial[1]) != kTile) return false;
+  BufferLoad load = Downcast<BufferLoad>(store->value);
+  if (!InSram(store->buffer->data.get()) || !InSram(load->buffer->data.get()) ||
+      Width(store->buffer->data.get()) != 4 || Width(load->buffer->data.get()) != 4) return false;
+  const VarNode* row_axis = spatial[0];
+  const VarNode* inner = spatial[1];
+  env[row_axis] = 0;
+  auto [dest, unit] = AffineFlat(store->buffer, store->indices, inner);
+  env[row_axis] = 1;
+  int64_t step = AffineFlat(store->buffer, store->indices, inner).first - dest;
+  if (unit != 4 || step < kTile * 4 || step % 4 != 0) return false;
+  bool same = dest == pending_c && step == pending_sc * 4;
+  bool disjoint = dest + (kTile - 1) * step + kTile * 4 <= pending_c ||
+                  pending_c + (kTile - 1) * pending_sc * 4 + kTile * 4 <= dest;
+  if (!same && !disjoint) return false;
+  for (int64_t row = 0; row < kTile; ++row) {
+    env[row_axis] = row;
+    auto src = AffineFlat(load->buffer, load->indices, inner);
+    auto dst = AffineFlat(store->buffer, store->indices, inner);
+    if (src.first != pending_c + row * pending_sc * 4 || src.second != 4 ||
+        dst.first != dest + row * step || dst.second != 4) return false;
+  }
+  // SAVE preserves the register and rounds each destination identically.
+  // Keep the original store as well; other readers of that slot remain valid.
+  Flush();
+  if (!same) {
+    stage.region(kDst, dest, step / 4, kTile, kTile);
+    a.save(1);
+  }
+  return true;
+}
+
 void Walker::EmitPointwise(
     const BufferStore& store, const std::vector<const VarNode*>& spatial,
     const std::unordered_map<const VarNode*, int64_t>& extents) {
+  if (TryMatrixCopy(store, spatial, extents)) return;
+  if (TryBulkCopyFill(this, store, spatial, extents)) return;
   if (store->value.as<BufferLoadNode>() != nullptr) {
     EmitMovement(store, spatial, extents);
     return;
@@ -652,14 +808,15 @@ void Walker::EmitPointwise(
     for (size_t i = 0; i < outer.size(); ++i) env[outer[i]] = position[i];
     for (const Piece& piece : Pieces(this, store->value, inner, length)) {
       if (piece.count <= 0) continue;
-      inner_base = piece.lo;
-      auto [dst, dst_stride] = AffineFlat(store->buffer, store->indices, inner);
-      if (dst_stride != unit) {
-        throw Unsupported("pointwise destination stride " +
-                          std::to_string(dst_stride));
+      for (int64_t offset = 0; offset < piece.count; offset += kMaxVlen) {
+        inner_base = piece.lo + offset;
+        auto [dst, dst_stride] = AffineFlat(store->buffer, store->indices, inner);
+        if (dst_stride != unit) {
+          throw Unsupported("pointwise destination stride " + std::to_string(dst_stride));
+        }
+        depth = 0;
+        Materialize(piece.expr, inner, std::min(piece.count - offset, kMaxVlen), dst);
       }
-      depth = 0;
-      Materialize(piece.expr, inner, piece.count, dst);
     }
     inner_base = 0;
   }
@@ -685,11 +842,12 @@ void Walker::EmitMovement(
   const VarNode* inner = spatial.back();
   std::vector<const VarNode*> outer(spatial.begin(), spatial.end() - 1);
   int64_t length = extents.at(inner);
-  Flush();
   const VarNode* src_data = load->buffer->data.get();
   const VarNode* dst_data = store->buffer->data.get();
   int64_t src_unit = src_sram ? Width(src_data) : ItemSize(src_data);
   int64_t dst_unit = dst_sram ? Width(dst_data) : ItemSize(dst_data);
+
+  Flush();
 
   Positions positions(outer, extents);
   for (int64_t flat = 0; flat < positions.total(); ++flat) {
@@ -705,14 +863,14 @@ void Walker::EmitMovement(
     if (src_stride == src_unit) {                 // contiguous copy / slice
       // the vector length field is 16-bit; longer rows go in pieces
       int64_t offset = 0;
-      while (length - offset > 0xFFFF) {
-        a.vlen(0xFFFF);
+      while (length - offset > kMaxVlen) {
+        a.vlen(kMaxVlen);
         stage.vector(kSrc1, src_base + offset * src_unit);
         a.load(0, kSrc1);
         a.v_copy();
         stage.vector(kDst, dst_base + offset * dst_unit);
         a.save(0);
-        offset += 0xFFFF;
+        offset += kMaxVlen;
       }
       a.vlen(length - offset);
       stage.vector(kSrc1, src_base + offset * src_unit);
@@ -797,6 +955,11 @@ int64_t BounceChunk(Walker* w, int64_t glob,
     // back before the cell is written
     w->stage.dma_in(glob, scratch, lead);
   }
+  if (!to_sram && span % 4) {
+    // Preserve the untouched bytes in the final partial cell as well.
+    int64_t tail = span / 4 * 4;
+    if (tail || !lead) w->stage.dma_in(glob + tail, scratch + tail * 2, 4);
+  }
   int64_t offset = lead;
   for (const auto& [sram, nbytes] : pieces) {
     if (nbytes % 2 || offset % 2) {
@@ -824,20 +987,37 @@ void BounceDma(Walker* w, int64_t glob,
                const std::vector<std::pair<int64_t, int64_t>>& pieces,
                bool to_sram) {
   w->Flush();                         // the copies below take the PE output
-  if (w->scratch_slots.empty()) throw Unsupported("no scratch slot for bounce");
+  if (w->scratch_slots.size() < 2) {
+    throw Unsupported("bounce DMA requires a bounded scratch region");
+  }
   int64_t scratch = w->scratch_slots[0];
+  int64_t slot_nibbles = w->scratch_slots[1] - scratch;
+  for (size_t i = 0; i < w->scratch_slots.size(); ++i) {
+    if (slot_nibbles <= 0 ||
+        w->scratch_slots[i] != scratch + static_cast<int64_t>(i) * slot_nibbles) {
+      throw Unsupported("bounce DMA requires contiguous uniform scratch slots");
+    }
+  }
+  int64_t capacity = std::min<int64_t>(2 * kBounceBytes,
+      static_cast<int64_t>(w->scratch_slots.size()) * slot_nibbles / 2) / 4 * 4;
+  if (capacity < 4) throw Unsupported("bounce DMA scratch cannot hold one cell");
   int64_t lead = glob % 4;      // bytes sharing the first cell with someone else
   glob -= lead;
   std::vector<std::pair<int64_t, int64_t>> chunk;
   int64_t total = 0;
-  for (const auto& piece : pieces) {
-    chunk.push_back(piece);
-    total += piece.second;
-    if (total + lead >= kBounceBytes && (total + lead) % 4 == 0) {
-      glob = BounceChunk(w, glob, chunk, total, scratch, to_sram, lead);
-      chunk.clear();
-      total = 0;
-      lead = 0;
+  for (auto [sram, nbytes] : pieces) {
+    while (nbytes) {
+      int64_t part = std::min(nbytes, capacity - lead - total);
+      chunk.emplace_back(sram, part);
+      total += part;
+      sram += part * 2;
+      nbytes -= part;
+      if (total + lead == capacity) {
+        glob = BounceChunk(w, glob, chunk, total, scratch, to_sram, lead);
+        chunk.clear();
+        total = 0;
+        lead = 0;
+      }
     }
   }
   if (!chunk.empty()) {
@@ -867,7 +1047,8 @@ void EmitSegments(Walker* w, const std::vector<Segment>& segments,
         if (segments[i].glob % 4 || segments[i].nbytes % 4) aligned = false;
       }
     }
-    if ((aligned || group == index + 1) && segment.glob % 4 == 0) {
+    if ((aligned || group == index + 1) && segment.glob % 4 == 0 &&
+        segment.nbytes % 4 == 0) {
       if (to_sram) {
         w->stage.dma_in(segment.glob, segment.sram, segment.nbytes);
       } else {
@@ -918,7 +1099,10 @@ void Walker::EmitDma(const BufferStore& store, const BufferLoad& load,
     auto [src_base, src_stride] = AffineFlat(load->buffer, load->indices, inner);
     auto [dst_base, dst_stride] =
         AffineFlat(store->buffer, store->indices, inner);
-    if (src_stride != src_unit || dst_stride != dst_unit) {
+    // A unit-length row has no second element: its symbolic stride is
+    // irrelevant. TVM removes unit axes when compacting sliced caches.
+    // Match the Python walker and let EmitSegments handle odd-cell rows.
+    if (length > 1 && (src_stride != src_unit || dst_stride != dst_unit)) {
       throw Unsupported("DMA stage needs contiguous rows");
     }
     int64_t glob = to_sram ? src_base : dst_base;
@@ -943,6 +1127,9 @@ void Walker::EmitDma(const BufferStore& store, const BufferLoad& load,
 int64_t Walker::Materialize(const PrimExpr& expr, const VarNode* inner,
                             int64_t length, int64_t into) {
   if (const auto* load = expr.as<BufferLoadNode>()) {
+    if (!IsVectorLoad(load->buffer->dtype)) {
+      throw Unsupported("v09 vector load does not support " + DLDataType2String(load->buffer->dtype));
+    }
     auto [base, stride] = AffineFlat(load->buffer, load->indices, inner);
     const VarNode* data = load->buffer->data.get();
     int64_t unit = InSram(data) ? Width(data) : ItemSize(data);
@@ -992,17 +1179,14 @@ int64_t Walker::Materialize(const PrimExpr& expr, const VarNode* inner,
   }
 
   PrimExpr left, right;
-  int binary = -1;
-  if (const auto* node = expr.as<AddNode>()) {
-    left = node->a; right = node->b; binary = 0;
-  } else if (const auto* node = expr.as<SubNode>()) {
-    left = node->a; right = node->b; binary = 1;
-  } else if (const auto* node = expr.as<MulNode>()) {
-    left = node->a; right = node->b; binary = 2;
-  } else if (const auto* node = expr.as<DivNode>()) {
-    left = node->a; right = node->b; binary = 3;
+  void (Asm::*binary)(int, int64_t) = nullptr;
+#define BINARY_MATCH(node_type, method) \
+  if (const auto* node = expr.as<node_type>()) { \
+    left = node->a; right = node->b; binary = &Asm::method; \
   }
-  if (binary >= 0) {
+  NPU_BINARY(BINARY_MATCH)
+#undef BINARY_MATCH
+  if (binary != nullptr) {
     int outer_depth = depth;
     int64_t lhs = Materialize(left, inner, length);
     int64_t rhs = Materialize(right, inner, length);
@@ -1013,12 +1197,7 @@ int64_t Walker::Materialize(const PrimExpr& expr, const VarNode* inner,
     a.load(0, kSrc1);
     stage.vector(kSrc2, rhs);
     a.load(0, kSrc2);
-    switch (binary) {
-      case 0: a.v_add(kVector); break;
-      case 1: a.v_sub(kVector); break;
-      case 2: a.v_mul(kVector); break;
-      default: a.v_div(kVector); break;
-    }
+    (a.*binary)(kVector, 0);
     stage.vector(kDst, target);
     a.save(0);
     return target;
@@ -1031,17 +1210,15 @@ int64_t Walker::Materialize(const PrimExpr& expr, const VarNode* inner,
     const auto* op = call->op.as<OpNode>();
     if (op == nullptr) throw Unsupported("call without an op");
     const std::string& name = op->name;
-    if (name == "tir.rsqrt") return MaterializeRsqrt(call, inner, length, into);
-    if (name == "tir.sigmoid") {
-      return MaterializeSigmoid(call, inner, length, into);
-    }
-    if (name == "tir.tanh") return MaterializeTanh(call, inner, length, into);
-    int unary = -1;
-    if (name == "tir.exp") unary = 0;
-    else if (name == "tir.sqrt") unary = 1;
-    else if (name == "tir.cos") unary = 2;
-    else if (name == "tir.sin") unary = 3;
-    if (unary < 0) throw Unsupported("unsupported intrinsic " + name);
+#define COMPOSITE_MATCH(op_name, method) \
+    if (name == op_name) return method(call, inner, length, into);
+    NPU_COMPOSITE(COMPOSITE_MATCH)
+#undef COMPOSITE_MATCH
+    void (Asm::*unary)() = nullptr;
+#define UNARY_MATCH(op_name, method) if (name == op_name) unary = &Asm::method;
+    NPU_UNARY(UNARY_MATCH)
+#undef UNARY_MATCH
+    if (unary == nullptr) throw Unsupported("unsupported intrinsic " + name);
     int outer_depth = depth;
     int64_t operand = Materialize(call->args[0], inner, length);
     depth = outer_depth;
@@ -1049,17 +1226,35 @@ int64_t Walker::Materialize(const PrimExpr& expr, const VarNode* inner,
     a.vlen(length);
     stage.vector(kSrc1, operand);
     a.load(0, kSrc1);
-    switch (unary) {
-      case 0: a.v_exp(); break;
-      case 1: a.v_sqrt(); break;
-      case 2: a.v_cos(); break;
-      default: a.v_sin(); break;
-    }
+    (a.*unary)();
     stage.vector(kDst, target);
     a.save(0);
     return target;
   }
   throw Unsupported(std::string("unsupported expression ") + expr->GetTypeKey());
+}
+
+int64_t Walker::MaterializeAbs(const CallNode* call, const VarNode* inner,
+                               int64_t length, int64_t into) {
+  int64_t operand = Materialize(call->args[0], inner, length);
+  // The second load of operand must still see x, not the stored -x.
+  int64_t negated = Slot();
+  a.vlen(length);
+  stage.vector(kSrc1, operand);
+  a.load(0, kSrc1);
+  a.v_sign_inv();
+  stage.vector(kDst, negated);
+  a.save(0);
+  int64_t target = into >= 0 ? into : Slot();
+  a.vlen(length);
+  stage.vector(kSrc1, operand);
+  a.load(0, kSrc1);
+  stage.vector(kSrc2, negated);
+  a.load(0, kSrc2);
+  a.v_max(kVector);
+  stage.vector(kDst, target);
+  a.save(0);
+  return target;
 }
 
 // int8 -> float16 via VDEQUANT; anything else has no instruction.
@@ -1230,9 +1425,11 @@ void Walker::Call(const PrimExpr& expr) {
   const auto* name_node = call->args[0].as<StringImmNode>();
   if (name_node == nullptr) throw Unsupported("call_extern without a name");
   const std::string& name = name_node->value;
-  auto starts_with = [&name](const char* prefix) {
-    return name.rfind(prefix, 0) == 0;
-  };
+  if (name == "npu_quantize_row" || name == "npu_scaled_mac" ||
+      name == "npu_store_scaled" || name == "npu_reset_quant_descriptors") {
+    W8A8Call(name, call);
+    return;
+  }
   if (name == "npu_fill_zero") {
     zeroed.insert(Ptr(call->args[1]));
     return;
@@ -1242,44 +1439,126 @@ void Walker::Call(const PrimExpr& expr) {
              Ev(call->args[4]), Ptr(call->args[5]), Ev(call->args[6]));
     return;
   }
-  if (starts_with("npu_ew2_")) {
-    Flush();
-    std::string op = name.substr(std::strlen("npu_ew2_"));
-    int64_t dst = Ptr(call->args[1]), lhs = Ptr(call->args[2]);
-    int64_t rhs = Ptr(call->args[3]), count = Ev(call->args[4]);
-    a.vlen(count);
-    stage.vector(kSrc1, lhs);
-    a.load(0, kSrc1);
-    stage.vector(kSrc2, rhs);
-    a.load(0, kSrc2);
-    if (op == "add") a.v_add(kVector);
-    else if (op == "subtract") a.v_sub(kVector);
-    else if (op == "multiply") a.v_mul(kVector);
-    else if (op == "divide") a.v_div(kVector);
-    else throw Unsupported("unsupported binary op " + op);
-    stage.vector(kDst, dst);
-    a.save(0);
-    return;
-  }
-  if (starts_with("npu_ew1_")) {
-    Flush();
-    std::string op = name.substr(std::strlen("npu_ew1_"));
-    int64_t dst = Ptr(call->args[1]), src = Ptr(call->args[2]);
-    int64_t count = Ev(call->args[3]);
-    a.vlen(count);
-    stage.vector(kSrc1, src);
-    a.load(0, kSrc1);
-    if (op == "sqrt") a.v_sqrt();
-    else if (op == "exp") a.v_exp();
-    else if (op == "negative") a.v_sign_inv();
-    else if (op == "cos") a.v_cos();
-    else if (op == "sin") a.v_sin();
-    else throw Unsupported("unsupported unary op " + op);
-    stage.vector(kDst, dst);
-    a.save(0);
-    return;
-  }
   throw Unsupported("unknown intrinsic " + name);
+}
+
+
+// Scales and FP32 MAC state are explicit operands, separate from SRAM placement.
+void Walker::W8A8Call(const std::string& name, const CallNode* call) {
+  auto access = [](const PrimExpr& value) -> const CallNode* {
+    const auto* node = value.as<CallNode>();
+    if (!node || !node->op.same_as(builtin::tvm_access_ptr()))
+      throw std::invalid_argument("W8A8 expects an access_ptr");
+    return node;
+  };
+  auto data = [&](int index) { return access(call->args[index])->args[1].as<VarNode>(); };
+  auto ptr = [&](int index) {
+    const auto* node = access(call->args[index]);
+    const auto* var = node->args[1].as<VarNode>();
+    return sram.at(var) + Ev(node->args[2]) * Width(var);
+  };
+  auto region = [&](int operand, int64_t address, int64_t stride,
+                    int64_t rows, int64_t cols, int dtype,
+                    int64_t main_address = -1, int64_t main_rows = -1) {
+    a.addr(operand, main_address < 0 ? address : main_address, kMain);
+    a.shape(operand, main_rows < 0 ? rows : main_rows, stride, kMain, dtype);
+    a.addr(operand, address, kPartial);
+    a.shape(operand, rows, cols, kPartial, dtype);
+  };
+  if (name == "npu_quantize_row") {
+    Flush();
+    if (scaled_pending) throw std::logic_error("quantization interrupts scaled MAC");
+    int64_t row_nib=ptr(1), qa_nib=ptr(2), a_scale_nib=ptr(3);
+    int64_t tmp_nib=ptr(4), acc_nib=ptr(5), inner=Ev(call->args[6]);
+    a.vlen(inner);
+    a.addr(kSrc1, row_nib, 1);
+    a.shape(kSrc1, 1, inner, 1, kFp16);
+    a.load(0, kSrc1);
+    a.v_sign_inv();
+    a.addr(kDst, tmp_nib, 1);
+    a.shape(kDst, 1, inner, 1, kFp16);
+    a.save(0);
+    a.addr(kSrc1, row_nib, 1);
+    a.load(0, kSrc1);
+    a.addr(kSrc2, tmp_nib, 1);
+    a.shape(kSrc2, 1, inner, 1, kFp16);
+    a.load(0, kSrc2);
+    a.v_max(kVector);
+    a.addr(kDst, tmp_nib, 1);
+    a.save(0);
+    a.addr(kSrc1, tmp_nib, 1);
+    a.load(0, kSrc1);
+    a.v_reduce_max();
+    a.addr(kDst, acc_nib, 1);
+    a.save(0);
+    a.vlen(1);
+    a.addr(kSrc1, acc_nib, 1);
+    a.shape(kSrc1, 1, 1, 1, kFp16);
+    a.load(0, kSrc1);
+    a.emit(enc_compare(kImm, 0));
+    a.addr(kDst, acc_nib + 4, 1);
+    a.shape(kDst, 1, 1, 1, kFp16);
+    a.save(0);
+    a.addr(kSrc1, acc_nib + 4, 1);
+    a.load(0, kSrc1);
+    a.v_mul(kImm, 127);
+    a.save(0);
+    a.addr(kSrc2, acc_nib + 4, 1);
+    a.shape(kSrc2, 1, 1, 1, kFp16);
+    a.load(0, kSrc2);
+    a.addr(kSrc1, acc_nib, 1);
+    a.load(0, kSrc1);
+    a.v_add(kVector);
+    a.addr(kDst, acc_nib, 1);
+    a.save(0);
+    a.load(0, kSrc1);
+    a.v_div(kImm, 127);
+    a.addr(kDst, a_scale_nib, 1);
+    a.shape(kDst, 1, 1, 1, kFp32);
+    a.save(0);
+    a.vlen(inner);
+    a.ascale(a_scale_nib);
+    a.addr(kSrc1, row_nib, 1);
+    a.shape(kSrc1, 1, inner, 1, kFp16);
+    a.addr(kDst, qa_nib, 1);
+    a.shape(kDst, 1, inner, 1, kInt8);
+    a.vquant();
+  } else if (name == "npu_scaled_mac") {
+    const VarNode* c = data(1);
+    int64_t rows=Ev(call->args[7]);
+    bool first=Ev(call->args[8]);
+    if (first) {
+      Flush();
+      if (scaled_pending) throw std::logic_error("scaled accumulator overwritten");
+      scaled_pending=c;
+      scaled_rows=rows;
+    } else if (scaled_pending != c || scaled_rows != rows) {
+      throw std::logic_error("scaled MAC has no matching accumulator");
+    }
+    a.ascale(ptr(5));
+    a.wscale(ptr(6));
+    auto full_rows = [&](int index, int64_t stride) {
+      const auto* node = access(call->args[index]);
+      return (Ev(node->args[2]) + Ev(node->args[3])) / stride;
+    };
+    region(kSrc1, ptr(2), Ev(call->args[3]), rows, 64, kInt8,
+           sram.at(data(2)), full_rows(2, Ev(call->args[3])));
+    a.load(1,kSrc1);
+    region(kSrc2, ptr(4), 64, 64, 64, kInt8,
+           sram.at(data(4)), full_rows(4, 64));
+    a.load(1,kSrc2);
+    a.m_mul(kVector,0,kActOff,!first);
+  } else if (name == "npu_store_scaled") {
+    int64_t rows=Ev(call->args[3]);
+    if (scaled_pending != data(1) || scaled_rows != rows)
+      throw std::logic_error("scaled save has no matching accumulator");
+    region(kDst,ptr(2),64,rows,64,kFp16);
+    a.save(1);
+    scaled_pending=nullptr;
+  } else {
+    if (scaled_pending) throw std::logic_error("scaled accumulator was not saved");
+    for (int operand : {kSrc1,kSrc2,kDst}) a.shape(operand,1,1,kPartial,kFp16);
+  }
 }
 
 // One 64x64x64 tile of C += A @ B.  Consecutive calls to the same C tile chain
@@ -1295,19 +1574,7 @@ void Walker::EmitGemm(int64_t c, int64_t sc, int64_t a_addr, int64_t sa,
     pending_c = c;
     pending_sc = sc;
   } else if (!has_pending || pending_c != c) {
-    // the chain was interrupted (a vector op owns the PE output in between),
-    // so reload the partial sum before continuing
-    auto it = stored.find(c);
-    if (it == stored.end()) {
-      throw Unsupported("accumulate into unseen C tile");
-    }
-    Flush();
-    stage.region(kSrc1, c, it->second, kTile, kTile);
-    a.load(1, kSrc1);
-    a.m_add(kImm, 0);
-    has_pending = true;
-    pending_c = c;
-    pending_sc = sc;
+    throw InvalidSchedule("FP32 matrix chain interrupted: cannot resume from FP16 storage");
   }
   stage.region(kSrc1, a_addr, sa, kTile, kTile);
   a.load(1, kSrc1);
@@ -1369,18 +1636,21 @@ NDArray ToWords(const std::vector<Word>& words) {
   return array;
 }
 
-TVM_REGISTER_GLOBAL("npu.codegen_kernel")
-    .set_body_typed([](PrimFunc func, Array<Integer> addresses,
+NDArray CodegenKernel(PrimFunc func, Array<Integer> addresses,
                        Array<Buffer> sram_buffers, Array<Integer> sram_nibbles,
                        Array<Integer> scratch_slots,
                        Array<PrimExpr> constant_values,
                        Array<Integer> constant_addrs,
-                       Integer one_fp32) -> NDArray {
+                       Integer one_fp32) {
+      if (sram_buffers.size() != sram_nibbles.size() ||
+          constant_values.size() != constant_addrs.size()) {
+        throw std::invalid_argument("mismatched native binding arrays");
+      }
       Walker walker;
       // bind by parameter order -- buffer_map is a map, and its iteration
       // order is not the signature's
       if (addresses.size() != func->params.size()) {
-        throw Unsupported("address count does not match the signature");
+        throw std::invalid_argument("address count does not match the signature");
       }
       for (size_t i = 0; i < func->params.size(); ++i) {
         auto it = func->buffer_map.find(func->params[i]);
@@ -1399,12 +1669,30 @@ TVM_REGISTER_GLOBAL("npu.codegen_kernel")
       }
       for (size_t i = 0; i < constant_values.size(); ++i) {
         const auto* imm = constant_values[i].as<FloatImmNode>();
-        if (imm == nullptr) throw Unsupported("constant pool needs FloatImm");
+        if (imm == nullptr) throw std::invalid_argument("constant pool needs FloatImm");
         walker.constants[imm->value] = constant_addrs[i]->value;
       }
       walker.one_fp32 = one_fp32->value;
       walker.Run(func);
       return ToWords(walker.a.words);
+}
+
+TVM_REGISTER_GLOBAL("npu.codegen_contract_hash")
+    .set_body_typed([]() { return String(kContractHash); });
+TVM_REGISTER_GLOBAL("npu.codegen_kernel").set_body_typed(CodegenKernel);
+TVM_REGISTER_GLOBAL("npu.codegen_kernel_status")
+    .set_body_typed([](PrimFunc func, Array<Integer> addresses,
+                       Array<Buffer> buffers, Array<Integer> nibbles,
+                       Array<Integer> scratch, Array<PrimExpr> values,
+                       Array<Integer> addrs, Integer one) -> Array<ObjectRef> {
+      try {
+        return {String("ok"), CodegenKernel(func, addresses, buffers, nibbles,
+                                           scratch, values, addrs, one)};
+      } catch (const InvalidSchedule& error) {
+        return {String("invalid_schedule"), String(error.what())};
+      } catch (const Unsupported& error) {
+        return {String("unsupported"), String(error.what())};
+      }
     });
 
 }  // namespace

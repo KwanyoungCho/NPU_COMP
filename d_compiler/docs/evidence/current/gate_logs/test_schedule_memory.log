@@ -1,0 +1,18 @@
+test_capacity_changes_producer_schedule_to_reserve_output (__main__.ScheduleMemory.test_capacity_changes_producer_schedule_to_reserve_output) ... ok
+test_capacity_fallback_and_ragged_inputs (__main__.ScheduleMemory.test_capacity_fallback_and_ragged_inputs) ... ok
+test_inplace_consumer_cannot_redirect_its_next_version (__main__.ScheduleMemory.test_inplace_consumer_cannot_redirect_its_next_version) ... ok
+test_offset_views_use_the_right_retained_slice (__main__.ScheduleMemory.test_offset_views_use_the_right_retained_slice) ... ok
+test_parameterized_loop_orders_and_k_groups_execute (__main__.ScheduleMemory.test_parameterized_loop_orders_and_k_groups_execute) ... ok
+test_repeated_calls_and_storage_versions (__main__.ScheduleMemory.test_repeated_calls_and_storage_versions) ... ok
+test_reshape_alias_reads_retained_value (__main__.ScheduleMemory.test_reshape_alias_reads_retained_value) ... ok
+test_returned_intermediate_keeps_dram_store (__main__.ScheduleMemory.test_returned_intermediate_keeps_dram_store) ... ok
+test_shared_value_survives_two_consumers (__main__.ScheduleMemory.test_shared_value_survives_two_consumers) ... ok
+test_snapshots_keep_original_memory_contract (__main__.ScheduleMemory.test_snapshots_keep_original_memory_contract) ... ok
+test_space_contains_two_axis_blocks_and_intermediate_k_groups (__main__.ScheduleMemory.test_space_contains_two_axis_blocks_and_intermediate_k_groups) ... ok
+test_tiled_producer_is_retained_for_following_matmul (__main__.ScheduleMemory.test_tiled_producer_is_retained_for_following_matmul) ... ok
+test_trial_reuse_preserves_capacity_dependent_program (__main__.ScheduleMemory.test_trial_reuse_preserves_capacity_dependent_program) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 17.856s
+
+OK

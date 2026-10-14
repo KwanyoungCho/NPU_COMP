@@ -71,17 +71,15 @@ def _qmatmul_te(x, weight, scale16):
         weight.shape,
         lambda i, j: weight[i, j].astype("float16") * scale16[j],
         name="w_dequant")
-    # written like the standard FP16 matmul lowering -- fp16 accumulation in
-    # the TIR -- so the existing tensorized schedule applies; the machine's
-    # gemm supplies the FP32 internal accumulation either way
-    return te.compute(
+    accumulated = te.compute(
         (m, n),
-        lambda i, j: te.sum(x[i, k] * dequantized[k, j], axis=k),
+        lambda i, j: te.sum(x[i, k].astype("float32") * dequantized[k, j].astype("float32"), axis=k),
         name="matmul")
+    return te.compute((m, n), lambda i, j: accumulated[i, j].astype("float16"), name="matmul_store")
 
 
 def _weight_source(value, lookup, weights):
-    """True if a matmul's right operand comes from a parameter.
+    """True if a matmul's right operand comes from a parameter or constant.
 
     Only the shapes nn.Linear produces are followed -- the parameter itself,
     an element of the packed parameter tuple, or either transposed -- so
@@ -90,6 +88,8 @@ def _weight_source(value, lookup, weights):
     runtime input.
     """
     while True:
+        if isinstance(value, relax.Constant):
+            return True
         if isinstance(value, relax.Var):
             if value in weights:
                 return True
@@ -166,7 +166,9 @@ class _Quantizer(PyExprMutator):
         if self.act:
             self.count += 1
             return block.call_te(_qmatmul_a8_te, left, quantized, scale,
-                                 primfunc_name_hint="npu_qmatmul_a8")
+                                 primfunc_name_hint="npu_qmatmul_a8",
+                                 primfunc_attrs={"npu.kernel": "w8a8",
+                                                 "npu.kernel_version": 1})
         scale16 = block.emit(
             block.call_te(_scale16_te, scale, primfunc_name_hint="npu_w_scale16"))
         self.count += 1
@@ -191,16 +193,15 @@ class QuantizeWeightsW8A16:
             if not isinstance(function, relax.Function):
                 continue
             runtime = function.attrs and function.attrs.get("num_input")
-            # parameters past num_input are weights; without the attribute the
-            # function takes no weights and there is nothing to quantize
+            # Constants can still be weights without num_input (HF BindParams).
             quantizer.weights = (set(function.params[int(runtime):])
                                  if runtime is not None else set())
-            if quantizer.weights:
-                quantizer.builder_.update_func(
-                    global_var, quantizer.visit_expr(function))
+            quantizer.builder_.update_func(
+                global_var, quantizer.visit_expr(function))
         # the builder holds the PrimFuncs the rewrite created, so the module
         # has to come from it rather than being edited in place
         module = quantizer.builder_.get()
+        module = module.with_attr("npu.quantized_matmuls", quantizer.count)
         return relax.transform.DeadCodeElimination()(module)
 
 
@@ -211,8 +212,8 @@ def _qmatmul_a8_te(x, weight, scale):
     Written to match the machine's arithmetic (see quantize.w8a8_reference):
     the row scale is this row's absmax over 127 in fp32, VQUANT rounds
     half-to-even with +-127 saturation, and both scales multiply the
-    integer dot product.  The block names are the linker's cue to emit this
-    kernel as the validated W8A8 instruction sequence rather than walk it.
+    integer dot product. The versioned npu.kernel attribute identifies this
+    contract for the linker's W8A8 emitter; block names are not identifiers.
     """
     m, k_size = x.shape
     n = weight.shape[1]
@@ -231,15 +232,21 @@ def _qmatmul_a8_te(x, weight, scale):
             te.min(te.round(x[i, j].astype("float32") / a_scale[i]),
                    tir.const(INT8_MAX, "float32")),
             tir.const(-INT8_MAX, "float32")).astype("int8"), name="a_quant")
-    k = te.reduce_axis((0, k_size), name="k")
+    k = te.reduce_axis((0, 64), name="k")
     product = te.compute(
-        (m, n),
-        lambda i, j: te.sum(a_quant[i, k].astype("float32")
-                            * weight[k, j].astype("float32"), axis=k),
-        name="matmul")
+        (m, k_size // 64, n),
+        lambda i, t, j: te.sum(a_quant[i, t*64+k].astype("int32")
+                               * weight[t*64+k, j].astype("int32"), axis=k),
+        name="tile_integer_dot")
+    partial = te.compute((m, k_size // 64, n),
+        lambda i,t,j: product[i,t,j].astype("float32") * scale[j] * a_scale[i],
+        name="scaled_tile")
+    tile_axis = te.reduce_axis((0, k_size // 64), name="tile")
+    total = te.compute((m,n), lambda i,j: te.sum(partial[i,tile_axis,j],axis=tile_axis),
+                       name="matmul")
     return te.compute(
         (m, n),
-        lambda i, j: (product[i, j] * scale[j] * a_scale[i]).astype("float16"),
+        lambda i, j: total[i,j].astype("float16"),
         name="dequant")
 
 
@@ -265,10 +272,10 @@ class QuantizeW8A8:
             runtime = function.attrs and function.attrs.get("num_input")
             quantizer.weights = (set(function.params[int(runtime):])
                                  if runtime is not None else set())
-            if quantizer.weights:
-                quantizer.builder_.update_func(
-                    global_var, quantizer.visit_expr(function))
+            quantizer.builder_.update_func(
+                global_var, quantizer.visit_expr(function))
         module = quantizer.builder_.get()
+        module = module.with_attr("npu.quantized_matmuls", quantizer.count)
         return relax.transform.DeadCodeElimination()(module)
 
 

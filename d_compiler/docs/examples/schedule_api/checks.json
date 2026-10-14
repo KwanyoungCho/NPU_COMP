@@ -1,0 +1,6 @@
+{
+  "tvm_version": "0.19.0",
+  "compute_at_llvm": "exact match: (A + 1) * 2",
+  "reverse_compute_at_llvm": "exact match: (A + 1) * 2",
+  "sram_examples": "schedule construction only; not executed on LLVM"
+}

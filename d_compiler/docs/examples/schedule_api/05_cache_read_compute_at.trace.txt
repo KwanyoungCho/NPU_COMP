@@ -1,0 +1,6 @@
+b0 = sch.get_block(name="C", func_name="main")
+b1 = sch.cache_read(block=b0, read_buffer_index=0, storage_scope="global.sram")
+b2 = sch.get_block(name="C", func_name="main")
+l3, l4 = sch.get_loops(block=b2)
+l5, l6 = sch.split(loop=l3, factors=[None, 2], preserve_unit_iters=True, disable_predication=False)
+sch.compute_at(block=b1, loop=l5, preserve_unit_loops=False, index=-1)

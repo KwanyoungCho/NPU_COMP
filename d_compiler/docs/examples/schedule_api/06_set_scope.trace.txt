@@ -1,0 +1,2 @@
+b0 = sch.get_block(name="B", func_name="main")
+sch.set_scope(block=b0, buffer_index=0, storage_scope="global.sram")

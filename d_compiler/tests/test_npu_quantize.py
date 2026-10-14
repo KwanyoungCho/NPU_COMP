@@ -179,7 +179,7 @@ def test_w8a8_matmul_is_bit_exact_on_the_cmodel():
     machine (VQUANT), INT8xINT8 MAC with both scales applied at accumulator
     entry -- bit-exact against the numpy mirror fed the same lifted weights."""
     from npu_compiler import npu_link, npu_memplan as M
-    from npu_compiler.quantize import w8a8_reference
+    from reference.quantize import w8a8_reference
 
     rng = np.random.default_rng(2)
     for m, k, n in ((64, 64, 64), (7, 128, 192)):

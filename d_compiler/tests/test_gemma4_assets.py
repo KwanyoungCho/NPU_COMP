@@ -8,7 +8,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, "d_compiler"))
 
-from npu_compiler.gemma4_model import Gemma4Assets, default_model_path
+from npu_compiler.assets.gemma import Gemma4Assets, default_model_path
 
 GOLDEN_IDS = [2, 9259, 236764, 646, 11152, 47133, 236888]
 
@@ -16,7 +16,7 @@ GOLDEN_IDS = [2, 9259, 236764, 646, 11152, 47133, 236888]
 def test_gemma4_assets():
     path = default_model_path()
     if not (path / "model.safetensors").exists():
-        print("  (skip: Gemma 4 E2B checkpoint not present)")
+        print("  [SKIP] Gemma 4 E2B checkpoint not present)")
         return
     assets = Gemma4Assets(path)
 

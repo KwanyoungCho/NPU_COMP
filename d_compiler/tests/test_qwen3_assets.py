@@ -8,13 +8,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, "d_compiler"))
 
-from npu_compiler.qwen3_model import Qwen3Assets, default_model_path
+from npu_compiler.assets.qwen3 import Qwen3Assets, default_model_path
 
 
 def test_qwen3_assets():
     path = default_model_path()
     if not (path / "model.safetensors.index.json").exists():
-        print("  (skip: Qwen3-4B checkpoint not present)")
+        print("  [SKIP] Qwen3-4B checkpoint not present)")
         return
     assets = Qwen3Assets(path)
     count = assets.validate_keyset()

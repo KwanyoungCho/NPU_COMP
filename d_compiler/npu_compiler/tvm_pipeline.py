@@ -54,44 +54,67 @@ def _attention_patterns(tile=64):
     from tvm.relax.dpl.pattern import is_op, wildcard
     from tvm.relax.transform import FusionPattern
 
-    def chain(scaled):
-        scores = is_op("relax.matmul")(wildcard(), wildcard())
+    def supported(context):
+        exprs = context.annotated_expr
+        def shape(name):
+            info = exprs[name].struct_info
+            if info.dtype != "float16" or info.shape is None or info.ndim != 3:
+                return None
+            try:
+                return tuple(int(dim) for dim in info.shape)
+            except (TypeError, ValueError):
+                return None
+        q, k, v = (shape(name) for name in ("q", "k", "v"))
+        if q is None or k is None or v is None:
+            return False
+        if int(exprs["softmax"].attrs.axis) not in (-1, 2):
+            return False
+        h, m, d = q
+        # This compound schedule handles static, aligned rank-3 attention.
+        # Other shapes retain separate matmuls and the smaller score fusion.
+        return (h > 0 and k[0] == h and v[0] == h and k[1] == d
+                and v[1] == k[2]
+                and all(x > 0 and x % tile == 0 for x in (m, d, k[2], v[2])))
+
+    patterns = []
+    for scaled in (True, False):
+        q, k, v = wildcard(), wildcard(), wildcard()
+        scores = is_op("relax.matmul")(q, k)
         if scaled:
             scores = is_op("relax.multiply")(scores, wildcard())
         masked = is_op("relax.add")(scores, wildcard())
-        return is_op("relax.matmul")(
-            is_op("relax.nn.softmax")(masked), wildcard())
+        softmax = is_op("relax.nn.softmax")(masked)
+        output = is_op("relax.matmul")(softmax, v)
+        patterns.append(FusionPattern(
+            "npu.attention" if scaled else "npu.attention_unscaled", output,
+            {"q": q, "k": k, "v": v, "softmax": softmax}, supported))
+    return patterns
 
-    def tile_aligned(context):
-        """Only fuse an attention the block schedule can tensorize.
 
-        Both matmuls end up over (block, seq, head_dim) and go to the 64x64
-        matrix unit, so those two extents have to be tile multiples; the block
-        itself is halved down from seq and stays one.  When they are not,
-        pad_einsum would have to pad inside the block, which is both a lot of
-        wasted matrix work (a 4x4 attention padded to 64x64) and a shape the
-        tensorize refuses.  Declining here leaves the score-chain fusion,
-        which works at any size.
+def graph_prefix(lift_params=True):
+    from .npu_attention import CanonicalizeAttention
+    stages = [CanonicalizeAttention(), relax.transform.CanonicalizeBindings(),
+              relax.transform.EliminateCommonSubexpr(), relax.transform.RewriteDataflowReshape()]
+    if lift_params:
+        stages.append(relax.transform.LiftTransformParams())
+    return tvm.transform.Sequential(stages, name="npu_graph_prefix")
 
-        A consequence worth keeping: seq=7, which every full-depth gate uses,
-        is not tile aligned, so those gates are untouched by this pass.
-        """
-        shape = context.matched_expr.struct_info.shape
-        if shape is None or len(shape) != 3:
-            return False
-        try:
-            _, rows, width = (int(dim) for dim in shape)
-        except (TypeError, ValueError):
-            return False                     # dynamic shape
-        return rows % tile == 0 and width % tile == 0
 
-    return [FusionPattern("npu.attention", chain(True), None, tile_aligned),
-            FusionPattern("npu.attention_unscaled", chain(False), None,
-                          tile_aligned)]
+def _matrix_producer_patterns():
+    from tvm.relax.dpl.pattern import is_op, wildcard
+    patterns = []
+    for wrapper in (None, "relax.repeat", "relax.expand_dims"):
+        rhs = is_op("relax.concat")(wildcard())
+        if wrapper:
+            rhs = is_op(wrapper)(rhs)
+        patterns.append(("npu.matrix_producer_" + (wrapper or "concat").split(".")[-1],
+                         is_op("relax.matmul")(wildcard(), rhs)))
+    return patterns
 
 
 def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True,
-                   fuse_attention=True):
+                   fuse_attention=True, fold_repeated_gemv=False,
+                   fuse_producers=False, prepared=False):
     """Relax -> TIR PrimFuncs, following the standard stage order.
 
     ``custom_legalize`` is TVM's per-op legalization override map; NPU specific
@@ -106,38 +129,36 @@ def graph_pipeline(custom_legalize=None, fuse=True, lift_params=True,
     ``fuse_attention`` fuses the attention, whole where the shape allows
     (``_attention_patterns``) and otherwise just its score chain
     (``_masked_softmax_patterns``).  It is separate from ``fuse``, which turns
-    on TVM's general fusion and is off by default because a fused body still
-    has to be re-serialized into vector steps and that is unverified.
+    on TVM's general fusion. That remains opt-in: vector steps and multiple
+    outputs are covered, but arbitrary compound schedules and automatic
+    fusion profitability selection are not yet supported.
     """
-    stages = [
-        relax.transform.CanonicalizeBindings(),
-        relax.transform.EliminateCommonSubexpr(),
-        relax.transform.FoldConstant(),
-        relax.transform.RewriteDataflowReshape(),
-    ]
-    if lift_params:
-        stages.append(relax.transform.LiftTransformParams())
+    stages = [] if prepared else [graph_prefix(lift_params)]
+    if fold_repeated_gemv:
+        from .npu_graph_opt import FoldRepeatedGemv
+        stages.append(FoldRepeatedGemv())
+    if fuse_producers:
+        stages.append(relax.transform.FuseOpsByPattern(_matrix_producer_patterns()))
+    if fuse_attention not in (False, True, "score", "full"):
+        raise ValueError("fuse_attention must be False, True, 'score', or 'full'")
     if fuse_attention:
         stages.append(relax.transform.FuseOpsByPattern(
-            _attention_patterns() + _masked_softmax_patterns()))
+            ([] if fuse_attention == "score" else _attention_patterns())
+            + _masked_softmax_patterns()))
+    from .npu_numeric import FoldConstants
     stages += [
         relax.transform.LegalizeOps(custom_legalize),
+        FoldConstants() if custom_legalize else relax.transform.FoldConstant(),
         relax.transform.AnnotateTIROpPattern(),
     ]
     if fuse:
         stages += [relax.transform.FuseOps(), relax.transform.FuseTIR()]
-    elif fuse_attention:
+    elif fuse_attention or fuse_producers:
         # only the pattern above became a composite function; FuseTIR merges
         # its PrimFuncs and leaves everything else alone
         stages.append(relax.transform.FuseTIR())
     stages += [relax.transform.DeadCodeElimination()]
     return tvm.transform.Sequential(stages, name="npu_graph_pipeline")
-
-
-def build_llvm(mod, custom_legalize=None, fuse=True, lift_params=True):
-    """Validation build: run the graph pipeline, then the stock CPU build."""
-    return relax.build(graph_pipeline(custom_legalize, fuse, lift_params)(mod),
-                       target="llvm")
 
 
 def kernel_summary(mod):

@@ -1,0 +1,15 @@
+test_effects_use_result_length_and_preserve_disjoint_cached_cells (__main__.OptimizationTests.test_effects_use_result_length_and_preserve_disjoint_cached_cells) ... ok
+test_generation_guard_rejects_one_regressing_entry (__main__.OptimizationTests.test_generation_guard_rejects_one_regressing_entry) ... ok
+test_matrix_stride_and_quantization_effect_bounds (__main__.OptimizationTests.test_matrix_stride_and_quantization_effect_bounds) ... ok
+test_overlapping_global_store_rows_do_not_forward_an_old_version (__main__.OptimizationTests.test_overlapping_global_store_rows_do_not_forward_an_old_version) ... ok
+test_parameter_cache_includes_reachable_tir_bodies (__main__.OptimizationTests.test_parameter_cache_includes_reachable_tir_bodies) ... ok
+test_recipe_cache_reuses_structure_but_separates_profile_and_pool (__main__.OptimizationTests.test_recipe_cache_reuses_structure_but_separates_profile_and_pool) ... ok
+test_repeated_gemv_uses_broadcast_and_actual_program_cost (__main__.OptimizationTests.test_repeated_gemv_uses_broadcast_and_actual_program_cost) ... ok
+test_runtime_bindings_use_names_not_dictionary_order (__main__.OptimizationTests.test_runtime_bindings_use_names_not_dictionary_order) ... ok
+test_views_preserve_lifetime_shape_and_result_bits (__main__.OptimizationTests.test_views_preserve_lifetime_shape_and_result_bits) ... ok
+test_w8a8_bound_avoids_linear_schedule_search (__main__.OptimizationTests.test_w8a8_bound_avoids_linear_schedule_search) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 17.893s
+
+OK

@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""A decoder layer at real model dimensions, on the C-model, judged against a
-float32 reference.
+"""Run a random Llama decoder layer at real model dimensions on the C-model.
 
-The layer shape is Llama 3.2 3B's, but the weights are random, so this needs
-no checkpoint and no tokenizer -- it exercises exactly the sizes that the
-tile-scale tests in tests/test_npu_link.py cannot.
-
-Both builds are scored against a plain float32 numpy forward pass, because
-they disagree for a reason worth seeing: TVM's float16 matmul accumulates in
-float16, while the machine accumulates in float32 internally, so where the
-two differ the C-model is the accurate one.
+This needs no checkpoint or tokenizer. Both NPU and LLVM results are checked
+against a NumPy FP32 reference. The semantic TIR uses FP32 accumulation;
+reduction order and intermediate FP16 rounding affect the comparison.
 """
 import argparse
 import os

@@ -3,18 +3,18 @@
 Units follow d_compiler/ISA_V09.md: global addresses/strides/cols are 32-bit
 cells; SRAM addresses are 4-bit nibbles (24 effective bits) and must sit on an
 8-nibble (cell) boundary for DMA.  ver.08 compute encodings are reused
-verbatim (import them from :mod:`npu_compiler.isa_0818`); this module adds only
+verbatim (import them from :mod:`npu_compiler.isa_compute`); this module adds only
 the v09 deltas: per-descriptor dtype bits, scale-address setup, drain/reduce
 carry flags, FP32 vector save, and VQUANT/VDEQUANT.
 """
 from __future__ import annotations
 
-from .isa_0818 import (  # noqa: F401  (re-exported ver.08 encodings)
+from .isa_compute import (  # noqa: F401  (re-exported ver.08 encodings)
     DST, IMM, MAIN, PARTIAL, SCALAR, SRC1, SRC2, VECTOR,
     enc_addr_hi, enc_addr_lo, enc_load, enc_save, enc_vlen,
 )
-from .isa_0818 import enc_mcols as _enc_mcols_0818
-from .isa_0818 import enc_mrows as _enc_mrows_0818
+from .isa_compute import enc_mcols as _enc_mcols_0818
+from .isa_compute import enc_mrows as _enc_mrows_0818
 
 OP_NOP = 0x00
 OP_SNAPSHOT = 0xF0

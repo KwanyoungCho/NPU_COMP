@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from npu_compiler.qwen3_model import default_model_path
+from npu_compiler.assets.qwen3 import default_model_path
 
 
 def main():

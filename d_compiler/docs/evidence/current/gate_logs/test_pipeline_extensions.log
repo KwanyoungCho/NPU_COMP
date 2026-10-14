@@ -1,0 +1,15 @@
+test_buckets_cross_boundary_without_recompile_per_token (__main__.PipelineExtensions.test_buckets_cross_boundary_without_recompile_per_token) ... ok
+test_dequant_producer_rename_fits_small_sram_without_partial_spill (__main__.PipelineExtensions.test_dequant_producer_rename_fits_small_sram_without_partial_spill) ... ok
+test_epilogue_fusion_preserves_stores_and_reduces_traffic (__main__.PipelineExtensions.test_epilogue_fusion_preserves_stores_and_reduces_traffic) ... ok
+test_generation_last_logits_matches_full_output (__main__.PipelineExtensions.test_generation_last_logits_matches_full_output) ... ok
+test_hf_host_fold_defers_fp16_arithmetic (__main__.PipelineExtensions.test_hf_host_fold_defers_fp16_arithmetic) ... ok
+test_highlevel_attention_bias_causal_window_independent_oracle (__main__.PipelineExtensions.test_highlevel_attention_bias_causal_window_independent_oracle) ... [08:31:04] /home/chokwans99/tvm-src/src/relax/ir/block_builder.cc:65: Warning: BlockBuilder destroyed with remaining blocks!
+ok
+test_persistent_transport_all_cache_slots_and_neighbours (__main__.PipelineExtensions.test_persistent_transport_all_cache_slots_and_neighbours) ... ok
+test_w8_workspace_reuse_and_forged_body (__main__.PipelineExtensions.test_w8_workspace_reuse_and_forged_body) ... ok
+test_weight_content_cache_identity_and_corruption (__main__.PipelineExtensions.test_weight_content_cache_identity_and_corruption) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 67.367s
+
+OK

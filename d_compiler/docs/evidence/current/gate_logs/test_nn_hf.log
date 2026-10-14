@@ -1,0 +1,2 @@
+  [PASS] traced HF llama vs torch: llvm 1.000000, npu 1.000000, argmax same (17,096 words)
+ALL HF FRONTEND TESTS PASSED

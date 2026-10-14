@@ -1,6 +1,6 @@
 // The v09 assembler and its SRAM/DMA emitter.
 //
-// Ports npu_compiler/isa_0818.py's ``Asm``, backend_v09.py's ``V09Asm`` and
+// Ports isa_compute.py's ``Asm``, v09_asm.py's ``V09Asm`` and
 // tir_codegen_v09.py's ``SramEmitter``.  Words accumulate in a vector the
 // caller drains once, rather than crossing a language boundary per word.
 //
@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "v09_isa.h"
+#include "v09_contract.h"
 
 namespace npu {
 
@@ -44,7 +45,7 @@ class Asm {
   void vlen(int64_t n) {
     // the field is 16-bit and the encoder masks silently; a longer vector
     // would quietly process only the low bits' worth of lanes
-    if (n <= 0 || n > 0xFFFF) {
+    if (n <= 0 || n > kMaxVlen) {
       throw EncodeError("vlen=" + std::to_string(n) +
                         " does not fit in 16 bits");
     }

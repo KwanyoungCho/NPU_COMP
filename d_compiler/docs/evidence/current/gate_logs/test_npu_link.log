@@ -1,0 +1,23 @@
+  [PASS] rms_norm max|diff|=0.0019 (333 words)
+  [PASS] matmul [64,64]x[64,64] max|diff|=0.0000 (45 words)
+  [PASS] matmul [4,64]x[64,32] max|diff|=0.0000 (657 words)
+  [PASS] matmul [7,128]x[128,96] max|diff|=0.0000 (1,530 words)
+  [PASS] matmul [128,128]x[128,128] max|diff|=0.0010 (109 words)
+  [PASS] multiply broadcast   max|diff|=0.00018
+  [PASS] permute_dims         max|diff|=0.00000
+  [PASS] repeat (GQA)         max|diff|=0.00000
+  [PASS] batched matmul       max|diff|=0.00043
+  [PASS] softmax              max|diff|=0.00020
+  [PASS] silu                 max|diff|=0.00076
+  [PASS] concat               max|diff|=0.00000
+  [PASS] rotate_half          max|diff|=0.00000
+  [PASS] padded matmul stages through DMA (8 DMA words seen)
+  [PASS] tile staging uses 2D transfers (6/8 DMAs, up to 192 rows each)
+  [PASS] odd-length rows [3,7,7] max|diff|=0.00091 (1,491 words)
+  [PASS] silu row of  8192 max|diff|=0.00484
+  [PASS] silu row of  8193 max|diff|=0.00484
+  [PASS] silu row of  9728 max|diff|=0.00484
+  [PASS] 6-way concat (5 nested selects) bit-exact
+  [PASS] gelu_tanh over +-40 max|diff|=0.00071
+  [PASS] whole layer vs llvm build: cosine 1.000000, max|diff| 0.00000, 8,009 words
+ALL NPU LINK (S5) TESTS PASSED

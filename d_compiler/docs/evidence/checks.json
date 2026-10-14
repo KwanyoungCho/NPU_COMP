@@ -1,0 +1,149 @@
+{
+  "status": "passed",
+  "checked_at": "2026-10-14T10:47:41.630611+00:00",
+  "scope": "documentation integrity and recorded-result consistency; no compilation or model execution",
+  "checks": [
+    {
+      "name": "local_markdown_targets",
+      "passed": true,
+      "details": {
+        "documents": 31,
+        "links": 404,
+        "missing": [],
+        "scope": "file/directory targets; external URLs and heading anchors are not checked"
+      }
+    },
+    {
+      "name": "artifact_syntax",
+      "passed": true,
+      "details": {
+        "counts": {
+          "json": 32,
+          "py": 38,
+          "svg": 10
+        },
+        "failures": [],
+        "scope": "Python AST only; TVM IR dumps are not executed as scripts"
+      }
+    },
+    {
+      "name": "retained_artifact_hashes",
+      "passed": true,
+      "details": {
+        "files": 54,
+        "mismatches": []
+      }
+    },
+    {
+      "name": "historical_example_source_consistency",
+      "passed": true,
+      "details": {
+        "current": "66888a400d1013347fa5f210511f77ef68a66abb9db5572d780aa955db882671",
+        "example": "44694fc6104159862ae86a423d1391c6cce181c774f9e46eaf5ab3ff5f2e1a05",
+        "historical_final_validation": "44694fc6104159862ae86a423d1391c6cce181c774f9e46eaf5ab3ff5f2e1a05",
+        "scope": "historical examples retain their original source identity; not current-source execution"
+      }
+    },
+    {
+      "name": "pipeline_evidence",
+      "passed": true,
+      "details": {
+        "validation": {
+          "fused_unfused_bit_exact": true,
+          "cmodel_counters_match": true,
+          "llvm_max_abs": 0.0,
+          "llvm_rtol": 0.003,
+          "llvm_atol": 5e-05
+        },
+        "actual_recipe_exports": [
+          "07_scheduled_fused_matmul_add_silu.py"
+        ]
+      }
+    },
+    {
+      "name": "memory_evidence",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            32768,
+            false,
+            88,
+            81932
+          ],
+          [
+            32768,
+            true,
+            88,
+            81932
+          ],
+          [
+            45056,
+            false,
+            87,
+            81932
+          ],
+          [
+            45056,
+            true,
+            77,
+            49164
+          ],
+          [
+            65536,
+            true,
+            77,
+            49164
+          ]
+        ],
+        "scope": "recorded results of reproduce.py; not rerun by this checker"
+      }
+    },
+    {
+      "name": "reproduced_77_word_program",
+      "passed": true,
+      "details": {
+        "words": 77,
+        "sha256": "f823d937ebde1dfd3dee7b981e00d634d8292b8a9df420fe8ca6c8148ce4648b",
+        "fresh_sha256": "f823d937ebde1dfd3dee7b981e00d634d8292b8a9df420fe8ca6c8148ce4648b"
+      }
+    },
+    {
+      "name": "pipeline_bundle_binary",
+      "passed": true,
+      "details": "41110a9cf5f78c7cd9b7469339d4bcfa1428c84b0ab142d50dec6c0353c85f0f"
+    },
+    {
+      "name": "historical_full_model_and_gates",
+      "passed": true,
+      "details": {
+        "scope": "preserved evidence only; no new whole-model/gate execution",
+        "missing_logs": []
+      }
+    },
+    {
+      "name": "llama_ir_scope",
+      "passed": true,
+      "details": "IR export/legalization only; actual 3B widths with layer count reduced 28→1"
+    },
+    {
+      "name": "schedule_api_execution_record",
+      "passed": true,
+      "details": {
+        "tvm_version": "0.19.0",
+        "compute_at_llvm": "exact match: (A + 1) * 2",
+        "reverse_compute_at_llvm": "exact match: (A + 1) * 2",
+        "sram_examples": "schedule construction only; not executed on LLVM"
+      }
+    },
+    {
+      "name": "obsolete_material_removed",
+      "passed": true,
+      "details": {
+        "count": 1129,
+        "bytes": 458961389,
+        "remaining": []
+      }
+    }
+  ]
+}

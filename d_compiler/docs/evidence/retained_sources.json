@@ -1,0 +1,331 @@
+{
+  "date": "2026-09-28",
+  "files": [
+    {
+      "source": "report/figs/0928_compile_speed/llama_validation.json",
+      "retained": "evidence/current/llama_validation.json",
+      "sha256": "ec10ba2ad6adb4bb083991857c77dba88b34200840c2b22376b922d421ff2300",
+      "bytes": 20809
+    },
+    {
+      "source": "report/figs/0928_compile_speed/llama_selected_summary.json",
+      "retained": "evidence/current/llama_selection.json",
+      "sha256": "ae7c13e1b28b51509cdbf8ea17e7bcdb6b0d723d6051e27624bd8ae77886fe87",
+      "bytes": 14074
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completion.json",
+      "retained": "evidence/current/completion.json",
+      "sha256": "1bd6ef360f129c66e93aeb6aefb99cee2d676f8ef79b22a9f20873fb4d9855bb",
+      "bytes": 748
+    },
+    {
+      "source": "report/figs/0928_compile_speed/compile_comparison.json",
+      "retained": "evidence/current/compile_comparison.json",
+      "sha256": "26eb77f764908725c78d0d05cae25ebf7d14c9b0edf8904fcf5cab2efcf77769",
+      "bytes": 2600
+    },
+    {
+      "source": "report/figs/0928_compiler_refinement/measurements.json",
+      "retained": "evidence/current/refinement.json",
+      "sha256": "fabffe0defd0e7d61ccd745aa77f070c828f25fdc69aef8fee349e4c6d18aaaa",
+      "bytes": 119207
+    },
+    {
+      "source": "report/figs/0926_schedule_memory/mlp_measurements.json",
+      "retained": "evidence/current/memory_search_before_refinement.json",
+      "sha256": "ce2ac8223854eac9feeaba72ea1b75f75116ee9fa7ec70e4d19c81ee26243b40",
+      "bytes": 60110
+    },
+    {
+      "source": "report/figs/0928_compile_speed/bounded_mlp64.json",
+      "retained": "evidence/current/mlp64.json",
+      "sha256": "eac68fd69d42e3b10ce5382d3d37dbd37ed394159f0a009dffbb5612483ba9c7",
+      "bytes": 11410
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/validation.json",
+      "retained": "evidence/current/regression_validation.json",
+      "sha256": "da97fb02b1cd69b538658fa20f1a89a28a3cd3784cfc8678ea261c0f92a23df1",
+      "bytes": 3905
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_npu_quantize.log",
+      "retained": "evidence/current/quantization.log",
+      "sha256": "5136c6228a425204c2ff7e96f141d792c43ae2112a0e2165d382c00b34b100db",
+      "bytes": 611
+    },
+    {
+      "source": "report/figs/0928_compiler_refinement/after_bundle/program.json",
+      "retained": "examples/two_matmuls_recorded/program.json",
+      "sha256": "ad6ea83d51809d941728a5dddd1815b89baa78e5c33899dfdcaa6662bb604b4d",
+      "bytes": 41221
+    },
+    {
+      "source": "report/figs/0928_compiler_refinement/after_bundle/program_memory.bin",
+      "retained": "examples/two_matmuls_recorded/program_memory.bin",
+      "sha256": "f823d937ebde1dfd3dee7b981e00d634d8292b8a9df420fe8ca6c8148ce4648b",
+      "bytes": 308
+    },
+    {
+      "source": "report/figs/0928_compiler_refinement/after_bundle/lowered.py",
+      "retained": "examples/two_matmuls_recorded/lowered.py",
+      "sha256": "c103d936dbc7d00401958beb899bf1e42d008fe7bca66fc0ec3b4a5112f599b4",
+      "bytes": 3059
+    },
+    {
+      "source": "report/figs/0928_compiler_refinement/after_bundle/scheduled_0000.py",
+      "retained": "examples/two_matmuls_recorded/scheduled_0000.py",
+      "sha256": "9700369566e4e4078088cd58d1b4314919f2b3ed34e76a8b13b78d6dbd3c765d",
+      "bytes": 5040
+    },
+    {
+      "source": "report/figs/0928_compiler_refinement/after_bundle/scheduled_0001.py",
+      "retained": "examples/two_matmuls_recorded/scheduled_0001.py",
+      "sha256": "43a833ab21c36a083609fc68e3c0760569c1da0730a2b84cd91daa649f5e143b",
+      "bytes": 4048
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_architecture_contracts.log",
+      "retained": "evidence/current/gate_logs/test_architecture_contracts.log",
+      "sha256": "024f1a2b9f83abc6047be831d971510944f6724219810378e8c6da7a2026de6b",
+      "bytes": 1867
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_compile_speed.log",
+      "retained": "evidence/current/gate_logs/test_compile_speed.log",
+      "sha256": "f5bba91be02955debd1d1c7fc8d5804faf363a157f84712f4a5cd503a9cfc1db",
+      "bytes": 1832
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_compiler_contracts.log",
+      "retained": "evidence/current/gate_logs/test_compiler_contracts.log",
+      "sha256": "4ef4812050a9f721639a75b8908675e629c003296955e2ed1aaeec3d62094886",
+      "bytes": 2392
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_compiler_refinement.log",
+      "retained": "evidence/current/gate_logs/test_compiler_refinement.log",
+      "sha256": "de2c664fa360154aecb27d12e9bff4114c14d9ee96a147a7c20eebd7f022826f",
+      "bytes": 1212
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_completion_contracts.log",
+      "retained": "evidence/current/gate_logs/test_completion_contracts.log",
+      "sha256": "06c85d31e49bfdaab97b8132683b204120074f1d334485e3b67785c0858f39b0",
+      "bytes": 1396
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_native_codegen.log",
+      "retained": "evidence/current/gate_logs/test_native_codegen.log",
+      "sha256": "0962db4f640b473c793f9e6eccb58c5957d91107eafa285cf6d8f7a272af23b9",
+      "bytes": 546
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_nn_decode.log",
+      "retained": "evidence/current/gate_logs/test_nn_decode.log",
+      "sha256": "783d4d00eafcb83260c7aa1509c03735923a47b9b7c5c3333c1512f4ad32d6c4",
+      "bytes": 135
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_nn_hf.log",
+      "retained": "evidence/current/gate_logs/test_nn_hf.log",
+      "sha256": "f6c37ed7361beba8c5498eafa007da8ca3a807ea026174f7dc58647bb162aa53",
+      "bytes": 120
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_npu_link.log",
+      "retained": "evidence/current/gate_logs/test_npu_link.log",
+      "sha256": "123627a1a2b8c854ba800dadd29fcf8a4eb366f2b45e17ed19658b46ab16bca4",
+      "bytes": 1226
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_npu_memplan.log",
+      "retained": "evidence/current/gate_logs/test_npu_memplan.log",
+      "sha256": "85745c89b208d52edcc5cef52034b5731c9df3de0101075ab1d85b947830bba2",
+      "bytes": 198
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_npu_target.log",
+      "retained": "evidence/current/gate_logs/test_npu_target.log",
+      "sha256": "cfbaa99db30ee9625172585f1763268f155bc9699a9495f684b35786fb4ca35c",
+      "bytes": 251
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_optimization_contracts.log",
+      "retained": "evidence/current/gate_logs/test_optimization_contracts.log",
+      "sha256": "7406591af9eb54212ac58a8de6ec0b8259f74cb38656efef014d843910d63e78",
+      "bytes": 1574
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_pipeline_extensions.log",
+      "retained": "evidence/current/gate_logs/test_pipeline_extensions.log",
+      "sha256": "6a9d1135890aad850a76d1cdcfcf3297dba514a26f6fcfa3c50b90cd90e935b2",
+      "bytes": 1517
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_priority_contracts.log",
+      "retained": "evidence/current/gate_logs/test_priority_contracts.log",
+      "sha256": "0ced8356bc2b42459b2f9213919d8adedbd5694ea1801becb84f7f5101f2be5b",
+      "bytes": 1361
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_schedule_memory.log",
+      "retained": "evidence/current/gate_logs/test_schedule_memory.log",
+      "sha256": "cf4f2f15b8ebea51dfcaa8b1b30434bb14d285398ca45d580b34321e84fc7ae4",
+      "bytes": 1795
+    },
+    {
+      "source": "report/figs/0928_compile_speed/completed_gate/test_sram_lifetime.log",
+      "retained": "evidence/current/gate_logs/test_sram_lifetime.log",
+      "sha256": "be5d3b921c402fbbd815fab651b5467d55772ec9e77f5b977a756d101e1e60c7",
+      "bytes": 1044
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/01_before.py",
+      "retained": "examples/schedule_api/01_before.py",
+      "sha256": "0e195dba09c32631192882f999bc511233b9fd4557b3177bb601c05b856485c3",
+      "bytes": 814
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/01_before.trace.txt",
+      "retained": "examples/schedule_api/01_before.trace.txt",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "bytes": 1
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/02_compute_at.py",
+      "retained": "examples/schedule_api/02_compute_at.py",
+      "sha256": "944f70bb208fe9176442a4d17505b7374daa15201da6c468413519055c8929ad",
+      "bytes": 995
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/02_compute_at.trace.txt",
+      "retained": "examples/schedule_api/02_compute_at.trace.txt",
+      "sha256": "d4cfed65e0c15b505b1d2f7a4bd68440e4d5218891d593f8025319f45307a219",
+      "bytes": 298
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/03_reverse_compute_at.py",
+      "retained": "examples/schedule_api/03_reverse_compute_at.py",
+      "sha256": "eac1cc4c727c0d105e24f7ee32e2f3c3c171d31bf7ba9e19e8d0b3c7cd358083",
+      "bytes": 995
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/03_reverse_compute_at.trace.txt",
+      "retained": "examples/schedule_api/03_reverse_compute_at.trace.txt",
+      "sha256": "6d6c67421558101429059c489875bc504b7a20a467ac79df1638ce749169f536",
+      "bytes": 306
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/04_cache_read.py",
+      "retained": "examples/schedule_api/04_cache_read.py",
+      "sha256": "08f18611ae203483b327b312c1518210b4ba3ac1da90c8910c098eb040563f4f",
+      "bytes": 888
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/04_cache_read.trace.txt",
+      "retained": "examples/schedule_api/04_cache_read.trace.txt",
+      "sha256": "8c3e9a34556f3dfd261575598e0c1d3bcea95f0964cbb64092be8ba2d3179c8b",
+      "bytes": 127
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/05_cache_read_compute_at.py",
+      "retained": "examples/schedule_api/05_cache_read_compute_at.py",
+      "sha256": "6fa751e9751baab70be0652ea8cc46a65096c30feb7dbd27b6b3812c147af3ba",
+      "bytes": 1061
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/05_cache_read_compute_at.trace.txt",
+      "retained": "examples/schedule_api/05_cache_read_compute_at.trace.txt",
+      "sha256": "fefba28d107a7fa770aa35d97d3dc8c34e6628621d36f946ee8fb57f7ec13463",
+      "bytes": 378
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/06_set_scope.py",
+      "retained": "examples/schedule_api/06_set_scope.py",
+      "sha256": "f42fac19fff44b9ef219b35b6ccd5ab7b0387acecbd08fca92dc6d1c9733c980",
+      "bytes": 895
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/06_set_scope.trace.txt",
+      "retained": "examples/schedule_api/06_set_scope.trace.txt",
+      "sha256": "464c04ccf41c40c25c28b772afcbf6e269e4ddae689f6652aa0ca7409b377daf",
+      "bytes": 116
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/07_cache_write.py",
+      "retained": "examples/schedule_api/07_cache_write.py",
+      "sha256": "1621fca49484c55f97ab5b71cdff0c2752fbda707d9b89e3eab834eb90fbe4c4",
+      "bytes": 888
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/07_cache_write.trace.txt",
+      "retained": "examples/schedule_api/07_cache_write.trace.txt",
+      "sha256": "e1f03887be79d17a34dd61dab0b9044dee23ba06ab918f979b56a83572023f64",
+      "bytes": 129
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/08_cache_read_compacted.py",
+      "retained": "examples/schedule_api/08_cache_read_compacted.py",
+      "sha256": "b05b8a00ed4c4380ec5ca82fb1f7f9ac100d90ca04ad99a5f450c3df5f287e13",
+      "bytes": 1154
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/checks.json",
+      "retained": "examples/schedule_api/checks.json",
+      "sha256": "892ee43a45314116ddd559e08e859d033b84727e90d09773113d93d3a6767b3e",
+      "bytes": 207
+    },
+    {
+      "source": "report/figs/0922_schedule_explanation/make_examples.py",
+      "retained": "examples/schedule_api/reproduce.py",
+      "sha256": "7d36b1bb8ba2ccaf53470ceb113f4e8eae80255bc51d5d52744d37bc5a308697",
+      "bytes": 2819
+    },
+    {
+      "source": "report/figs/0915_attention_explanation/01_input.py",
+      "retained": "examples/attention_canonicalization/01_input.py",
+      "sha256": "c829220f0154ce774c089aa5028e32b4964d89cb3ebee4dc7c07701ba87a8e33",
+      "bytes": 505
+    },
+    {
+      "source": "report/figs/0915_attention_explanation/02_standard_decompose.py",
+      "retained": "examples/attention_canonicalization/02_standard_decompose.py",
+      "sha256": "c829220f0154ce774c089aa5028e32b4964d89cb3ebee4dc7c07701ba87a8e33",
+      "bytes": 505
+    },
+    {
+      "source": "report/figs/0915_attention_explanation/03_npu_canonical.py",
+      "retained": "examples/attention_canonicalization/03_npu_canonical.py",
+      "sha256": "8abfbf7448397b77dd61fead6ea922e383ce9d0500f13fccfc907321674bb787",
+      "bytes": 1499
+    },
+    {
+      "source": "report/figs/0915_attention_explanation/04_standard_attention_legalize.py",
+      "retained": "examples/attention_canonicalization/04_standard_attention_legalize.py",
+      "sha256": "a8340eb9564012c76cea97ea9b34e6bb7c847be1ebe797976f185ff03deb2304",
+      "bytes": 10242
+    },
+    {
+      "source": "report/figs/0915_attention_explanation/05_canonical_then_legalize.py",
+      "retained": "examples/attention_canonicalization/05_canonical_then_legalize.py",
+      "sha256": "53e89e743e7cff9bfa37557901b953b45519f1c8add478659ea74e780254e526",
+      "bytes": 12720
+    },
+    {
+      "source": "report/figs/0915_attention_explanation/comparison.json",
+      "retained": "examples/attention_canonicalization/comparison.json",
+      "sha256": "cb5a3305b99fdde0589691c9b59a139e9c250f459432ef0ba292dc90266e24e6",
+      "bytes": 2236
+    },
+    {
+      "source": "report/figs/0915_attention_explanation/reproduce.py",
+      "retained": "examples/attention_canonicalization/reproduce.py",
+      "sha256": "a39f10b3625581ed22b59d6321ba2cdf7774a374683a6faf36d0006e6ae6a3d7",
+      "bytes": 3773,
+      "retained_sha256": "1e156e3a830c4fbcc8bac1fe89f51e9aa58b82dab99b56c83647b9b923422276",
+      "adaptation": "Only repository-root parent index changed after relocation: parents[3] to parents[4]. Original source hash remains in sha256."
+    }
+  ]
+}

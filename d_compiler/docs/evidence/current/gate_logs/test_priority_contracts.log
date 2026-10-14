@@ -1,0 +1,17 @@
+.[08:31:46] /home/chokwans99/tvm-src/src/relax/ir/block_builder.cc:65: Warning: BlockBuilder destroyed with remaining blocks!
+.........[08:32:19] /home/chokwans99/tvm-src/src/relax/ir/block_builder.cc:65: Warning: BlockBuilder destroyed with remaining blocks!
+[08:32:19] /home/chokwans99/tvm-src/src/relax/ir/block_builder.cc:65: Warning: BlockBuilder destroyed with remaining blocks!
+[08:32:19] /home/chokwans99/tvm-src/src/relax/ir/block_builder.cc:65: Warning: BlockBuilder destroyed with remaining blocks!
+.[08:32:19] /home/chokwans99/tvm-src/src/relax/ir/block_builder.cc:65: Warning: BlockBuilder destroyed with remaining blocks!
+.
+----------------------------------------------------------------------
+Ran 12 tests in 34.478s
+
+OK
+{"hf_fuse": false, "hf_w8a8": false, "cosine": 0.9999998645306665, "words": 17096, "calls": 81}
+{"hf_fuse": true, "hf_w8a8": false, "cosine": 0.9999998645306665, "words": 16407, "calls": 42}
+{"hf_fuse": false, "hf_w8a8": true, "cosine": 0.9999995669750517, "words": 19650, "calls": 81}
+{"rms_width": 64, "epsilon": 1e-05, "words": 522, "max_abs": 0.0016572269618468916}
+{"rms_width": 64, "epsilon": 1e-10, "words": 522, "max_abs": 0.0016572269718326815}
+{"rms_width": 3072, "epsilon": 1e-05, "words": 623, "max_abs": 0.011874157994341772}
+{"rms_width": 3072, "epsilon": 1e-10, "words": 623, "max_abs": 0.011874157795929818}

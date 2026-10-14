@@ -1,4 +1,7 @@
-"""The W8A8 matmul, emitted as one validated instruction sequence.
+"""Reference W8A8 emitter, retained for migration and numerical comparisons.
+
+The default compiler now uses npu_w8a8_schedule and the common Python/native
+walkers. ``compile_program(w8a8_mode="reference")`` selects this older path.
 
 Activation quantization is dynamic -- the scale is this row's max, known only
 at runtime -- so unlike weight quantization it must happen on the machine.
@@ -10,11 +13,9 @@ partial sum by ``w_scale[col] * a_scale[row]`` as it enters the FP32
 accumulator -- the scales are constant along K, so this equals scaling the
 whole dot product.
 
-This kernel is emitted directly rather than walked from TIR: the sequence is
-the hand-written backend's, bit-exact against ``quantize.w8a8_reference``,
-and TIR would have to be pattern-matched back into exactly these
-instructions anyway.  The TIR body still defines the semantics the llvm
-cross-check runs.
+This reference emits the entire kernel directly and is bit-exact against
+``quantize.w8a8_reference``. The scheduled path makes its memory and ordering
+explicit in TIR; its decomposition need not preserve this reference's words.
 
 Shape contract (the same one the oracle enforced): K and N are multiples of
 the 64-lane tile; M is free (partial row tiles ride in the descriptors);
@@ -22,33 +23,37 @@ every activation row fits one vector instruction (K <= 65535).
 """
 from __future__ import annotations
 
-from .isa_0818 import DST, IMM, SRC1, SRC2, VECTOR
+from .isa_compute import DST, IMM, SRC1, SRC2, VECTOR
 from .isa_v09 import DT_FP16, DT_FP32, DT_INT8
 
 TILE = 64
 
 
 def is_w8a8(prim):
-    """Does this PrimFunc carry the W8A8 marker block?"""
-    import tvm.tir as tir
-
-    found = []
-
-    def visit(node):
-        if isinstance(node, tir.Block) and node.name_hint == "a_quant":
-            found.append(node)
-
-    tir.stmt_functor.post_order_visit(prim.body, visit)
-    return bool(found)
+    """The quantization pass explicitly declares the emitter's semantics."""
+    return prim.attrs is not None and prim.attrs.get("npu.kernel") == "w8a8"
 
 
-def emit(asm, stage, prim, addresses, sram_base, capacity=None):
+def emit(asm, stage, prim, addresses, sram_base, capacity=None, diagnostics=None):
     """Emit the whole W8A8 matmul; returns the SRAM high-water mark."""
+    if not is_w8a8(prim) or int(prim.attrs.get("npu.kernel_version", 0)) != 1:
+        raise ValueError("unsupported W8A8 semantic contract version")
+    if len(prim.params) != 4 or len(addresses) != 4:
+        raise ValueError("W8A8 requires (FP16 X, INT8 W, FP32 scale, FP16 out)")
     # bind by parameter order -- buffer_map's iteration order is not the
     # signature's
     x_buf, qw_buf, ws_buf, out_buf = [prim.buffer_map[p] for p in prim.params]
+    buffers = (x_buf, qw_buf, ws_buf, out_buf)
+    if (tuple(str(b.dtype) for b in buffers) !=
+            ("float16", "int8", "float32", "float16")
+            or tuple(len(b.shape) for b in buffers) != (2, 2, 1, 2)):
+        raise ValueError("invalid W8A8 buffer dtypes or ranks")
     rows, inner = [int(d) for d in x_buf.shape]
     cols = int(qw_buf.shape[1])
+    if (min(rows, inner, cols) <= 0 or int(qw_buf.shape[0]) != inner
+            or int(ws_buf.shape[0]) != cols
+            or tuple(int(d) for d in out_buf.shape) != (rows, cols)):
+        raise ValueError("inconsistent W8A8 buffer shapes")
     x_addr, qw_addr, ws_addr, out_addr = addresses
     if inner % TILE or cols % TILE:
         raise ValueError(f"W8A8 needs K,N as {TILE}-multiples, got "
@@ -66,17 +71,18 @@ def emit(asm, stage, prim, addresses, sram_base, capacity=None):
     panel = rows
     if capacity is not None:
         room = capacity - sram_base - fixed
-        if room < per_row * TILE:
+        minimum_rows = min(rows, TILE)
+        if room < per_row * minimum_rows:
             raise ValueError(
                 f"W8A8 [{rows},{inner}]x[{inner},{cols}] does not fit: "
-                f"{TILE} rows need "
-                f"{(fixed + TILE * per_row) / 2 / 1024 / 1024:.2f} MiB of "
+                f"{minimum_rows} rows need "
+                f"{(fixed + minimum_rows * per_row) / 2 / 1024 / 1024:.2f} MiB of "
                 f"{(capacity - sram_base) / 2 / 1024 / 1024:.2f} MiB")
         panel = min(rows, room // per_row)
         if panel >= TILE:
             panel = panel // TILE * TILE
-            while panel > TILE and rows % panel:
-                panel -= TILE          # an even row loop, like panel_for does
+            # This emitter handles a tail with min(panel, remaining).  Unlike
+            # TIR compute_at, it does not require panel to divide M.
 
     cursor = [sram_base]
 
@@ -99,6 +105,12 @@ def emit(asm, stage, prim, addresses, sram_base, capacity=None):
     # lm_head is [7, 128256]) would need a row stride the 16-bit shape field
     # cannot hold, and the encoder used to mask it silently
     dst_nib = alloc(panel * TILE * 4)
+    if capacity is not None and cursor[0] > capacity:
+        raise ValueError("W8A8 allocations exceed SRAM capacity")
+    if diagnostics is not None:
+        diagnostics.update(kind="w8a8", contract_version=1, rows=rows,
+                           panel_rows=panel, row_panels=(rows + panel - 1) // panel,
+                           sram_peak_nibbles=cursor[0])
 
     stage.dma_in(ws_addr * 2, w_scale_nib, cols * 4)
 
@@ -141,6 +153,27 @@ def emit(asm, stage, prim, addresses, sram_base, capacity=None):
             asm.vlen(1)
             asm.addr(SRC1, acc_nib, 1)
             asm.shape_dt(SRC1, 1, 1, 1, DT_FP16)
+            asm.load(0, SRC1)
+            # TE defines scale=1 for an all-zero row.  Compute
+            # (absmax + 127 * (absmax == 0)) / 127 without a branch.
+            # The numerator round-trip through FP16 preserves every finite
+            # nonzero absmax exactly.  acc's second FP16 cell holds the mask.
+            asm.v_compare(IMM, 0)
+            asm.addr(DST, acc_nib + 4, 1)
+            asm.shape_dt(DST, 1, 1, 1, DT_FP16)
+            asm.save(0)
+            asm.addr(SRC1, acc_nib + 4, 1)
+            asm.load(0, SRC1)
+            asm.v_mul(IMM, 127)
+            asm.save(0)
+            asm.addr(SRC2, acc_nib + 4, 1)
+            asm.shape_dt(SRC2, 1, 1, 1, DT_FP16)
+            asm.load(0, SRC2)
+            asm.addr(SRC1, acc_nib, 1)
+            asm.load(0, SRC1)
+            asm.v_add(VECTOR)
+            asm.addr(DST, acc_nib, 1)
+            asm.save(0)
             asm.load(0, SRC1)
             asm.v_div(IMM, 127)
             asm.addr(DST, a_scale_nib + row * 8, 1)

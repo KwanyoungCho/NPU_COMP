@@ -18,7 +18,7 @@ from tvm import relax
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from npu_compiler.nn_models import qwen3
-from npu_compiler.qwen3_model import Qwen3Assets
+from npu_compiler.assets.qwen3 import Qwen3Assets
 
 REFERENCE = Path(__file__).resolve().parent / "build" \
     / "qwen3_reference_generate_hello_3.npz"

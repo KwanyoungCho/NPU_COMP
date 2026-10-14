@@ -1,0 +1,15 @@
+{
+  "status": "passed",
+  "cases": {
+    "pipeline": {
+      "fused_unfused_bit_exact": true,
+      "cmodel_counters_match": true,
+      "llvm_max_abs": 0.0,
+      "llvm_rtol": 0.003,
+      "llvm_atol": 5e-05
+    },
+    "memory": 5
+  },
+  "seconds": 7.065014790743589,
+  "full_model_compiled": false
+}

@@ -1,0 +1,52 @@
+{
+  "abi": 4,
+  "max_vlen": 65535,
+  "storage": {
+    "float16": [4, 2],
+    "float32": [8, 4],
+    "int8": [2, 1],
+    "int4": [1, 1]
+  },
+  "binary": {
+    "Add": "v_add", "Sub": "v_sub", "Mul": "v_mul", "Div": "v_div",
+    "Min": "v_min", "Max": "v_max"
+  },
+  "unary": {
+    "tir.exp": "v_exp", "tir.sqrt": "v_sqrt",
+    "tir.cos": "v_cos", "tir.sin": "v_sin"
+  },
+  "composite": {
+    "tir.fabs": ["_fabs", "MaterializeAbs"],
+    "tir.rsqrt": ["_rsqrt", "MaterializeRsqrt"],
+    "tir.sigmoid": ["_sigmoid", "MaterializeSigmoid"],
+    "tir.tanh": ["_tanh", "MaterializeTanh"]
+  },
+  "vector_load": ["float16"],
+  "vector_store": ["float16", "float32"],
+  "generic_store": ["float16"],
+  "matrix_store": ["float16"],
+  "reductions": {
+    "sum_update": "npu_sum_fp32_update",
+    "accumulator_dtype": "float32",
+    "result_storage_dtype": "float16",
+    "matrix_k_tile": 64,
+    "matrix_partial_spill": "forbidden",
+    "cpu_reference": "split/rfactor into 64-element partial sums"
+  },
+  "w8a8": {
+    "row_intrinsic": "npu_quantize_row",
+    "scaled_mac_intrinsic": "npu_scaled_mac",
+    "save_intrinsic": "npu_store_scaled",
+    "accumulator_scope": "local.accumulator",
+    "pointer_offsets": "elements_after_lower_match_buffer",
+    "tile_arithmetic": "FP32(INT32 dot64) * FP32 weight_scale * FP32 activation_scale, then FP32 accumulate",
+    "scale_dtype": "float32",
+    "output_dtype": "float16"
+  },
+  "numeric_policy": "fp16_storage_fp32_accum",
+  "state": {
+    "matrix_accumulators": 1,
+    "flush_before_vector": true,
+    "scratch_alias_at_expression_boundary_only": true
+  }
+}

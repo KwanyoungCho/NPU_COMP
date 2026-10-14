@@ -17,7 +17,7 @@ Each transfer is attributed by its global address: parameters are weights,
 everything else is an activation the previous kernel wrote and this one is
 reading back.
 
-Writes JSON for report/figs/0901/plot_traffic.py.
+Writes JSON measurements for subsequent analysis; keep generated runs under build/.
 """
 import argparse
 import json
@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from npu_compiler import model, npu_legalize, npu_link
+from npu_compiler import npu_legalize, npu_link
 from npu_compiler import tvm_pipeline as pipeline
 from npu_compiler.isa_v09 import DMA_WORDS, OP_GLOAD, OP_GSTORE
 from npu_compiler.nn_models import llama
@@ -38,11 +38,7 @@ CELL = 4                     # a DMA moves whole 32-bit cells
 def layer_config(layers=1, vocab=256):
     """Real Llama 3.2 3B dimensions; the vocabulary is shrunk unless asked for
     so that lm_head does not swamp the per-layer picture."""
-    cfg = model.LLAMA_3_2_3B
-    return dict(hidden_size=cfg.D, intermediate_size=cfg.F,
-                num_hidden_layers=layers, num_attention_heads=cfg.H,
-                num_key_value_heads=cfg.KV, head_dim=cfg.HD,
-                vocab_size=vocab, rms_norm_eps=1e-5, rope_theta=500000.0)
+    return llama.benchmark_config(layers, vocab)
 
 
 def _ranges(func, plan):

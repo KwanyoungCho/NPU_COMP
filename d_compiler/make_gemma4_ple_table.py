@@ -18,8 +18,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from npu_compiler.gemma4_model import Gemma4Assets
-from npu_compiler.gemma4_ple import compute_rows, f16
+from npu_compiler.assets.gemma import Gemma4Assets
+from npu_compiler.assets.gemma_ple import compute_rows, f16
 
 
 def main():

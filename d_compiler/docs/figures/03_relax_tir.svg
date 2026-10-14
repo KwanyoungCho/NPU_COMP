@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5b70"/></marker></defs>
+<rect width="1200" height="700" fill="white"/>
+<g font-family="DejaVu Sans,Arial,sans-serif" fill="#142239">
+<text x="45" y="52" font-size="30" text-anchor="start" font-weight="bold">03  LegalizeOps keeps the Relax call graph</text>
+<text x="45" y="89" font-size="17" text-anchor="start" font-weight="normal">High-level operators become calls to concrete TIR computations</text>
+<rect x="45" y="160" width="460" height="210" rx="12" fill="#d6f2e5" stroke="#66758b" stroke-width="1.5"/>
+<text x="275.0" y="242.65" font-size="19" text-anchor="middle" font-weight="normal">Before</text>
+<text x="275.0" y="271.65" font-size="19" text-anchor="middle" font-weight="normal">Relax: matmul -&gt; add -&gt; SiLU</text>
+<text x="275.0" y="300.65" font-size="19" text-anchor="middle" font-weight="normal">Tensor shapes + data dependencies</text>
+<rect x="695" y="135" width="460" height="190" rx="12" fill="#d6f2e5" stroke="#66758b" stroke-width="1.5"/>
+<text x="925.0" y="207.65" font-size="19" text-anchor="middle" font-weight="normal">After: Relax</text>
+<text x="925.0" y="236.65" font-size="19" text-anchor="middle" font-weight="normal">call_tir(matmul)</text>
+<text x="925.0" y="265.65" font-size="19" text-anchor="middle" font-weight="normal">-&gt; call_tir(add) -&gt; call_tir(silu)</text>
+<path d="M505,255 L695,255" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="695,255 684.0,260.0 684.0,250.0" fill="#4b5b70"/>
+<text x="600.0" y="243.0" font-size="15" text-anchor="middle" font-weight="normal">LegalizeOps</text>
+<rect x="695" y="440" width="460" height="150" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="925.0" y="492.65" font-size="19" text-anchor="middle" font-weight="normal">TIR PrimFuncs</text>
+<text x="925.0" y="521.65" font-size="19" text-anchor="middle" font-weight="normal">Loops / indices / reductions / casts</text>
+<text x="925.0" y="550.65" font-size="19" text-anchor="middle" font-weight="normal">Still before hardware scheduling</text>
+<path d="M925,325 L925,440" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="925,440 920.0,429.0 930.0,429.0" fill="#4b5b70"/>
+<text x="939" y="382.5" font-size="15" text-anchor="start" font-weight="normal">calls</text>
+<rect x="45" y="450" width="460" height="140" rx="12" fill="#fff3c7" stroke="#66758b" stroke-width="1.5"/>
+<text x="275.0" y="512.15" font-size="19" text-anchor="middle" font-weight="normal">FuseOps groups the calls</text>
+<text x="275.0" y="541.15" font-size="19" text-anchor="middle" font-weight="normal">FuseTIR combines their TIR bodies</text>
+<text x="45" y="662" font-size="16" text-anchor="start" font-weight="normal">One module can contain both Relax functions and TIR PrimFuncs.</text>
+</g></svg>

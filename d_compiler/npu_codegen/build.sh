@@ -16,6 +16,11 @@ fi
 
 # TVM builds with its own logging library; without this dmlc-core installs a
 # second set of the same macros and every translation unit warns
+NPU_BUILD_PYTHON="${NPU_BUILD_PYTHON:-/home/chokwans99/anaconda3/envs/npu-tvm/bin/python}"
+"$NPU_BUILD_PYTHON" "$HERE/generate_contract.py"
+"$NPU_BUILD_PYTHON" "$HERE/build_identity.py"
+NPU_BUILD_OUTPUT="$(mktemp "${OUT}.tmp.XXXXXX")"
+trap 'rm -f -- "$NPU_BUILD_OUTPUT"' EXIT
 g++ -std=c++17 -O2 -fPIC -shared -Wall \
     -DDMLC_USE_LOGGING_LIBRARY='<tvm/runtime/logging.h>' \
     -I"$HERE" \
@@ -25,6 +30,7 @@ g++ -std=c++17 -O2 -fPIC -shared -Wall \
     "$HERE/codegen_v09.cc" "$HERE/v09_walker.cc" \
     -L"$TVM_HOME/build" -ltvm \
     -Wl,-rpath,"$TVM_HOME/build" \
-    -o "$OUT"
+    -o "$NPU_BUILD_OUTPUT"
+mv -f -- "$NPU_BUILD_OUTPUT" "$OUT"
 
 echo "built $OUT"

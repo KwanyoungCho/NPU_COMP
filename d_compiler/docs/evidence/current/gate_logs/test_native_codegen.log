@@ -1,0 +1,8 @@
+  [PASS] 84 words bit-exact across every encoder, descriptor and DMA shape
+  [PASS] unsupported kernel returns None with a reason
+  [PASS] llama prefill           24/24  kernel types identical (12,523 words)
+  [PASS] qwen3 prefill           26/26  kernel types identical (15,317 words)
+  [PASS] llama prefill_cache     26/26  kernel types identical (13,051 words)
+  [PASS] llama decode            25/25  kernel types identical (7,447 words)
+  [PASS] whole program identical: 8,009 words, 24/24 kernel types native
+ALL NATIVE CODEGEN TESTS PASSED

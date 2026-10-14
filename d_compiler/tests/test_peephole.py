@@ -68,7 +68,7 @@ def test_results_are_identical_with_and_without():
 def test_a_write_of_the_same_value_is_dropped():
     """Directly: two identical descriptor writes collapse, a differing one
     survives, and a DMA's payload words are never read as opcodes."""
-    from npu_compiler.isa_0818 import SRC1
+    from npu_compiler.isa_compute import SRC1
     from npu_compiler.isa_v09 import enc_addr_lo, enc_gload, enc_vlen
 
     same = [enc_vlen(64), enc_vlen(64), enc_vlen(64)]

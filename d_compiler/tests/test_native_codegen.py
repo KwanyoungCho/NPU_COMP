@@ -17,8 +17,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[0]))
 
 from npu_compiler import native
-from npu_compiler.backend_v09 import V09Asm
-from npu_compiler.isa_0818 import DST, IMM, MAIN, PARTIAL, SCALAR, SRC1, SRC2, VECTOR
+from npu_compiler.v09_asm import V09Asm
+from npu_compiler.isa_compute import DST, IMM, MAIN, PARTIAL, SCALAR, SRC1, SRC2, VECTOR
 from npu_compiler.isa_v09 import (ACT_SILU, DT_FP16, DT_FP32, DT_INT8)
 from npu_compiler.tir_codegen_v09 import SramEmitter
 
@@ -196,27 +196,21 @@ def test_native_program_is_identical_end_to_end():
 
 
 def test_an_uncovered_kernel_falls_back():
-    """The native walker refusing a kernel must be a fall back, not a crash.
+    """A valid call containing an unsupported intrinsic returns a diagnostic.
 
-    Coverage is currently complete, so nothing in the suite exercises the
-    fall back naturally -- and an unhandled exception type here would turn
-    the first genuinely unsupported kernel into a hard failure instead of a
-    slow one.  A deliberately malformed call stands in for that kernel.
+    Invalid bindings are compiler errors, separately tested in the contract
+    suite. They must not stand in for an unsupported operation.
     """
     if not native.load():
         print("  [SKIP] native codegen not built")
         return
-    from npu_compiler import npu_link, npu_memplan
-    from tvm import relax, tir
-
-    lowered = _layer_module()
-    planned, _ = npu_memplan.assign_addresses(lowered, "prefill")
-    prim = next(fn for _, fn in planned.functions.items()
-                if isinstance(fn, tir.PrimFunc))
-    # too few addresses for the signature: the native walker raises, and the
-    # wrapper has to turn that into "not covered"
-    assert native.codegen_kernel(prim, [], {}, (), {}, 0) is None
-    print("  [PASS] a kernel the native walker refuses returns None")
+    from tvm import tir
+    prim = tir.PrimFunc([], tir.Evaluate(tir.call_extern("int32", "npu.unsupported_probe")))
+    diagnostics = {}
+    assert native.codegen_kernel(prim, [], {}, (), {}, 0, diagnostics) is None
+    assert diagnostics["status"] == "fallback"
+    assert "npu.unsupported_probe" in diagnostics["reason"]
+    print("  [PASS] unsupported kernel returns None with a reason")
 
 
 if __name__ == "__main__":

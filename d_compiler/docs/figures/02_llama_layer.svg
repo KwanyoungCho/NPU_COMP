@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5b70"/></marker></defs>
+<rect width="1200" height="700" fill="white"/>
+<g font-family="DejaVu Sans,Arial,sans-serif" fill="#142239">
+<text x="45" y="52" font-size="30" text-anchor="start" font-weight="bold">02  One Llama layer</text>
+<text x="45" y="89" font-size="17" text-anchor="start" font-weight="normal">Llama 3.2 3B widths | S tokens | 28 layers in the full model</text>
+<rect x="45" y="145" width="250" height="80" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="170.0" y="191.65" font-size="19" text-anchor="middle" font-weight="normal">X [S,3072]</text>
+<rect x="380" y="145" width="330" height="80" rx="12" fill="#d6f2e5" stroke="#66758b" stroke-width="1.5"/>
+<text x="545.0" y="191.65" font-size="19" text-anchor="middle" font-weight="normal">RMSNorm + Q / K / V</text>
+<rect x="795" y="145" width="360" height="80" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="975.0" y="191.65" font-size="19" text-anchor="middle" font-weight="normal">RoPE + attention + O</text>
+<path d="M295,185 L380,185" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="380,185 369.0,190.0 369.0,180.0" fill="#4b5b70"/>
+<path d="M710,185 L795,185" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="795,185 784.0,190.0 784.0,180.0" fill="#4b5b70"/>
+<rect x="795" y="305" width="360" height="80" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="975.0" y="351.65" font-size="19" text-anchor="middle" font-weight="normal">R = X + attention output</text>
+<path d="M975,225 L975,305" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="975,305 970.0,294.0 980.0,294.0" fill="#4b5b70"/>
+<polyline points="170,225 170,345 795,345" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="795.0,345.0 784.0,350.0 784.0,340.0" fill="#4b5b70"/>
+<text x="405" y="325" font-size="18" text-anchor="start" font-weight="normal">Residual X must survive</text>
+<rect x="45" y="460" width="250" height="100" rx="12" fill="#d6f2e5" stroke="#66758b" stroke-width="1.5"/>
+<text x="170.0" y="502.15" font-size="19" text-anchor="middle" font-weight="normal">RMSNorm(R)</text>
+<text x="170.0" y="531.15" font-size="19" text-anchor="middle" font-weight="normal">[S,3072]</text>
+<rect x="380" y="435" width="340" height="130" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="550.0" y="477.65" font-size="19" text-anchor="middle" font-weight="normal">SiLU(gate) * up</text>
+<text x="550.0" y="506.65" font-size="19" text-anchor="middle" font-weight="normal">[S,8192]</text>
+<text x="550.0" y="535.65" font-size="19" text-anchor="middle" font-weight="normal">then down [S,3072]</text>
+<rect x="795" y="460" width="360" height="100" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="975.0" y="502.15" font-size="19" text-anchor="middle" font-weight="normal">Y = R + MLP output</text>
+<text x="975.0" y="531.15" font-size="19" text-anchor="middle" font-weight="normal">[S,3072]</text>
+<polyline points="975,385 975,408 170,408 170,460" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="170.0,460.0 165.0,449.0 175.0,449.0" fill="#4b5b70"/>
+<path d="M295,510 L380,510" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="380,510 369.0,515.0 369.0,505.0" fill="#4b5b70"/>
+<path d="M720,510 L795,510" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="795,510 784.0,515.0 784.0,505.0" fill="#4b5b70"/>
+<polyline points="1155,345 1175,345 1175,510 1155,510" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="1155.0,510.0 1166.0,505.0 1166.0,515.0" fill="#4b5b70"/>
+<text x="600" y="607" font-size="18" text-anchor="middle" font-weight="normal">Prefill S &gt; 1; decode S = 1. Attention reads the accumulated KV context.</text>
+<text x="45" y="662" font-size="16" text-anchor="start" font-weight="normal">Shapes describe the model. SRAM retention depends on lifetimes and available capacity.</text>
+</g></svg>

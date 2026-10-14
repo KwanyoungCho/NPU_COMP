@@ -1,0 +1,121 @@
+[
+  {
+    "name": "compile_speed",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 3.474624441936612,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_compile_speed.log"
+  },
+  {
+    "name": "compiler_refinement",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 14.252646600827575,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_compiler_refinement.log"
+  },
+  {
+    "name": "schedule_memory",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 18.81505696848035,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_schedule_memory.log"
+  },
+  {
+    "name": "architecture_contracts",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 9.138946922495961,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_architecture_contracts.log"
+  },
+  {
+    "name": "pipeline_extensions",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 68.64678547345102,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_pipeline_extensions.log"
+  },
+  {
+    "name": "optimization_contracts",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 20.369054924696684,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_optimization_contracts.log"
+  },
+  {
+    "name": "completion_contracts",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 8.94098282046616,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_completion_contracts.log"
+  },
+  {
+    "name": "sram_lifetime",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 6.683472787961364,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_sram_lifetime.log"
+  },
+  {
+    "name": "priority_contracts",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 37.31695714779198,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_priority_contracts.log"
+  },
+  {
+    "name": "compiler_contracts",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 44.58499278873205,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_compiler_contracts.log"
+  },
+  {
+    "name": "npu_memplan",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 2.4211926478892565,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_npu_memplan.log"
+  },
+  {
+    "name": "npu_target",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 34.80807561799884,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_npu_target.log"
+  },
+  {
+    "name": "npu_link",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 9.341993233188987,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_npu_link.log"
+  },
+  {
+    "name": "npu_quantize",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 18.867765937000513,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_npu_quantize.log"
+  },
+  {
+    "name": "native_codegen",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 25.634250121191144,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_native_codegen.log"
+  },
+  {
+    "name": "nn_hf",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 13.954777160659432,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_nn_hf.log"
+  },
+  {
+    "name": "nn_decode",
+    "exit_code": 0,
+    "status": "passed",
+    "seconds": 207.28363716602325,
+    "log": "/home/chokwans99/NPU_cmodel/report/figs/0928_compile_speed/completed_gate/test_nn_decode.log"
+  }
+]

@@ -18,7 +18,7 @@ from tvm import relax
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from npu_compiler.nn_models import llama
-from npu_compiler.v3_model import Llama32Assets
+from npu_compiler.assets.llama import Llama32Assets
 
 
 def parse_args():

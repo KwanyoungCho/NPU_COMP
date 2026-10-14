@@ -69,9 +69,13 @@ class HFImporter(ExportedProgramImporter):
                 right = _PRECEDENCE.get(str(rhs.struct_info.dtype))
                 if left and right and left != right:
                     wide = (lhs if left > right else rhs).struct_info.dtype
-                    narrow = node.args[1] if left > right else node.args[0]
-                    self.env[narrow] = self.block_builder.emit(
-                        relax.op.astype(self.env[narrow], wide))
+                    # Promotion belongs to this use, never to the FX value:
+                    # another consumer may still require the original dtype.
+                    if left < right:
+                        lhs = self.block_builder.emit(relax.op.astype(lhs, wide))
+                    else:
+                        rhs = self.block_builder.emit(relax.op.astype(rhs, wide))
+                    return self.block_builder.emit(relax_op(lhs, rhs))
             return convert(node)
 
         return promoted
@@ -97,10 +101,11 @@ def _rms_norm_pattern():
     data = wildcard()
     weight = wildcard()
     data32 = is_op("relax.astype")(data)
-    squared = (is_op("relax.power")(data32, wildcard())
+    exponent, epsilon = wildcard(), wildcard()
+    squared = (is_op("relax.power")(data32, exponent)
                | is_op("relax.multiply")(data32, data32))
     mean = is_op("relax.mean")(squared)
-    shifted = is_op("relax.add")(mean, wildcard())
+    shifted = is_op("relax.add")(mean, epsilon)
     inv = is_op("relax.rsqrt")(shifted)
     normed = is_op("relax.multiply")(data32, inv)
     back = is_op("relax.astype")(normed)
@@ -108,14 +113,48 @@ def _rms_norm_pattern():
                | is_op("relax.multiply")(back, weight))
 
     def rewrite(orig, matches):
-        eps = 1e-6
-        add_expr = matches[shifted]
-        if isinstance(add_expr.args[1], relax.Constant):
-            eps = float(add_expr.args[1].data.numpy())
-        gamma = relax.op.astype(matches[weight],
-                                matches[data].struct_info.dtype)
-        return relax.op.nn.rms_norm(matches[data], gamma, axes=[-1],
-                                    epsilon=eps)
+        # A syntactic match does not establish RMSNorm semantics.  In
+        # particular power(x, 3), a different reduction axis, or a runtime
+        # epsilon must retain their original expressions.
+        import math
+
+        def scalar(expr):
+            if not isinstance(expr, relax.Constant):
+                return None
+            array = expr.data.numpy()
+            return float(array) if array.ndim == 0 else None
+
+        x, gamma = matches[data], matches[weight]
+        info, winfo = x.struct_info, gamma.struct_info
+        if not (isinstance(info, relax.TensorStructInfo)
+                and isinstance(winfo, relax.TensorStructInfo)
+                and info.dtype in ("float16", "float32")
+                and winfo.dtype == "float16"
+                and info.ndim > 0 and winfo.ndim == 1
+                and info.shape is not None and winfo.shape is not None
+                and tvm.ir.structural_equal(info.shape[-1], winfo.shape[0])):
+            return orig
+        if (matches[data32].attrs.dtype != "float32"
+                or matches[back].attrs.dtype != "float16"):
+            return orig
+        if matches[squared].op == tvm.ir.Op.get("relax.power"):
+            if scalar(matches[exponent]) != 2.0:
+                return orig
+        attrs = matches[mean].attrs
+        axes = list(attrs.axis) if attrs.axis is not None else list(range(info.ndim))
+        if (len(axes) != 1 or int(axes[0]) not in (-1, info.ndim - 1)
+                or not attrs.keepdims):
+            return orig
+        eps = scalar(matches[epsilon])
+        if eps is None or not math.isfinite(eps) or eps < 0:
+            return orig
+        # TOPI's RMSNorm multiplies gamma in FP32 *before* its output cast,
+        # even for FP16 input.  This pattern multiplies gamma *after* that
+        # cast.  Preserve the boundary using unit-weight normalization and a
+        # separate multiply.  _Demote owns the frontend's FP16 policy.
+        unit_weight = relax.op.ones(relax.ShapeExpr([info.shape[-1]]), info.dtype)
+        normalized = relax.op.nn.rms_norm(x, unit_weight, axes=[-1], epsilon=eps)
+        return relax.op.multiply(relax.op.astype(normalized, "float16"), gamma)
 
     return pattern, rewrite
 
@@ -136,6 +175,12 @@ class _Demote(PyExprMutator):
                 call.attrs.dtype == "float32":
             return self.builder_.normalize(
                 relax.op.astype(args[0], "float16"))
+        if call.op == tvm.ir.Op.get("relax.matmul") and call.attrs.out_dtype == "float32":
+            # This is the explicit frontend fp16 policy, separate from the
+            # shape-only squeeze pass (which must preserve all attributes).
+            args = [self.builder_.normalize(relax.op.astype(arg, "float16"))
+                    if _dtype_of(arg) == "float32" else arg for arg in args]
+            return self.builder_.normalize(relax.op.matmul(*args, out_dtype="float16"))
         dtypes = {_dtype_of(arg) for arg in args} - {None}
         if dtypes == {"float16", "float32"}:
             args = [self.builder_.normalize(relax.op.astype(arg, "float16"))
@@ -159,19 +204,30 @@ class _SqueezeMatmulBatch(PyExprMutator):
         left = lhs.struct_info
         right = rhs.struct_info
         if not (isinstance(left, relax.TensorStructInfo) and left.ndim >= 3
-                and int(left.shape[0]) == 1):
+                and left.shape is not None
+                and isinstance(left.shape[0], tvm.tir.IntImm)
+                and int(left.shape[0]) == 1
+                and isinstance(right, relax.TensorStructInfo)
+                and right.shape is not None and right.ndim <= left.ndim):
+            return call
+        # Removing a dimension shared with a non-unit RHS batch would change
+        # broadcasting. Keep that matmul intact.
+        if right.ndim == left.ndim and not (
+                isinstance(right.shape[0], tvm.tir.IntImm)
+                and int(right.shape[0]) == 1):
             return call
         block = self.builder_
         new_l = block.normalize(relax.op.reshape(
-            lhs, [int(d) for d in left.shape][1:]))
+            lhs, list(left.shape)[1:]))
         new_r = rhs
         if isinstance(right, relax.TensorStructInfo) \
                 and right.ndim == left.ndim and int(right.shape[0]) == 1:
             new_r = block.normalize(relax.op.reshape(
-                rhs, [int(d) for d in right.shape][1:]))
-        out = block.normalize(relax.op.matmul(new_l, new_r))
+                rhs, list(right.shape)[1:]))
+        out = block.normalize(relax.Call(call.op, [new_l, new_r], call.attrs,
+                                        call.sinfo_args, call.span))
         return block.normalize(relax.op.reshape(
-            out, [1] + [int(d) for d in out.struct_info.shape]))
+            out, call.struct_info.shape))
 
 
 def _drop_output_batch(func):
@@ -234,14 +290,58 @@ def causal_mask4d(seq, dtype=np.float16):
     return mask[None, None].astype(dtype)
 
 
-def import_prefill(model, seq):
+def _fold_host_constants(mod):
+    """Fold FP32 rotary/position calculations without folding device arithmetic.
+
+    Private Relax calls are temporary barriers to standard FoldConstant. They
+    keep FP16 arithmetic visible until target legalization has defined its
+    reduction widths. Standard InlinePrivateFunctions removes the barriers.
+    Layout operations and casts may still fold without changing arithmetic.
+    """
+    safe = {"relax.astype", "relax.reshape", "relax.permute_dims",
+            "relax.expand_dims", "relax.squeeze", "relax.broadcast_to",
+            "relax.concat", "relax.split", "relax.strided_slice"}
+    @mutator
+    class Protect(PyExprMutator):
+        def visit_call_(self, call):
+            call = super().visit_call_(call)
+            def half(info):
+                return (isinstance(info, relax.TensorStructInfo) and info.dtype == "float16"
+                        or isinstance(info, relax.TupleStructInfo) and any(half(x) for x in info.fields))
+            if (not isinstance(call.op, tvm.ir.Op) or call.op.name in safe
+                    or not any(half(arg.struct_info) for arg in call.args)):
+                return call
+            params = [relax.Var(f"arg{i}", arg.struct_info) for i, arg in enumerate(call.args)]
+            fn = relax.Function(params, relax.Call(call.op, params, call.attrs, call.sinfo_args),
+                                ret_struct_info=call.struct_info)
+            gv = self.builder_.add_func(fn, "defer_device_arithmetic")
+            return self.builder_.normalize(relax.Call(gv, call.args))
+    rewrite = Protect(mod)
+    for gv, fn in mod.functions.items():
+        if isinstance(fn, relax.Function):
+            rewrite.builder_.update_func(gv, rewrite.visit_expr(fn))
+    folded = relax.transform.FoldConstant()(rewrite.builder_.get())
+    # Inlining function calls splits dataflow blocks. Re-form the pure region
+    # with stock passes so RMSNorm matching can see across former barriers.
+    return tvm.transform.Sequential([relax.transform.InlinePrivateFunctions(),
+        relax.transform.ToNonDataflow(), relax.transform.ConvertToDataflow(min_size=1),
+        relax.transform.CanonicalizeBindings()])(folded)
+
+
+def import_prefill(model, seq, precision="fp16", drop_output_batch=False):
     """HF ``*ForCausalLM`` -> a Relax module ready for the graph pipeline.
 
     The returned function is ``main(inputs_embeds[1,S,D],
     attention_mask[1,1,S,S]) -> logits[1,S,V]``; everything else -- weights,
     positions, rotary tables -- is already a constant inside it.
+
+    ``precision="fp16"`` explicitly demotes traced FP32 islands for v09.
+    ``"preserve"`` retains them for CPU/reference use; it does not promise
+    FP32 vector support on the device.
     """
     import torch
+    if precision not in ("fp16", "preserve"):
+        raise ValueError("HF precision must be 'fp16' or 'preserve'")
 
     model = model.eval()
     hidden = model.config.hidden_size
@@ -279,13 +379,17 @@ def import_prefill(model, seq):
     for var, value in zip(main.params[4:], list(main.attrs["params"])):
         bind[var.name_hint] = value
     mod = relax.transform.BindParams("main", bind)(mod)
-    mod = relax.transform.FoldConstant()(mod)
+    mod = (_fold_host_constants(mod) if precision == "fp16"
+           else relax.transform.FoldConstant()(mod))
 
     pattern, rewrite = _rms_norm_pattern()
     mod["main"] = rewrite_call(pattern, rewrite, mod["main"])
-    mod["main"] = _Demote().visit_expr(mod["main"])
+    if precision == "fp16":
+        mod["main"] = _Demote().visit_expr(mod["main"])
+    mod["main"] = mod["main"].with_attr("npu.frontend_precision", precision)
     mod["main"] = _SqueezeMatmulBatch().visit_expr(mod["main"])
-    mod["main"] = _drop_output_batch(mod["main"])
+    if drop_output_batch:
+        mod["main"] = _drop_output_batch(mod["main"])
     return relax.transform.Normalize()(mod)
 
 

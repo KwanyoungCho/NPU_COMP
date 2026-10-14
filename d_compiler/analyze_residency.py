@@ -15,7 +15,7 @@ Two halves, both static -- neither runs the C-model:
                 (first writer, last reader, bytes, uses).  Keeping it
                 resident saves the store plus every load.
 
-  matmul_cost() replays _matmul_mapping's own arithmetic at a reduced budget,
+  matmul_cost() estimates the baseline mappings at a reduced SRAM budget,
                 which is what a reserved region leaves the kernels.
 
 Reading the two against each other gives the net, which is what decides it.
@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tvm import relax, tir
 
-from npu_compiler import model, npu_intrin, npu_legalize, npu_memplan
+from npu_compiler import npu_intrin, npu_legalize, npu_memplan
 from npu_compiler import tvm_pipeline as pipeline
 from npu_compiler.nn_models import llama
 
@@ -38,11 +38,7 @@ ITEMSIZE = 2
 
 
 def layer_config(layers=1, vocab=256):
-    cfg = model.LLAMA_3_2_3B
-    return dict(hidden_size=cfg.D, intermediate_size=cfg.F,
-                num_hidden_layers=layers, num_attention_heads=cfg.H,
-                num_key_value_heads=cfg.KV, head_dim=cfg.HD,
-                vocab_size=vocab, rms_norm_eps=1e-5, rope_theta=500000.0)
+    return llama.benchmark_config(layers, vocab)
 
 
 def lower(seq, layers=1, vocab=256):
@@ -134,40 +130,22 @@ def select(rows, kernels, capacity):
 
 
 def matmul_cost(shapes, budget_bytes):
-    """Bytes the layer's matmuls move when _matmul_mapping runs at this budget.
+    """Approximate operand DMA using the compiler's shared candidate set.
 
-    Mirrors npu_link._matmul_mapping rather than calling it: the point is to
-    sweep the budget, and the linker takes it from the profile.
+    This standalone what-if model filters by an approximate footprint.  The
+    actual compiler additionally schedules and compacts every tried candidate
+    to validate SRAM, including padding and scratch.  This is not an exact
+    prediction of which mapping the compiler will select.
     """
+    from npu_compiler.npu_schedule import matmul_candidates
+
     total = 0
-    for _, (rows, cols, depth) in shapes:
-        base = (rows * depth * math.ceil(cols / TILE)
-                + depth * cols * math.ceil(rows / TILE))
-        if rows % TILE:
-            total += base * ITEMSIZE      # mapping declines; pad_einsum path
-            continue
-        room = budget_bytes - (depth * TILE + TILE * TILE) * ITEMSIZE
-        if room <= 0:
-            total += base * ITEMSIZE
-            continue
-        span = room // (depth * ITEMSIZE)
-
-        def panel_for(extent):
-            panel = extent
-            while panel > span and panel % 2 == 0 and panel // 2 >= TILE:
-                panel //= 2
-            return panel if panel <= span else None
-
-        best = base
-        panel = panel_for(rows)
-        if panel:
-            best = min(best, rows * depth
-                       + depth * cols * math.ceil(rows / panel))
-        panel = panel_for(cols)
-        if panel:
-            best = min(best, depth * cols
-                       + rows * depth * math.ceil(cols / panel))
-        total += best * ITEMSIZE
+    for _, extents in shapes:
+        candidates = matmul_candidates(extents, TILE)
+        feasible = [c for c in candidates if c["footprint_hint"] <= budget_bytes]
+        if not feasible:
+            raise ValueError("budget cannot hold even the estimated tile footprint")
+        total += min(c["estimated_operand_load_bytes"] for c in feasible)
     return total
 
 

@@ -1,0 +1,20 @@
+{
+  "status": "passed",
+  "compiler_source_sha256": "44694fc6104159862ae86a423d1391c6cce181c774f9e46eaf5ab3ff5f2e1a05",
+  "regression_suites": 17,
+  "model_layers": 28,
+  "generated_ids": [
+    358,
+    2846,
+    4560
+  ],
+  "min_cosine": 0.9999929545969833,
+  "model_execution_source": "baseline artifacts with identical backend/IR, validated under final graph controller",
+  "runtime_validation_seconds": 948.9933168012649,
+  "fresh_full_build_seconds": null,
+  "notes": [
+    "Full validation restored completed first entries; elapsed time is not a cold compilation benchmark.",
+    "Default graph search stops after 120 additional seconds at compiler operation boundaries.",
+    "Initial legal module compilation is outside that budget."
+  ]
+}

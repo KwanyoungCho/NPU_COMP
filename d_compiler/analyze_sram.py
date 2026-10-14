@@ -16,27 +16,25 @@ Three things it is meant to answer:
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tvm import relax, tir
 
-from npu_compiler import model, npu_legalize, npu_link, npu_quantize
+from npu_compiler import npu_legalize, npu_link, npu_quantize
 from npu_compiler import tvm_pipeline as pipeline
 from npu_compiler.isa_v09 import DMA_WORDS, OP_GLOAD, OP_GSTORE
 from npu_compiler.nn_models import llama
+from npu_compiler.device import PROFILES
 
 CELL = 4
 CAPACITY = 8 * 1024 * 1024
 
 
 def layer_config(layers, vocab):
-    cfg = model.LLAMA_3_2_3B
-    return dict(hidden_size=cfg.D, intermediate_size=cfg.F,
-                num_hidden_layers=layers, num_attention_heads=cfg.H,
-                num_key_value_heads=cfg.KV, head_dim=cfg.HD,
-                vocab_size=vocab, rms_norm_eps=1e-5, rope_theta=500000.0)
+    return llama.benchmark_config(layers, vocab)
 
 
 def _floors(planned, plan):
@@ -84,16 +82,22 @@ def _floors(planned, plan):
     return out
 
 
-def measure(seq, layers, vocab, quantize):
+def measure(seq, layers, vocab, quantize, reuse_sram=True):
     mod, _, _ = llama.build_prefill(layer_config(layers, vocab), seq=seq)
     if quantize:
         mod = npu_quantize.QuantizeW8A8()(mod)
     lowered = pipeline.graph_pipeline(
         custom_legalize=npu_legalize.legalize_map(),
         fuse=False, lift_params=True)(mod)
-    asm, plan = npu_link.compile_program(lowered, "prefill", peephole=False)
+    asm, plan = npu_link.compile_program(
+        lowered, "prefill", peephole=False,
+        profile=replace(PROFILES["v09"], reuse_sram=reuse_sram))
     planned, _ = npu_link.npu_memplan.assign_addresses(lowered, "prefill")
     floors = _floors(planned, plan)
+    if not (len(floors) == len(plan.kernel_span) == asm.kernel_count):
+        raise RuntimeError("kernel attribution is incomplete: "
+                           f"{asm.kernel_count} calls, {len(plan.kernel_span)} spans, "
+                           f"{len(floors)} operand floors")
 
     rows = {}
     for (name, start, end), floor in zip(plan.kernel_span, floors):
@@ -112,8 +116,15 @@ def measure(seq, layers, vocab, quantize):
     for name, entry in rows.items():
         entry["sram_bytes"] = plan.sram_peak.get(name, 0) // 2
     return {"seq": seq, "layers": layers, "vocab": vocab,
+            "reuse_sram": reuse_sram,
             "quantize": quantize, "words": len(asm.words),
-            "kernels": rows}
+            "kernels": rows, "schedules": plan.schedules,
+            "kernel_records": plan.kernel_records,
+            "sram_layouts": plan.sram_layouts,
+            "native_diagnostics": plan.native_diagnostics,
+            "numeric_policy": plan.numeric_policy,
+            "frontend_precision": plan.frontend_precision,
+            "codegen_contract": plan.codegen_contract}
 
 
 def report(result):
@@ -144,11 +155,12 @@ def main():
     parser.add_argument("--layers", type=int, default=1)
     parser.add_argument("--vocab", type=int, default=256)
     parser.add_argument("--quantize", action="store_true")
+    parser.add_argument("--no-sram-reuse", action="store_true")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
     results = []
     for seq in args.seq:
-        result = measure(seq, args.layers, args.vocab, args.quantize)
+        result = measure(seq, args.layers, args.vocab, args.quantize, not args.no_sram_reuse)
         report(result)
         results.append(result)
     if args.output:

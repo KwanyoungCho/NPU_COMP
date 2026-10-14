@@ -111,13 +111,8 @@ def measure_handwritten(seq, layers):
     the traffic sweep shrinks the vocabulary to 256 and would not be
     comparable.
     """
-    from npu_compiler import model
     from npu_compiler.nn_models import llama
-    cfg = model.LLAMA_3_2_3B
-    config = dict(hidden_size=cfg.D, intermediate_size=cfg.F,
-                  num_hidden_layers=layers, num_attention_heads=cfg.H,
-                  num_key_value_heads=cfg.KV, head_dim=cfg.HD,
-                  vocab_size=128256, rms_norm_eps=1e-5, rope_theta=500000.0)
+    config = llama.benchmark_config(layers, vocab=128256)
     mod, _, _ = llama.build_prefill(config, seq=seq)
     lowered = pipeline.graph_pipeline(
         custom_legalize=npu_legalize.legalize_map(),
@@ -159,7 +154,7 @@ def main():
     args = parser.parse_args()
     path = args.path
     if path is None:
-        from npu_compiler.v3_model import Llama32Assets
+        from npu_compiler.assets.llama import Llama32Assets
         path = str(Llama32Assets().path)
 
     results = []

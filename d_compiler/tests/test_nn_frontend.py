@@ -89,12 +89,12 @@ def test_nn_frontend_matches_numpy_reference():
 
 def test_rope_frequencies_match_existing_convention():
     """The nn model must use the same RoPE frequencies as the validated path."""
-    from npu_compiler.legalize import rope_freqs_row
+    from reference.rope import rope_freqs_row
     for scaling in (False, True):
         ours = llama.rope_freqs(128, 500000.0, scaling)
         theirs = rope_freqs_row(128, 500000.0, scaling)[0]
         np.testing.assert_allclose(ours, theirs, rtol=0, atol=0)
-    print("  [PASS] RoPE frequencies identical to legalize.rope_freqs_row")
+    print("  [PASS] RoPE frequencies identical to the independent NumPy reference")
 
 
 if __name__ == "__main__":

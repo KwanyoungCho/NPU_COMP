@@ -1,6 +1,6 @@
 // v09 instruction word encoders.
 //
-// A direct port of npu_compiler/isa_0818.py and isa_v09.py.  The Python
+// A direct port of npu_compiler/isa_compute.py and isa_v09.py.  The Python
 // modules stay the definition of the format; this header exists because the
 // codegen that calls them runs once per emitted word, and a fully unrolled
 // program for a 3B model is tens of millions of words.

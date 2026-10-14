@@ -1,0 +1,704 @@
+{
+  "basis": "Documentation snapshot, not a new compiler run",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "39b2e33d7823391511cfba71f43e25c0e868c4108a34e17846ea06fdc1fc9d0d"
+    },
+    {
+      "path": "current/01_overview.md",
+      "sha256": "e76bb86d3354d2fa8c3b9b848954d268d11acf4a501a1a7061c0c9bef317068c"
+    },
+    {
+      "path": "current/02_model_relax.md",
+      "sha256": "39942e21782c9cde5d636c9cc48f88730ac5ce34612ed9d28075723a18e9927c"
+    },
+    {
+      "path": "current/03_graph_host.md",
+      "sha256": "4677b6cb5f9ccffeb13c2ffae3ac93b695483e1786432ca10716841509efdf08"
+    },
+    {
+      "path": "current/04_semantic_tir.md",
+      "sha256": "f48c7faa52bfdc2b3cae1a390e82ed9e5a4942fcb6d8ababad0c17ed81e47ef4"
+    },
+    {
+      "path": "current/05_fusion.md",
+      "sha256": "cced89f6ef2ecfd8e23f7ebfec88514d8996ccc04b50e375cb8178ffa87727f3"
+    },
+    {
+      "path": "current/06_matmul_schedule.md",
+      "sha256": "37386722ced2f47b724f4079e14a658fbe179d52c5b7330a5c53c219b7fac622"
+    },
+    {
+      "path": "current/07_operators.md",
+      "sha256": "537e793415cf5ddcd6101525094291b0ab37515d367be458236fa256b5797396"
+    },
+    {
+      "path": "current/08_memory.md",
+      "sha256": "99279a70887ad35942d0d1a24d08c621034c4377aa006bfb0a1ef7cc06438de7"
+    },
+    {
+      "path": "current/09_isa.md",
+      "sha256": "0822496ee5655e7b94ab4ac64bf52e65287c995b8343201bffece7c1e8d1f3c0"
+    },
+    {
+      "path": "current/10_runtime_llama.md",
+      "sha256": "b6c7f3d9381e90224b1d5b72ea6b859ba5eda7c140a53117b905ccfc5fd0e8cd"
+    },
+    {
+      "path": "current/11_experiments.md",
+      "sha256": "432050c77806d77a4093f2242fb242198594ca2fdec3751cdcd0e2e3b7808662"
+    },
+    {
+      "path": "current/12_operations_limits.md",
+      "sha256": "ea27c417a3a022dd91c3d4debdf2207ee76abacbe791a61fdb4fd764566571ea"
+    },
+    {
+      "path": "current/13_quantization.md",
+      "sha256": "c6dd56668568f0cde997fb0437fdb67fabe49a82ab18a05d5c3c17c9fa211224"
+    },
+    {
+      "path": "evidence/README.md",
+      "sha256": "bf7ff4586741fc9d8e12ca35a0dec73323ea52d8af597e365a58953221580ae0"
+    },
+    {
+      "path": "evidence/current/codegen_bottleneck_0929.json",
+      "sha256": "8193a7f68a09b14f9cd39aa8cb3243243400223e4a62daa5e6c87cd2d87b72ac"
+    },
+    {
+      "path": "evidence/current/compile_comparison.json",
+      "sha256": "26eb77f764908725c78d0d05cae25ebf7d14c9b0edf8904fcf5cab2efcf77769"
+    },
+    {
+      "path": "evidence/current/llama_prefill256_full_search_progress.json",
+      "sha256": "314b447cd513b203a67e385496fd3a70aaa11c59b7273af5edd3e997cf316078"
+    },
+    {
+      "path": "evidence/current/llama_schedule_refinement.json",
+      "sha256": "c4d4044121618d4275ae1c111dc1a0b55a81c21e390b76332614148b9fe2d265"
+    },
+    {
+      "path": "evidence/current/llama_validation.json",
+      "sha256": "ec10ba2ad6adb4bb083991857c77dba88b34200840c2b22376b922d421ff2300"
+    },
+    {
+      "path": "evidence/current/refinement.json",
+      "sha256": "fabffe0defd0e7d61ccd745aa77f070c828f25fdc69aef8fee349e4c6d18aaaa"
+    },
+    {
+      "path": "examples/README.md",
+      "sha256": "1e4843ffbbe41a47d38a39c362ba9e21e222eff7388ce8f6e6b3817c068adf8b"
+    },
+    {
+      "path": "examples/memory/measurements.json",
+      "sha256": "033b21926f5f577f960707f6833029eac9b9c30036ff7627d48162c1b67b5c77"
+    },
+    {
+      "path": "examples/pipeline/03_unfused_semantic_tir.py",
+      "sha256": "b3aa72edc1d63f66f8c6485b1d0d46866b9f879526fd7c5d587cb78639963c14"
+    },
+    {
+      "path": "examples/pipeline/07_scheduled_fused_matmul_add_silu.py",
+      "sha256": "7265239c84b6c47b552565253e06a290f226f8e0c3e75dbd1f17c06dc3f4777f"
+    },
+    {
+      "path": "examples/pipeline/stage_summary.json",
+      "sha256": "1393c4f346155a9a2e51aa677439163a4a45b0a51ce3ce7ad818eb2f9bfd1efe"
+    },
+    {
+      "path": "examples/schedule_api/02_compute_at.py",
+      "sha256": "944f70bb208fe9176442a4d17505b7374daa15201da6c468413519055c8929ad"
+    },
+    {
+      "path": "examples/schedule_api/03_reverse_compute_at.py",
+      "sha256": "eac1cc4c727c0d105e24f7ee32e2f3c3c171d31bf7ba9e19e8d0b3c7cd358083"
+    },
+    {
+      "path": "examples/schedule_api/08_cache_read_compacted.py",
+      "sha256": "b05b8a00ed4c4380ec5ca82fb1f7f9ac100d90ca04ad99a5f450c3df5f287e13"
+    },
+    {
+      "path": "examples/two_matmuls_recorded/program.json",
+      "sha256": "ad6ea83d51809d941728a5dddd1815b89baa78e5c33899dfdcaa6662bb604b4d"
+    },
+    {
+      "path": "main/README.md",
+      "sha256": "a02c7d06b8ff07ed982b3fbff3460a16a6038463df7708bbc64da724e93310ee"
+    },
+    {
+      "path": "main/pipeline.md",
+      "sha256": "197adce84335c907051868c063e504d1fe24bf43a2b5d78ad4f529a1bd62a8e5"
+    },
+    {
+      "path": "reference/tvm_api.md",
+      "sha256": "fce4be8f96aac0485591d0c673d01bd70481ff1f0c97d194f4d0aa6a57a8bcb7"
+    }
+  ],
+  "slides": [
+    {
+      "number": 1,
+      "title": "TVM 기반 LLM NPU compiler",
+      "section": "OVERVIEW",
+      "visual": "1",
+      "appendix": false,
+      "sources": [
+        "current/01_overview.md"
+      ]
+    },
+    {
+      "number": 2,
+      "title": "세 가지 질문으로 compiler를 이해합니다",
+      "section": "01 / 전체 구조",
+      "visual": "2",
+      "appendix": false,
+      "sources": [
+        "current/01_overview.md"
+      ]
+    },
+    {
+      "number": 3,
+      "title": "Compile, 준비, 실행은 서로 다른 작업입니다",
+      "section": "01 / 전체 구조",
+      "visual": "3",
+      "appendix": false,
+      "sources": [
+        "current/01_overview.md"
+      ]
+    },
+    {
+      "number": 4,
+      "title": "장치는 세 층의 메모리를 사용합니다",
+      "section": "01 / 전체 구조",
+      "visual": "4",
+      "appendix": false,
+      "sources": [
+        "current/01_overview.md",
+        "current/09_isa.md"
+      ]
+    },
+    {
+      "number": 5,
+      "title": "Llama 한 layer의 계산을 끝까지 따라갑니다",
+      "section": "02 / Llama 예제",
+      "visual": "5",
+      "appendix": false,
+      "sources": [
+        "current/02_model_relax.md"
+      ]
+    },
+    {
+      "number": 6,
+      "title": "TVM의 표준 변환 위에 NPU의 결정을 얹습니다",
+      "section": "02 / Pipeline",
+      "visual": "6",
+      "appendix": false,
+      "sources": [
+        "current/01_overview.md"
+      ]
+    },
+    {
+      "number": 7,
+      "title": "작은 예제 하나로 중간 결과를 연결합니다",
+      "section": "03 / Graph",
+      "visual": "7",
+      "appendix": false,
+      "sources": [
+        "current/02_model_relax.md"
+      ]
+    },
+    {
+      "number": 8,
+      "title": "Weight에만 의존하는 계산은 host로 옮깁니다",
+      "section": "03 / Graph",
+      "visual": "8",
+      "appendix": false,
+      "sources": [
+        "current/03_graph_host.md"
+      ]
+    },
+    {
+      "number": 9,
+      "title": "Attention을 세부 연산으로 드러내는 이유가 있습니다",
+      "section": "03 / Graph 정리",
+      "visual": "9",
+      "appendix": false,
+      "sources": [
+        "current/03_graph_host.md"
+      ]
+    },
+    {
+      "number": 10,
+      "title": "LegalizeOps 뒤에도 Relax는 남습니다",
+      "section": "04 / TIR",
+      "visual": "10",
+      "appendix": false,
+      "sources": [
+        "current/04_semantic_tir.md"
+      ]
+    },
+    {
+      "number": 11,
+      "title": "FP32 누산은 전체 K가 끝날 때까지 이어집니다",
+      "section": "04 / 수치 계약",
+      "visual": "11",
+      "appendix": false,
+      "sources": [
+        "current/04_semantic_tir.md",
+        "current/06_matmul_schedule.md"
+      ]
+    },
+    {
+      "number": 12,
+      "title": "커널 수가 줄어드는 것만으로 이득을 판단하지 않습니다",
+      "section": "05 / Fusion",
+      "visual": "12",
+      "appendix": false,
+      "sources": [
+        "current/05_fusion.md"
+      ]
+    },
+    {
+      "number": 13,
+      "title": "연산의 성격과 모든 연결 경로를 보고 묶습니다",
+      "section": "05 / TVM fusion 규칙",
+      "visual": "12a",
+      "appendix": false,
+      "sources": [
+        "current/05_fusion.md"
+      ]
+    },
+    {
+      "number": 14,
+      "title": "영역 하나를 검사하고, 전체 프로그램에서 다시 확인합니다",
+      "section": "05 / 후보 선택",
+      "visual": "13",
+      "appendix": false,
+      "sources": [
+        "current/05_fusion.md"
+      ]
+    },
+    {
+      "number": 15,
+      "title": "연산 tile과 DMA panel은 크기가 다를 수 있습니다",
+      "section": "06 / Scheduling",
+      "visual": "14",
+      "appendix": false,
+      "sources": [
+        "current/06_matmul_schedule.md"
+      ]
+    },
+    {
+      "number": 16,
+      "title": "compute_at은 필요한 계산을 사용 위치로 옮깁니다",
+      "section": "06 / TVM API",
+      "visual": "15",
+      "appendix": false,
+      "sources": [
+        "current/06_matmul_schedule.md",
+        "examples/schedule_api/02_compute_at.py"
+      ]
+    },
+    {
+      "number": 17,
+      "title": "reverse_compute_at은 소비 계산을 생산 위치에 맞춥니다",
+      "section": "06 / Schedule API",
+      "visual": "15a",
+      "appendix": false,
+      "sources": [
+        "current/06_matmul_schedule.md",
+        "examples/schedule_api/03_reverse_compute_at.py"
+      ]
+    },
+    {
+      "number": 18,
+      "title": "복사 stage, 실행 위치, buffer 크기는 별개의 결정입니다",
+      "section": "06 / Cache와 scope",
+      "visual": "15b",
+      "appendix": false,
+      "sources": [
+        "current/06_matmul_schedule.md",
+        "examples/schedule_api/08_cache_read_compacted.py"
+      ]
+    },
+    {
+      "number": 19,
+      "title": "현재 schedule은 여러 선택 축을 조합합니다",
+      "section": "06 / 탐색 공간",
+      "visual": "16",
+      "appendix": false,
+      "sources": [
+        "current/06_matmul_schedule.md"
+      ]
+    },
+    {
+      "number": 20,
+      "title": "48 MiB weight를 SRAM에 한 번에 넣지 않습니다",
+      "section": "06 / Llama 연결",
+      "visual": "17",
+      "appendix": false,
+      "sources": [
+        "current/06_matmul_schedule.md"
+      ]
+    },
+    {
+      "number": 21,
+      "title": "SiLU 하나도 여러 vector 계산으로 펼쳐집니다",
+      "section": "07 / Vector 연산",
+      "visual": "18",
+      "appendix": false,
+      "sources": [
+        "current/07_operators.md"
+      ]
+    },
+    {
+      "number": 22,
+      "title": "256 lanes와 명령이 지정하는 VLEN을 구분합니다",
+      "section": "07 / Vector 길이",
+      "visual": "18a",
+      "appendix": false,
+      "sources": [
+        "current/07_operators.md",
+        "current/12_operations_limits.md"
+      ]
+    },
+    {
+      "number": 23,
+      "title": "Softmax는 행 전체의 max와 sum을 사용하는 계산입니다",
+      "section": "07 / Softmax",
+      "visual": "18b",
+      "appendix": false,
+      "sources": [
+        "current/07_operators.md"
+      ]
+    },
+    {
+      "number": 24,
+      "title": "RMSNorm은 제곱 전에 입력을 줄여 overflow를 피합니다",
+      "section": "07 / RMSNorm",
+      "visual": "18c",
+      "appendix": false,
+      "sources": [
+        "current/07_operators.md",
+        "current/04_semantic_tir.md"
+      ]
+    },
+    {
+      "number": 25,
+      "title": "RoPE는 Q/K를 회전하고 GQA는 KV head를 공유합니다",
+      "section": "07 / RoPE와 GQA",
+      "visual": "18d",
+      "appendix": false,
+      "sources": [
+        "current/07_operators.md",
+        "current/02_model_relax.md"
+      ]
+    },
+    {
+      "number": 26,
+      "title": "현재 attention fusion은 query 행을 나눕니다",
+      "section": "07 / Attention",
+      "visual": "19",
+      "appendix": false,
+      "sources": [
+        "current/07_operators.md"
+      ]
+    },
+    {
+      "number": 27,
+      "title": "세 가지 메모리 계획이 서로 다른 범위를 봅니다",
+      "section": "08 / Memory planning",
+      "visual": "20",
+      "appendix": false,
+      "sources": [
+        "current/08_memory.md"
+      ]
+    },
+    {
+      "number": 28,
+      "title": "값이 마지막으로 쓰인 뒤에 공간을 재사용합니다",
+      "section": "08 / Lifetime",
+      "visual": "21",
+      "appendix": false,
+      "sources": [
+        "current/08_memory.md"
+      ]
+    },
+    {
+      "number": 29,
+      "title": "커널을 나누어도 H를 SRAM에 계속 둘 수 있습니다",
+      "section": "08 / SRAM 전달",
+      "visual": "22",
+      "appendix": false,
+      "sources": [
+        "current/08_memory.md"
+      ]
+    },
+    {
+      "number": 30,
+      "title": "최종 H에 직접 쓰고, 쓰지 않는 DRAM 예약을 없앱니다",
+      "section": "08 / 출력·주소 정리",
+      "visual": "23",
+      "appendix": false,
+      "sources": [
+        "current/08_memory.md"
+      ]
+    },
+    {
+      "number": 31,
+      "title": "TIR의 계산과 복사를 실제 명령으로 펼칩니다",
+      "section": "09 / ISA",
+      "visual": "24",
+      "appendix": false,
+      "sources": [
+        "current/09_isa.md"
+      ]
+    },
+    {
+      "number": 32,
+      "title": "같은 주소 숫자도 필드마다 단위가 다릅니다",
+      "section": "09 / 주소와 명령 해독",
+      "visual": "24a",
+      "appendix": false,
+      "sources": [
+        "current/09_isa.md",
+        "examples/two_matmuls_recorded/program.json"
+      ]
+    },
+    {
+      "number": 33,
+      "title": "명령과 메모리 계약을 함께 내보냅니다",
+      "section": "09 / 결과물",
+      "visual": "25",
+      "appendix": false,
+      "sources": [
+        "current/09_isa.md"
+      ]
+    },
+    {
+      "number": 34,
+      "title": "Prefill 이후에는 새 token 하나씩 처리합니다",
+      "section": "10 / Runtime",
+      "visual": "26",
+      "appendix": false,
+      "sources": [
+        "current/10_runtime_llama.md"
+      ]
+    },
+    {
+      "number": 35,
+      "title": "Cache capacity와 현재 유효 길이는 다릅니다",
+      "section": "10 / 고정 shape",
+      "visual": "27",
+      "appendix": false,
+      "sources": [
+        "current/10_runtime_llama.md"
+      ]
+    },
+    {
+      "number": 36,
+      "title": "새 K/V의 실제 이동은 NPU DMA가 수행합니다",
+      "section": "10 / KV append",
+      "visual": "28",
+      "appendix": false,
+      "sources": [
+        "current/10_runtime_llama.md"
+      ]
+    },
+    {
+      "number": 37,
+      "title": "반복 layer의 판단을 재사용해 compile 작업을 줄입니다",
+      "section": "10 / 재사용과 예산",
+      "visual": "29",
+      "appendix": false,
+      "sources": [
+        "current/05_fusion.md",
+        "current/10_runtime_llama.md"
+      ]
+    },
+    {
+      "number": 38,
+      "title": "수치 결과와 비용을 서로 다른 근거로 확인합니다",
+      "section": "11 / 실험",
+      "visual": "30",
+      "appendix": false,
+      "sources": [
+        "current/11_experiments.md"
+      ]
+    },
+    {
+      "number": 39,
+      "title": "Fusion은 DMA가 같아도 명령을 줄일 수 있습니다",
+      "section": "11 / E1 · 작은 예제 실행",
+      "visual": "31",
+      "appendix": false,
+      "sources": [
+        "current/11_experiments.md",
+        "examples/pipeline/stage_summary.json"
+      ]
+    },
+    {
+      "number": 40,
+      "title": "44 KiB부터 H의 DRAM 왕복이 사라졌습니다",
+      "section": "11 / E2 · 작은 예제 실행",
+      "visual": "32",
+      "appendix": false,
+      "sources": [
+        "current/11_experiments.md",
+        "examples/memory/measurements.json"
+      ]
+    },
+    {
+      "number": 41,
+      "title": "DRAM 예약 제거는 전송량과 별개로 image를 줄입니다",
+      "section": "11 / E3·E4 · 보존된 개선 기록",
+      "visual": "33",
+      "appendix": false,
+      "sources": [
+        "current/11_experiments.md",
+        "evidence/current/refinement.json"
+      ]
+    },
+    {
+      "number": 42,
+      "title": "같은 프로그램을 얻는 compile 작업이 줄었습니다",
+      "section": "11 / E5 · 과거 단일 관측",
+      "visual": "34",
+      "appendix": false,
+      "sources": [
+        "current/11_experiments.md",
+        "evidence/current/compile_comparison.json"
+      ]
+    },
+    {
+      "number": 43,
+      "title": "과거 7-token 전체 모델에서 HF와 같은 token을 생성했습니다",
+      "section": "11 / E6 · 전체 Llama 실행 기록",
+      "visual": "35",
+      "appendix": false,
+      "sources": [
+        "current/11_experiments.md",
+        "evidence/current/llama_validation.json"
+      ]
+    },
+    {
+      "number": 44,
+      "title": "탐색 순서와 결과 재사용에 TVM 기능을 연결했습니다",
+      "section": "11 / 탐색 개선과 전체 모델 재검증",
+      "visual": "search_framework",
+      "appendix": false,
+      "sources": [
+        "current/06_matmul_schedule.md",
+        "reference/tvm_api.md"
+      ]
+    },
+    {
+      "number": 45,
+      "title": "512-token down에서는 탐색을 늘려도 같은 명령이 선택됐습니다",
+      "section": "11 / 탐색 개선과 전체 모델 재검증",
+      "visual": "search_comparison",
+      "appendix": false,
+      "sources": [
+        "current/11_experiments.md",
+        "evidence/current/llama_schedule_refinement.json"
+      ]
+    },
+    {
+      "number": 46,
+      "title": "256-token 전체 prefill은 9개 graph 구성을 비교합니다",
+      "section": "11 / 탐색 개선과 전체 모델 재검증",
+      "visual": "full_search_pending",
+      "appendix": false,
+      "sources": [
+        "current/11_experiments.md",
+        "evidence/current/llama_prefill256_full_search_progress.json",
+        "evidence/current/codegen_bottleneck_0929.json"
+      ]
+    },
+    {
+      "number": 47,
+      "title": "효과가 큰 항목부터 근거를 확인하며 확장합니다",
+      "section": "12 / 현재 한계",
+      "visual": "36",
+      "appendix": false,
+      "sources": [
+        "current/12_operations_limits.md"
+      ]
+    },
+    {
+      "number": 48,
+      "title": "모델의 계산이 주소와 명령으로 구체화됩니다",
+      "section": "12 / 다시 전체 흐름으로",
+      "visual": "37",
+      "appendix": false,
+      "sources": [
+        "current/01_overview.md",
+        "current/12_operations_limits.md"
+      ]
+    },
+    {
+      "number": 49,
+      "title": "표준 API가 맡는 역할을 구분합니다",
+      "section": "부록 A / TVM API",
+      "visual": "38",
+      "appendix": true,
+      "sources": [
+        "reference/tvm_api.md"
+      ]
+    },
+    {
+      "number": 50,
+      "title": "같은 matmul을 세 수준에서 읽습니다",
+      "section": "부록 B / IR 읽기",
+      "visual": "39",
+      "appendix": true,
+      "sources": [
+        "current/04_semantic_tir.md",
+        "examples/pipeline/03_unfused_semantic_tir.py",
+        "examples/pipeline/07_scheduled_fused_matmul_add_silu.py"
+      ]
+    },
+    {
+      "number": 51,
+      "title": "기존 main과 최신 v09는 실행 경계가 다릅니다",
+      "section": "부록 C / 기존 main",
+      "visual": "40",
+      "appendix": true,
+      "sources": [
+        "main/README.md",
+        "main/pipeline.md"
+      ]
+    },
+    {
+      "number": 52,
+      "title": "저장 dtype과 실제 연산 dtype을 구분해야 합니다",
+      "section": "부록 D / 양자화",
+      "visual": "41",
+      "appendix": true,
+      "sources": [
+        "current/13_quantization.md"
+      ]
+    },
+    {
+      "number": 53,
+      "title": "X와 W가 모두 커지면 양쪽을 나누어 올립니다",
+      "section": "부록 E / 긴 prefill",
+      "visual": "42",
+      "appendix": true,
+      "sources": [
+        "current/06_matmul_schedule.md"
+      ]
+    },
+    {
+      "number": 54,
+      "title": "발표의 그림과 숫자를 문서에서 다시 확인할 수 있습니다",
+      "section": "부록 F / 자료 추적",
+      "visual": "43",
+      "appendix": true,
+      "sources": [
+        "README.md",
+        "examples/README.md",
+        "evidence/README.md"
+      ]
+    }
+  ]
+}

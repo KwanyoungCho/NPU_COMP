@@ -1,0 +1,16 @@
+test_auto_selection_cached_and_uncached_execute_identically (__main__.CompileSpeed.test_auto_selection_cached_and_uncached_execute_identically) ... ok
+test_budget_expiration_inside_optional_probe_keeps_complete_module (__main__.CompileSpeed.test_budget_expiration_inside_optional_probe_keeps_complete_module) ... ok
+test_failed_trials_count_toward_budget_and_legal_incumbent_survives (__main__.CompileSpeed.test_failed_trials_count_toward_budget_and_legal_incumbent_survives) ... ok
+test_hash_collisions_and_capacity_do_not_reuse_wrong_program (__main__.CompileSpeed.test_hash_collisions_and_capacity_do_not_reuse_wrong_program) ... ok
+test_identity_includes_input_names_constants_attributes_and_settings (__main__.CompileSpeed.test_identity_includes_input_names_constants_attributes_and_settings) ... ok
+test_native_invalid_chain_matches_python_rejection (__main__.CompileSpeed.test_native_invalid_chain_matches_python_rejection) ... ok
+test_private_symbol_renumbering_reuses_words_and_relabels_plan (__main__.CompileSpeed.test_private_symbol_renumbering_reuses_words_and_relabels_plan) ... ok
+test_real_llama_prefill_identity_survives_decode_gqa_rewrite (__main__.CompileSpeed.test_real_llama_prefill_identity_survives_decode_gqa_rewrite) ... ok
+test_region_cost_does_not_repeat_identical_compile (__main__.CompileSpeed.test_region_cost_does_not_repeat_identical_compile) ... ok
+test_unchanged_entry_reused_after_other_entry_changes_and_copies_are_private (__main__.CompileSpeed.test_unchanged_entry_reused_after_other_entry_changes_and_copies_are_private) ... ok
+test_zero_graph_budget_returns_complete_baseline_and_resets_context (__main__.CompileSpeed.test_zero_graph_budget_returns_complete_baseline_and_resets_context) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 1.791s
+
+OK

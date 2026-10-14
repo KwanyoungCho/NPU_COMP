@@ -1,0 +1,18 @@
+test_attention_auto_rolls_back_on_small_sram (__main__.ArchitectureContracts.test_attention_auto_rolls_back_on_small_sram) ... ok
+test_direct_parameter_and_nested_tuple_outputs (__main__.ArchitectureContracts.test_direct_parameter_and_nested_tuple_outputs) ... ok
+test_identity_and_int8_output_view (__main__.ArchitectureContracts.test_identity_and_int8_output_view) ... ok
+test_long_reduction_invariants (__main__.ArchitectureContracts.test_long_reduction_invariants) ... ok
+test_matmul_fp32_accumulation_constant_and_parameter (__main__.ArchitectureContracts.test_matmul_fp32_accumulation_constant_and_parameter) ... ok
+test_mean_reduction_uses_explicit_accumulator_and_rejects_half_tir (__main__.ArchitectureContracts.test_mean_reduction_uses_explicit_accumulator_and_rejects_half_tir) ... ok
+test_multi_tile_cancellation_keeps_fp32_state_and_constant_order (__main__.ArchitectureContracts.test_multi_tile_cancellation_keeps_fp32_state_and_constant_order) ... ok
+test_rope_parameters_against_independent_formula (__main__.ArchitectureContracts.test_rope_parameters_against_independent_formula) ... ok
+test_shared_importer_value_retains_original_dtype (__main__.ArchitectureContracts.test_shared_importer_value_retains_original_dtype) ... ok
+test_squeeze_preserves_broadcast_and_output_dtype (__main__.ArchitectureContracts.test_squeeze_preserves_broadcast_and_output_dtype) ... ok
+test_unit_and_ragged_matmul_values (__main__.ArchitectureContracts.test_unit_and_ragged_matmul_values) ... ok
+test_unknown_call_rejected_with_location (__main__.ArchitectureContracts.test_unknown_call_rejected_with_location) ... ok
+test_unreachable_unsupported_entry_does_not_break_build (__main__.ArchitectureContracts.test_unreachable_unsupported_entry_does_not_break_build) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 7.681s
+
+OK

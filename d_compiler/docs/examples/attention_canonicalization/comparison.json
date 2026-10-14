@@ -1,0 +1,108 @@
+{
+  "tvm_version": "0.19.0",
+  "tvm_commit": "c4dc0c29ff81ddae688da24625a603da3b4a2c0e",
+  "input_shape": [
+    1,
+    4,
+    2,
+    8
+  ],
+  "dtype": "float16",
+  "standard_decompose_unchanged": true,
+  "variants": {
+    "01_input": {
+      "calls": {
+        "relax.nn.attention": 1
+      },
+      "reductions": []
+    },
+    "02_standard_decompose": {
+      "calls": {
+        "relax.nn.attention": 1
+      },
+      "reductions": []
+    },
+    "03_npu_canonical": {
+      "calls": {
+        "relax.permute_dims": 4,
+        "relax.reshape": 4,
+        "relax.matmul": 2,
+        "relax.divide": 1,
+        "relax.nn.softmax": 1
+      },
+      "reductions": []
+    },
+    "04_standard_attention_legalize": {
+      "calls": {
+        "relax.call_tir": 1
+      },
+      "reductions": [
+        {
+          "block": "T_batch_matmul_NT",
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "block": "T_softmax_maxelem",
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "block": "T_softmax_expsum",
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "block": "T_batch_matmul_NN",
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ]
+    },
+    "05_canonical_then_legalize": {
+      "calls": {
+        "relax.call_tir": 12
+      },
+      "reductions": [
+        {
+          "block": "matmul",
+          "output_dtypes": [
+            "float32"
+          ]
+        },
+        {
+          "block": "matmul",
+          "output_dtypes": [
+            "float32"
+          ]
+        },
+        {
+          "block": "T_softmax_maxelem",
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "block": "softmax_sum32",
+          "output_dtypes": [
+            "float32"
+          ]
+        }
+      ]
+    }
+  },
+  "validation_scope": "IR inspection and compilation; no numerical run or timing",
+  "stock_attention_npu_build": {
+    "status": "rejected",
+    "reason": "attention/T_batch_matmul_NT: sum reduction must explicitly use FP32 accumulation"
+  },
+  "current_path_npu_build": {
+    "status": "passed",
+    "kernels": 8,
+    "words": 1308
+  }
+}

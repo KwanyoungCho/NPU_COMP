@@ -15,7 +15,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from npu_compiler.gemma4_model import default_model_path
+from npu_compiler.assets.gemma import default_model_path
 
 
 def main():

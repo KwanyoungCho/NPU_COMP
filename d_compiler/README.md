@@ -1,92 +1,48 @@
-# d_compiler — NPU LLM Compiler
+# TVM 기반 NPU compiler
 
-TVM(Relax) 기반으로 **Llama 3.2 3B**를 본 레포의 NPU c-model(`_poc/mysim`)에서 추론하기 위한 컴파일러.
-설계·로드맵은 **[PLAN.md](./PLAN.md)** 참고.
+**설명은 [docs/README.md](docs/README.md)부터 읽는다.** 날짜별 보고서 대신 현재 코드의
+동작을 설명하는 하나의 문서 체계로 정리했다. 현재 메모리 계층 v09와 기존 `main`의
+ver.08 backend를 구분하며, 본문은 FP16 기준이다.
 
----
+| 필요한 내용 | 문서 |
+|---|---|
+| 처음부터 이해하기 | [전체 목차와 읽는 순서](docs/README.md) |
+| 모델 → Relax → TIR → schedule → 메모리 → ISA | [Overview](docs/current/01_overview.md)부터 단계별 1~9장 |
+| 실제 Llama prefill / decode / KV cache | [10장](docs/current/10_runtime_llama.md) |
+| 검증된 기능·출력·compile 비용·메모리 수치 | [실험](docs/current/11_experiments.md) |
+| 실행 방법, 옵션, 지원 경계, 남은 검토 | [사용법](docs/current/12_operations_limits.md) |
+| TVM API, 수치·ISA 계약 | [API 사전](docs/reference/tvm_api.md), [실행 계약](docs/reference/execution_contract.md) |
+| 실제 IR와 재현 가능한 작은 예제 | [예제 안내](docs/examples/README.md) |
+| 검증 범위를 구분한 양자화 설명 | [별도 후반부](docs/current/13_quantization.md) |
+| 기존 main 최종 backend | [main 문서](docs/main/README.md) |
+| 발표자료에 사용할 그림 | [SVG와 근거](docs/figures/README.md) |
 
-## 환경 (구축 완료)
+## 작은 예제부터 실행하기
 
-> ⚠️ 기존 env는 사용하지 않는다: `ssd`(타 작업용, 손대지 말 것), `tvm-study`(mlc nightly = 개명·일부 깨진 API).
-> 본 프로젝트는 **소스 빌드한 표준 API TVM**을 전용 env `npu-tvm`에서 사용한다.
+저장소 루트에서 검증된 `npu-tvm` 환경을 사용한다. 버전 기준은
+[toolchain.lock.json](toolchain.lock.json)에 있다.
 
-- **conda env**: `npu-tvm` (Python 3.11)
-- **TVM**: apache/tvm **v0.19.0** 소스 빌드 (표준 `tvm.tir`/`tvm.script.tir` + Relax)
-- **소스 위치**: `~/tvm-src` (레포 밖), 빌드 산출물 `~/tvm-src/build/libtvm.so`
-- **핀 toolchain**(최신은 v0.19 빌드를 깸): `llvmdev=18.1.8`, `cmake=3.31.*`
-
-### 사용
 ```bash
 conda activate npu-tvm
-python -c "import tvm; print(tvm.__version__)"   # -> 0.19.0
+bash d_compiler/npu_codegen/build.sh
+python d_compiler/docs/examples/reproduce.py --out /tmp/npu-doc-examples
+python d_compiler/docs/tools/check_docs.py
 ```
 
-### 검증된 동작
-- Relax: author → `LegalizeOps` → `relax.build(target="llvm")` → `VirtualMachine` 실행 (FP16 matmul relerr ~8e-4)
-- TIR: `from tvm.script import tir as T`의 `T.block` 작성 + `tvm.tir.Schedule` + `split` + `tensorize` 사용 가능
-- `tvm.tir`, `tvm.dlight`, `tvm.nd.array`, `tvm.tir.TensorIntrin` 모두 표준 경로로 존재
+작은 예제는 전체 Llama를 컴파일하지 않는다. 큰 모델의 실행은 위 10~12장의 조건과
+측정 범위를 확인한 뒤 `run_nn_generate.py`/`run_nn_npu.py`로 진행한다.
+일반 compile 진입점은 `npu_compiler.npu_target.build`, 생성 반복은
+`npu_compiler.npu_generate.generate`다. 실행 결과는 현재 v09 C-model 기준이며
+실장치 latency와 동일한 지표가 아니다.
 
----
-
-## 처음부터 재구축하는 법 (재현용)
+회귀 검사의 기본 출력은 `d_compiler/build/validation`이다. 명시적인 `--output`으로
+실험별 경로를 지정할 수 있다.
 
 ```bash
-# 1) 빌드 의존성 갖춘 env 생성
-conda create -y -n npu-tvm -c conda-forge python=3.11 cmake ninja llvmdev numpy cython libstdcxx-ng
-# 2) v0.19 호환 toolchain으로 핀 (최신 LLVM/cmake는 빌드 깨짐)
-conda install -y -n npu-tvm -c conda-forge "cmake=3.31.*" "llvmdev=18.1.8"
-
-# 3) TVM 소스 (서브모듈 포함)
-git clone --recursive --branch v0.19.0 --depth 1 https://github.com/apache/tvm ~/tvm-src
-
-# 4) 빌드 설정
-cd ~/tvm-src && rm -rf build && mkdir build && cp cmake/config.cmake build/
-cat >> build/config.cmake <<EOF
-set(USE_LLVM "$CONDA_PREFIX/envs/npu-tvm/bin/llvm-config")
-set(CMAKE_BUILD_TYPE RelWithDebInfo)
-set(USE_RELAX ON)
-EOF
-
-# 5) 빌드 (npu-tvm 의 cmake/ninja/llvm 사용)
-conda activate npu-tvm
-cd ~/tvm-src/build && cmake .. -G Ninja && ninja        # 64코어서 ~4분
-
-# 6) Python 패키지 (editable)
-cd ~/tvm-src && pip install -e python
+bash d_compiler/run_gate.sh --tests architecture_contracts schedule_memory native_codegen \
+  --require-no-skips --output /tmp/npu-gate
 ```
 
-빌드 메모:
-- LLVM 22 / cmake 4 면 실패 → 반드시 핀 버전 사용. (cmake4는 서브모듈 `rang`의 `cmake_minimum_required 2.8` 거부; LLVM22는 TVM 0.19 C++와 비호환)
-- `cmake .. -G Ninja` 출력에 `Build with LLVM`, `TVM_LLVM_VERSION=181` 떠야 정상.
-
----
-
-## 시뮬레이터(mysim) — NPU 실행기 (주어진 c-model)
-
-컴파일러 결과는 **주어진** `_poc/mysim.cpp`로만 실행한다(우리가 실행기를 재구현하지 않음, PLAN §2.0).
-```bash
-g++ -O2 -std=c++17 ../_poc/mysim.cpp -o mysim   # runtime.py 픽스처가 자동 수행 예정
-```
-
-## 0818 / instruction format ver.08 backend
-
-새 제공 실행기(`0818_npu_update/a_npu/a.out`)를 직접 대상으로 하는 backend는
-`backend="0818"`로 선택한다.
-
-```python
-asm, mp = driver.compile_module(mod, backend="0818")
-output = driver.run_compiled(asm, mp, inputs)
-```
-
-이 경로는 전역 tensor를 row-major로 유지하고 MAIN/PARTIAL descriptor로 최대 64x64
-sub-tile을 직접 load/save한다. 기존 0710 backend와 분석용 소스 모델은 아직 제거하지
-않았다. ISA 조사, vendor quirk, 검증 범위와 제거 조건은
-**[RETARGET_0818.md](./RETARGET_0818.md)**를 참고한다.
-
----
-
-## 디렉토리 (예정)
-`npu_compiler/`(frontend·legalize·memplan·isa·codegen·runtime), `tests/`. 상세는 PLAN.md §6.2.
-
-## 다음 단계
-PLAN.md §11: M1 `isa.py`(명령어 인코더) → M2 단일 matmul e2e(Relax→ISA→mysim).
+날짜별 계획·handoff·중복 dump의 제거 내역과 보존한 원본은
+[자료 정리 기록](docs/evidence/README.md)에 있다. Compiler/runtime 구현, vendor 원본,
+checkpoint와 일반 build 산출물은 문서 정리 대상에 포함하지 않았다.

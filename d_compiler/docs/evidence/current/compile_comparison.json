@@ -1,0 +1,87 @@
+{
+  "measurement": "single wall-clock samples; other validation jobs ran concurrently for final measurements; no hardware latency estimate",
+  "rows": [
+    {
+      "label": "instrumented_mlp7",
+      "seconds": 84.16316639631987,
+      "shape": [
+        7,
+        3072,
+        8192
+      ],
+      "words": 143883,
+      "dma_bytes": 151123980,
+      "sram_peak_bytes": 7571468,
+      "global_image_bytes": 151080972,
+      "word_sha256": "c63b82a2c8e91280823a0cb10d5a8807efb3107dc67744239e260c61b8bb7484",
+      "trial_misses": 347,
+      "provenance": "818a90986b78b36185f6859fbf6d2602f0c3793d8b6b74bbfeb39d1d0b86e9a1"
+    },
+    {
+      "label": "invalid_fast_mlp7",
+      "seconds": 35.56986463814974,
+      "shape": [
+        7,
+        3072,
+        8192
+      ],
+      "words": 143883,
+      "dma_bytes": 151123980,
+      "sram_peak_bytes": 7571468,
+      "global_image_bytes": 151080972,
+      "word_sha256": "c63b82a2c8e91280823a0cb10d5a8807efb3107dc67744239e260c61b8bb7484",
+      "trial_misses": 347,
+      "provenance": "34651844e9da62b2595e95ab777413313ff4fc9f94311fbff0c4346f2707829d"
+    },
+    {
+      "label": "bounded_mlp7",
+      "seconds": 22.072693463414907,
+      "shape": [
+        7,
+        3072,
+        8192
+      ],
+      "words": 143883,
+      "dma_bytes": 151123980,
+      "sram_peak_bytes": 7571468,
+      "global_image_bytes": 151080972,
+      "word_sha256": "c63b82a2c8e91280823a0cb10d5a8807efb3107dc67744239e260c61b8bb7484",
+      "trial_misses": 112,
+      "provenance": "7d13cfd92047467d1a6280aa8d2d0fdd084b99544f9dadee1a86499adf844e15"
+    },
+    {
+      "label": "unbounded_mlp64",
+      "seconds": 21.790825510397553,
+      "shape": [
+        64,
+        3072,
+        8192
+      ],
+      "words": 140594,
+      "dma_bytes": 152174604,
+      "sram_peak_bytes": 7446540,
+      "global_image_bytes": 151781388,
+      "word_sha256": "ec55566f26f113a71cf3ed0696f354fb1ab05ab2911fec3445f8e03605277fed",
+      "trial_misses": 47,
+      "provenance": "7d13cfd92047467d1a6280aa8d2d0fdd084b99544f9dadee1a86499adf844e15"
+    },
+    {
+      "label": "bounded_mlp64",
+      "seconds": 21.957608276978135,
+      "shape": [
+        64,
+        3072,
+        8192
+      ],
+      "words": 140594,
+      "dma_bytes": 152174604,
+      "sram_peak_bytes": 7446540,
+      "global_image_bytes": 151781388,
+      "word_sha256": "ec55566f26f113a71cf3ed0696f354fb1ab05ab2911fec3445f8e03605277fed",
+      "trial_misses": 47,
+      "provenance": "7d13cfd92047467d1a6280aa8d2d0fdd084b99544f9dadee1a86499adf844e15"
+    }
+  ],
+  "mlp7_bit_exact": true,
+  "mlp64_budget_bit_exact": true
+}

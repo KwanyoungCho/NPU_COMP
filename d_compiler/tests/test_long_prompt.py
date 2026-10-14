@@ -12,9 +12,8 @@ is llvm that drifts (0.998 against us), and it cannot tell a scheduling bug
 from its own rounding.  Running it at these dimensions also costs minutes,
 because the llvm build executes the unscheduled loop nest.
 
-Lengths the linker refuses are reported, not failed.  That limit -- kernels
-that stage a whole tensor -- is what the stripe work removes, and this test
-starts checking those lengths by itself once it does.
+Every declared length must link and execute accurately.  A refused length
+is a regression, even when a shorter member of the sweep still passes.
 """
 import sys
 import time
@@ -29,12 +28,12 @@ sys.path.insert(0, str(HERE))
 import tvm
 from tvm import relax
 
-from npu_compiler import model, npu_legalize, npu_link, npu_memplan
+from npu_compiler import npu_legalize, npu_link, npu_memplan
 from npu_compiler import tvm_pipeline as pipeline
 from npu_compiler.nn_models import llama
 from test_nn_frontend import _reference
 
-SEQS = (64, 128, 256, 512, 1024)
+SEQS = (64, 65, 128, 256, 512, 1024)
 # measured 0.999997 at seq 64 and 0.999996 at 128 -- the machine accumulates
 # in fp32, so only the fp16 activations cost anything.  A staging or tiling
 # error moves this far below the threshold rather than nudging it.
@@ -44,11 +43,7 @@ COSINE = 0.9999
 def _config():
     """One real Llama 3.2 3B layer.  The vocabulary is shrunk so lm_head does
     not dominate the score -- the layer is what the planning work changes."""
-    cfg = model.LLAMA_3_2_3B
-    return dict(hidden_size=cfg.D, intermediate_size=cfg.F,
-                num_hidden_layers=1, num_attention_heads=cfg.H,
-                num_key_value_heads=cfg.KV, head_dim=cfg.HD,
-                vocab_size=256, rms_norm_eps=1e-5, rope_theta=500000.0)
+    return llama.benchmark_config()
 
 
 def _measure(seq):
@@ -104,10 +99,7 @@ def test_long_prompts_stay_accurate():
         assert cosine > COSINE, f"seq {seq}: cosine {cosine:.6f}"
         print(f"  [PASS]  seq {seq:4d}: cosine {cosine:.6f}, "
               f"{words:,} words, {seconds:.0f}s")
-    assert linked, "no prompt length linked at all"
-    if refused:
-        print(f"  longest linkable prompt is {max(linked)}; "
-              f"{len(refused)} longer length(s) still refused")
+    assert not refused, f"required prompt lengths did not link: {refused}"
 
 
 if __name__ == "__main__":

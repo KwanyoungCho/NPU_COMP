@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#4b5b70"/></marker></defs>
+<rect width="1200" height="700" fill="white"/>
+<g font-family="DejaVu Sans,Arial,sans-serif" fill="#142239">
+<text x="45" y="52" font-size="30" text-anchor="start" font-weight="bold">05  Two kernels can share H in SRAM</text>
+<text x="45" y="89" font-size="17" text-anchor="start" font-weight="normal">Recorded 44 KiB example | X[64,64] @ W1[64,128] = H; H @ W2[128,64] = Y</text>
+<text x="105" y="180" font-size="22" text-anchor="start" font-weight="bold">Kernel 1: produce H</text>
+<rect x="105.0" y="210" width="34.35724431818182" height="85" rx="12" fill="#edf0f5" stroke="#66758b" stroke-width="1.5"/>
+<text x="122.1786221590909" y="259.15" font-size="19" text-anchor="middle" font-weight="normal"></text>
+<rect x="139.3572443181818" y="210" width="181.8181818181818" height="85" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="230.26633522727272" y="259.15" font-size="19" text-anchor="middle" font-weight="normal">X</text>
+<rect x="321.1754261363636" y="210" width="363.6363636363636" height="85" rx="12" fill="#ffe1b8" stroke="#66758b" stroke-width="1.5"/>
+<text x="502.99360795454544" y="259.15" font-size="19" text-anchor="middle" font-weight="normal">W1</text>
+<rect x="684.8117897727273" y="210" width="363.6363636363636" height="85" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="866.629971590909" y="259.15" font-size="19" text-anchor="middle" font-weight="normal">H</text>
+<rect x="1048.448153409091" y="210" width="56.551846590909086" height="85" rx="12" fill="#edf0f5" stroke="#66758b" stroke-width="1.5"/>
+<text x="1076.7240767045455" y="259.15" font-size="19" text-anchor="middle" font-weight="normal"></text>
+<text x="139.3572443181818" y="326" font-size="15" text-anchor="middle" font-weight="normal">1548</text>
+<text x="321.1754261363636" y="326" font-size="15" text-anchor="middle" font-weight="normal">9740</text>
+<text x="684.8117897727273" y="326" font-size="15" text-anchor="middle" font-weight="normal">26124</text>
+<text x="1048.448153409091" y="326" font-size="15" text-anchor="middle" font-weight="normal">42508</text>
+<text x="105" y="380" font-size="22" text-anchor="start" font-weight="bold">Kernel 2: consume H</text>
+<rect x="105.0" y="410" width="34.35724431818182" height="85" rx="12" fill="#edf0f5" stroke="#66758b" stroke-width="1.5"/>
+<text x="122.1786221590909" y="459.15" font-size="19" text-anchor="middle" font-weight="normal"></text>
+<rect x="139.3572443181818" y="410" width="181.8181818181818" height="85" rx="12" fill="#cceafb" stroke="#66758b" stroke-width="1.5"/>
+<text x="230.26633522727272" y="459.15" font-size="19" text-anchor="middle" font-weight="normal">Y</text>
+<rect x="321.1754261363636" y="410" width="363.6363636363636" height="85" rx="12" fill="#ffe1b8" stroke="#66758b" stroke-width="1.5"/>
+<text x="502.99360795454544" y="459.15" font-size="19" text-anchor="middle" font-weight="normal">W2</text>
+<rect x="684.8117897727273" y="410" width="363.6363636363636" height="85" rx="12" fill="#e2d9ff" stroke="#66758b" stroke-width="1.5"/>
+<text x="866.629971590909" y="459.15" font-size="19" text-anchor="middle" font-weight="normal">H</text>
+<rect x="1048.448153409091" y="410" width="56.551846590909086" height="85" rx="12" fill="#edf0f5" stroke="#66758b" stroke-width="1.5"/>
+<text x="1076.7240767045455" y="459.15" font-size="19" text-anchor="middle" font-weight="normal"></text>
+<text x="139.3572443181818" y="526" font-size="15" text-anchor="middle" font-weight="normal">1548</text>
+<text x="321.1754261363636" y="526" font-size="15" text-anchor="middle" font-weight="normal">9740</text>
+<text x="684.8117897727273" y="526" font-size="15" text-anchor="middle" font-weight="normal">26124</text>
+<text x="1048.448153409091" y="526" font-size="15" text-anchor="middle" font-weight="normal">42508</text>
+<path d="M866,326 L866,403" fill="none" stroke="#4b5b70" stroke-width="2.5"/>
+<polygon points="866,403 861.0,392.0 871.0,392.0" fill="#4b5b70"/>
+<text x="880" y="364.5" font-size="15" text-anchor="start" font-weight="normal">same H allocation</text>
+<text x="105" y="565" font-size="20" text-anchor="start" font-weight="normal">H is written directly into its retained region. No H GSTORE / GLOAD is emitted.</text>
+<text x="105" y="603" font-size="18" text-anchor="start" font-weight="normal">Y reuses dead X storage. W2 reuses dead W1 storage. Addresses are bytes.</text>
+<text x="45" y="662" font-size="16" text-anchor="start" font-weight="normal">SRAM peak 42,508 bytes; capacity 45,056 bytes. The narrow first region includes scratch/constants.</text>
+</g></svg>

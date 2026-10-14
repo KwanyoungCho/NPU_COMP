@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NPU compiler · 발표자료</title>
+<style>
+:root{color-scheme:dark;--bg:#101c2d;--panel:#18263b;--line:#2c3e55;--text:#edf3fb;--muted:#aabbd0;--accent:#81ded0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 system-ui,-apple-system,"Malgun Gothic",sans-serif}
+button,a,input{font:inherit}button,a{touch-action:manipulation}button{cursor:pointer;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 12px}button:hover,a:hover{color:var(--accent);border-color:var(--accent)}button:disabled{opacity:.35;cursor:default}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}a{color:var(--muted);text-decoration:none}header{height:70px;display:flex;align-items:center;gap:18px;padding:0 24px;border-bottom:1px solid var(--line)}header strong{font-size:18px}header small{color:var(--muted)}header .links{margin-left:auto;display:flex;gap:18px}#menu{display:none}#app{height:calc(100dvh - 70px);display:grid;grid-template-columns:280px minmax(0,1fr)}aside{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}.search{padding:18px 16px 12px}.search input{width:100%;padding:9px 12px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px}#toc{list-style:none;margin:0;padding:0 12px 20px;overflow:auto}#toc li{margin:4px 0}#toc button{display:flex;text-align:left;width:100%;gap:10px;background:transparent;border-color:transparent;padding:10px;font-size:13px;line-height:1.55}#toc button[aria-current="page"]{background:#203d4e;color:var(--accent);border-color:#376461}#toc .number{font-variant-numeric:tabular-nums;color:var(--muted);min-width:22px}.part{display:block;font-size:10px;color:#829bb7;letter-spacing:.05em}.empty{padding:15px;color:var(--muted)}main{display:flex;flex-direction:column;min-height:0;min-width:0;padding:18px 24px 12px}.heading{display:flex;align-items:center;gap:12px;min-height:33px;margin-bottom:10px}#kind{font-size:11px;color:var(--accent);white-space:nowrap}h1{margin:0;font-size:15px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#stage{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;border-radius:9px;overflow:hidden;background:#0b1523}#slide{max-width:100%;max-height:100%;width:auto;height:auto;display:block;box-shadow:0 10px 35px #0005}#loading{position:absolute;padding:10px 17px;background:#142941dd;border-radius:8px;font-size:13px;color:var(--muted)}#loading[hidden]{display:none}.controls{display:flex;align-items:center;justify-content:center;gap:10px;padding:13px 0 6px}.controls span{color:var(--muted);font-size:13px;margin:0 4px}#jump{width:48px;text-align:center;background:var(--panel);border:1px solid var(--line);border-radius:6px;color:var(--text);padding:6px 0;appearance:textfield}#jump::-webkit-inner-spin-button{appearance:none}.controls .spacer{flex:1}.keyboard{font-size:11px;color:#8099b4;text-align:center;margin-top:3px}#notes{border:1px solid var(--line);background:var(--panel);border-radius:8px;margin-top:12px;padding:16px 20px;max-height:31vh;overflow:auto}#notes[hidden]{display:none}#notes h2{font-size:14px;color:var(--accent);margin:0 0 9px}#notes p{font-size:14px;line-height:1.95;margin:0;white-space:pre-wrap;color:#dce6f4}#sources{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:12px;font-size:11px;overflow-wrap:anywhere}#message{padding:30px;color:var(--muted)}html:fullscreen header,html:fullscreen aside,html:fullscreen .heading,html:fullscreen .keyboard,html:fullscreen #notes{display:none}html:fullscreen #app{height:100dvh;grid-template-columns:1fr}html:fullscreen main{padding:12px}html:fullscreen #stage{background:#000}html:fullscreen .controls{padding:8px 0 0}html:fullscreen #toggleNotes{display:none}
+@media(max-width:1000px){#app{grid-template-columns:230px minmax(0,1fr)}main{padding:12px}.keyboard{display:none}header small{display:none}}
+@media(max-width:720px){header{height:60px;padding:0 12px;gap:10px}header strong{font-size:15px}header .links{font-size:12px;gap:11px}#menu{display:block;padding:5px 9px}#app{height:calc(100dvh - 60px);grid-template-columns:1fr}aside{display:none;position:fixed;top:60px;bottom:0;left:0;width:280px;background:var(--bg);z-index:10;box-shadow:20px 0 80px #0008}body.menu-open aside{display:flex}.controls{gap:5px;flex-wrap:wrap}.controls button{padding:6px 9px;font-size:12px}.controls .spacer{display:none}.heading{margin-bottom:8px}#notes{padding:12px;max-height:36vh}}
+body.zoomed #stage{display:block;overflow:auto}body.zoomed #slide{max-width:none;max-height:none;width:1440px;height:810px;margin:auto}#slide[hidden]{display:none}
+</style>
+</head>
+<body>
+<header><button id="menu" aria-label="슬라이드 목차" aria-expanded="false">☰</button><strong>NPU compiler</strong><small id="deckInfo">발표자료 불러오는 중</small><nav class="links" aria-label="다운로드"><a href="deck.pdf" target="_blank" rel="noopener">PDF 보기</a><a href="deck.pptx" download>PPTX</a><a href="notes.md" download>노트</a></nav></header>
+<div id="app">
+<aside aria-label="슬라이드 목차"><div class="search"><input id="search" type="search" placeholder="슬라이드 검색" aria-label="슬라이드 제목 검색"></div><ol id="toc"></ol></aside>
+<main>
+<div class="heading"><span id="kind"></span><h1 id="title">발표자료</h1></div>
+<div id="stage"><img id="slide" alt="" hidden><div id="loading" role="status">슬라이드를 불러오고 있습니다.</div></div>
+<div class="controls" aria-label="슬라이드 이동"><button id="prev" aria-label="이전 슬라이드">← 이전</button><label for="jump"><input id="jump" type="number" min="1" value="1" aria-label="이동할 슬라이드 번호"></label><span id="total">/ …</span><button id="next" aria-label="다음 슬라이드">다음 →</button><div class="spacer"></div><button id="toggleNotes" aria-expanded="false" aria-controls="notes">발표자 노트</button><button id="zoom" aria-pressed="false">확대 보기</button><button id="fullscreen">전체 화면</button></div>
+<div class="keyboard">← → 슬라이드 이동 · N 발표자 노트 · Z 확대 보기 · F 전체 화면 · Home / End 처음 / 마지막</div>
+<section id="notes" aria-label="현재 슬라이드 발표자 노트" hidden><h2>발표자 노트</h2><p id="noteText"></p><nav id="sources" aria-label="근거 파일"></nav></section>
+</main>
+</div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);let slides=[],current=-1;
+const buttons=[];
+function numberFromHash(){const n=Number(location.hash.slice(1));return Number.isInteger(n)&&n>0?n:1;}
+function go(number){
+  if(!slides.length)return;
+  const n=Number.isFinite(Number(number))?Math.trunc(Number(number)):1;
+  const index=Math.max(0,Math.min(slides.length-1,n-1));
+  if(index===current){$('jump').value=index+1;return;}
+  current=index;const item=slides[index];
+  history.replaceState(null,'','#'+(index+1));
+  document.title=`${index+1}. ${item.title} · NPU compiler`;
+  $('title').textContent=item.title;$('kind').textContent=item.appendix?'부록':'본문';
+  $('jump').value=index+1;$('prev').disabled=index===0;$('next').disabled=index===slides.length-1;
+  $('loading').hidden=false;$('loading').textContent='슬라이드를 불러오고 있습니다.';
+  $('slide').hidden=false;$('slide').alt=`${index+1}. ${item.title}`;$('slide').src=item.image;
+  $('noteText').textContent=item.notes;$('sources').replaceChildren();
+  item.sources.forEach(path=>{const a=document.createElement('a');a.href='source/'+path.split('/').map(encodeURIComponent).join('/');a.textContent=path;a.target='_blank';a.rel='noopener';$('sources').append(a);});
+  buttons.forEach((button,i)=>{if(i===index){button.setAttribute('aria-current','page');if(!button.closest('li').hidden)button.scrollIntoView({block:'nearest'});}else button.removeAttribute('aria-current');});
+  document.body.classList.remove('menu-open');$('menu').setAttribute('aria-expanded','false');
+  if(slides[index+1]){const img=new Image();img.src=slides[index+1].image;}
+}
+function toggleNotes(){const open=$('notes').hidden;$('notes').hidden=!open;$('toggleNotes').setAttribute('aria-expanded',String(open));}
+function zoom(){const on=document.body.classList.toggle('zoomed');$('zoom').setAttribute('aria-pressed',String(on));$('zoom').textContent=on?'화면에 맞추기':'확대 보기';}
+async function fullscreen(){
+  try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}
+  catch(error){$('fullscreen').textContent='브라우저 전체 화면 사용';}
+}
+$('slide').addEventListener('load',()=>{$('loading').hidden=true;});
+$('slide').addEventListener('error',()=>{$('loading').hidden=false;$('loading').textContent='슬라이드를 읽지 못했습니다. 새로고침해 주세요.';});
+$('prev').onclick=()=>go(current);$('next').onclick=()=>go(current+2);
+$('jump').onchange=event=>go(event.target.value);$('toggleNotes').onclick=toggleNotes;$('fullscreen').onclick=fullscreen;$('zoom').onclick=zoom;
+$('menu').onclick=()=>{const open=document.body.classList.toggle('menu-open');$('menu').setAttribute('aria-expanded',String(open));};
+document.addEventListener('fullscreenchange',()=>{$('fullscreen').textContent=document.fullscreenElement?'전체 화면 닫기':'전체 화면';});
+$('search').addEventListener('input',event=>{const q=event.target.value.trim().toLowerCase();buttons.forEach((button,i)=>button.closest('li').hidden=!(`${i+1} ${slides[i].title} ${slides[i].appendix?'부록':'본문'}`.toLowerCase().includes(q)));});
+window.addEventListener('hashchange',()=>go(numberFromHash()));
+document.addEventListener('keydown',event=>{
+  if(event.ctrlKey||event.metaKey||event.altKey||['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName))return;
+  if(['ArrowRight','PageDown'].includes(event.key)||(event.key===' '&&event.target.tagName!=='BUTTON')){event.preventDefault();go(current+2);}
+  else if(['ArrowLeft','PageUp'].includes(event.key)){event.preventDefault();go(current);}
+  else if(event.key==='Home'){event.preventDefault();go(1);}
+  else if(event.key==='End'){event.preventDefault();go(slides.length);}
+  else if(event.key.toLowerCase()==='n')toggleNotes();
+  else if(event.key.toLowerCase()==='f')fullscreen();
+  else if(event.key.toLowerCase()==='z')zoom();
+});
+(async()=>{
+  try{
+    const response=await fetch('api/slides');if(!response.ok)throw new Error(response.status);
+    const data=await response.json();slides=data.slides;
+    $('deckInfo').textContent=`본문 ${data.main_count}장 · 부록 ${slides.length-data.main_count}장`;
+    $('total').textContent='/ '+slides.length;$('jump').max=slides.length;
+    slides.forEach((item,i)=>{const li=document.createElement('li'),button=document.createElement('button'),num=document.createElement('span'),label=document.createElement('span');num.className='number';num.textContent=String(i+1).padStart(2,'0');label.textContent=item.title;if(item.appendix){const badge=document.createElement('span');badge.className='part';badge.textContent='부록';label.prepend(badge);}button.append(num,label);button.onclick=()=>go(i+1);li.append(button);$('toc').append(li);buttons.push(button);});
+    go(numberFromHash());
+  }catch(error){$('loading').textContent='발표자료를 불러오지 못했습니다. 서버 연결을 확인한 뒤 새로고침해 주세요.';}
+})();
+</script>
+</body>
+</html>

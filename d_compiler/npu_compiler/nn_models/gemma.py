@@ -65,13 +65,6 @@ def banded_mask(seq, window=None, dtype=np.float16):
     return mask[None].astype(dtype)
 
 
-def softcap(logits, cap):
-    """The final logit softcap, applied outside the graph (monotonic)."""
-    if not cap:
-        return logits
-    return cap * np.tanh(np.asarray(logits, np.float32) / cap)
-
-
 class Attention(nn.Module):
     """One layer's attention; owner layers project K/V, shared layers reuse."""
 

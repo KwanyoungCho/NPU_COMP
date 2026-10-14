@@ -1,0 +1,9 @@
+  [PASS] a matmul of two runtime inputs stays dense
+  [PASS] qmatmul vs numpy mirror: max|diff| 0.00488
+  [PASS] quantized vs float32: cosine 0.999998 (dense 1.000000); 11 -> 16 lifted params, dtypes ['float16', 'int8']
+  [PASS] quantized matmul bit-exact vs the mirror (821 words)
+  [PASS] quantized model on the c-model: cosine 0.999998 (12,840 words)
+  [PASS] W8A8 [64,64]x[64,64] bit-exact vs mirror (3,262 words, vquant=64)
+  [PASS] W8A8 [7,128]x[128,192] bit-exact vs mirror (459 words, vquant=7)
+  [PASS] W8A8 model on the c-model: cosine 0.999998 (9,038 words, vquant=20)
+ALL QUANTIZE (S8) TESTS PASSED

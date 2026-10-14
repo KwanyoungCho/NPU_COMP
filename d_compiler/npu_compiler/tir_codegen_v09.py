@@ -1,27 +1,29 @@
-"""Scheduled TIR -> v09 ISA.
+"""Reference Python emitter for scheduled TIR -> v09 ISA.
 
-Retargets the compiler-v2 TIR walker (tir_backend.py / v2_backend.py) to the
-v09 machine.  The reusable parts are kept verbatim in spirit -- intrinsic
-declarations, the tensorize schedule, loop unrolling and affine index
-evaluation -- while every emission goes through :mod:`isa_v09`.
-
-The v09 target simplifies the 0710 walker considerably: MAIN/PARTIAL
-descriptors address strided sub-tiles directly, so the gather/scatter of tiles
-into contiguous scratch that 0710 required disappears.  A K-tile chain becomes
-descriptor setup plus ``m_mul(mac=...)`` and a single ``save``, which is the
-same instruction sequence the Relax backend emits -- that is what makes the
-kernel-level bit-exactness gate meaningful.
+Unrolls static loops, evaluates indices, and emits matrix/vector operations
+and DMA through SramEmitter. The native walker implements the same contract
+and is checked against this emitter word-for-word.
 """
 from __future__ import annotations
 
-import tvm
 import tvm.tir as tir
 from tvm import arith
 
-from .isa_0818 import DST, IMM, SRC1, SRC2, VECTOR
-from .isa_v09 import DT_FP16, DT_FP32, DT_INT8
-from .npu_intrin import SRAM_SCOPE, VLEN
-from .tir_backend import TILE, TirBackendError, _TIR_BINOPS
+from .isa_compute import DST, SRC1, SRC2, VECTOR
+from .isa_v09 import DT_FP16, DT_INT8
+from .npu_intrin import SRAM_SCOPE, TILE
+from .v09_contract import CONTRACT, MAX_VLEN
+
+
+_TIR_BINOPS = {
+    tir.Add: lambda a, b: a + b,
+    tir.Sub: lambda a, b: a - b,
+    tir.Mul: lambda a, b: a * b,
+    tir.FloorDiv: lambda a, b: a // b,
+    tir.FloorMod: lambda a, b: a % b,
+    tir.Min: min,
+    tir.Max: max,
+}
 
 
 class V09TirError(RuntimeError):
@@ -42,7 +44,7 @@ class Walker:
     """Interpret scheduled TIR and emit v09 instructions.
 
     ``bases`` maps a buffer's data Var to its element offset in the flat global
-    buffer; emission assumes operands are already staged (S4 adds the DMA).
+    buffer. Explicit SRAM cache copies become DMA through ``stage``.
     """
 
     def __init__(self, asm, bases, stage):
@@ -64,13 +66,11 @@ class Walker:
         self.dtypes = {}                # buffer data Var -> dtype string
         self.one_fp32 = None            # SRAM nibble of a literal fp32 1.0
         self.stored = {}                # C tile address -> stride, once stored
-        self.acc_dtype = {}             # C tile address -> descriptor dtype
-        self.scales_neutral = False     # ascale/wscale parked at 1.0
 
-    # ---- index evaluation (ported from tir_backend) ----
+    # ---- index evaluation ----
 
-    _SRAM_WIDTH = {"float16": 4, "int8": 2, "float32": 8, "int4": 1}
-    _ITEMSIZE = {"float16": 2, "int8": 1, "float32": 4, "int4": 1}
+    _SRAM_WIDTH = {dtype: units[0] for dtype, units in CONTRACT["storage"].items()}
+    _ITEMSIZE = {dtype: units[1] for dtype, units in CONTRACT["storage"].items()}
 
     def width(self, data):
         """SRAM nibbles per element of the buffer behind ``data``."""
@@ -138,6 +138,10 @@ class Walker:
             for sub in stmt:
                 self.visit(sub)
         elif kind is tir.BlockRealize:
+            if self._match_nest(stmt):
+                return
+            if not self.ev(stmt.predicate):
+                return
             block = stmt.block
             for var, value in zip(block.iter_vars, stmt.iter_values):
                 self.env[var.var] = self.ev(value)
@@ -148,7 +152,9 @@ class Walker:
             self.visit(block.body)
         elif kind is tir.Evaluate:
             self.call(stmt.value)
-        elif kind is tir.BufferStore or kind is tir.LetStmt:
+        elif kind is tir.BufferStore:
+            self._emit_pointwise(stmt, [], {})
+        elif kind is tir.LetStmt:
             raise V09TirError(f"un-tensorized statement reached codegen: {kind}")
         elif kind is tir.Block:
             self.visit(stmt.body)
@@ -201,6 +207,12 @@ class Walker:
         subst = {iv.var: value for iv, value
                  in zip(block.iter_vars, realize.iter_values)}
         body = tir.stmt_functor.substitute(body, subst)
+        is_dma = (isinstance(body.value, tir.BufferLoad)
+                  and ((body.buffer.data in self.sram)
+                       != (body.value.buffer.data in self.sram)))
+        if not is_dma and str(body.buffer.dtype) not in CONTRACT["generic_store"]:
+            raise V09TirError("v09 generic vector lowering requires FP16 storage; "
+                              f"got {body.buffer.dtype}")
         init = (tir.stmt_functor.substitute(init, subst)
                 if init is not None else None)
         reduce_vars = set()
@@ -216,7 +228,14 @@ class Walker:
         reduce_axes = [v for v in local if v in reduce_vars]
         if not (isinstance(realize.predicate, tir.IntImm)
                 and int(realize.predicate.value) == 1):
-            extents = self._narrow(realize.predicate, spatial, extents)
+            extents, origins = self._narrow(realize.predicate, spatial, extents)
+            if any(extent == 0 for extent in extents.values()):
+                return True
+            shifted = {var: var + offset for var, offset in origins.items() if offset}
+            if shifted:
+                body = tir.stmt_functor.substitute(body, shifted)
+                if init is not None:
+                    init = tir.stmt_functor.substitute(init, shifted)
         saved = {v: self.env.get(v) for v in local}
         for v in local:
             self.env[v] = 0
@@ -280,7 +299,9 @@ class Walker:
 
     def _emit_reduction(self, store, init, spatial, axis, extents):
         value = store.value
-        if isinstance(value, tir.Add):
+        explicit_sum = (isinstance(value, tir.Call) and value.op.name == "tir.call_pure_extern"
+                        and str(value.args[0].value) == CONTRACT["reductions"]["sum_update"])
+        if isinstance(value, tir.Add) or explicit_sum:
             method, kind = "v_reduce_sum", "sum"
         elif isinstance(value, tir.Max):
             method, kind = "v_reduce_max", "max"
@@ -288,13 +309,15 @@ class Walker:
             raise V09TirError(f"unsupported reduction {type(value)}")
         accumulator = store.buffer
         summand = None
-        for side in (value.a, value.b):
+        for side in (value.args[1:3] if explicit_sum else (value.a, value.b)):
             if not (isinstance(side, tir.BufferLoad)
                     and side.buffer.data is accumulator.data):
                 summand = side
         if summand is None:
             raise V09TirError("reduction has no summand")
         length = extents[axis]
+        if not 0 < length <= MAX_VLEN:
+            raise V09TirError(f"v09 reduction length {length} requires a segmented reduction")
         self.flush()
         for position in self._outer_positions(spatial, extents):
             for var, val in zip(spatial, position):
@@ -357,16 +380,28 @@ class Walker:
         self.env[axis] = self.inner_base
         return base, stride
 
-    _POINTWISE = {tir.Add: "v_add", tir.Sub: "v_sub",
-                  tir.Mul: "v_mul", tir.Div: "v_div"}
-    _CALLS = {"tir.exp": "v_exp", "tir.sqrt": "v_sqrt",
-              "tir.cos": "v_cos", "tir.sin": "v_sin"}
+    _POINTWISE = {getattr(tir, name): method
+                  for name, method in CONTRACT["binary"].items()}
+    _CALLS = CONTRACT["unary"]
 
     def _emit_pointwise(self, store, spatial, extents):
         """A per-element block: copy, or an arbitrary pointwise expression."""
+        if not spatial:
+            # compute_at legitimately removes every unit loop. A scalar
+            # movement/vector operation still has one element to execute.
+            unit = tir.Var("npu_unit", "int32")
+            spatial, extents = [unit], {unit: 1}
         value = store.value
+        if (self.pending is not None and isinstance(value,tir.BufferLoad)
+                and len(spatial)==2 and all(extents[v]==TILE for v in spatial)
+                and self._try_matrix_copy(store,spatial,extents)):
+            return
+        if self._try_bulk_copy_fill(store, spatial, extents):
+            return
         if isinstance(value, tir.BufferLoad):
             return self._emit_movement(store, spatial, extents)
+        if str(store.buffer.dtype) not in CONTRACT["generic_store"]:
+            raise V09TirError(f"v09 pointwise operation requires FP16 storage, got {store.buffer.dtype}")
         inner = spatial[-1]
         outer = spatial[:-1]
         length = extents[inner]
@@ -378,14 +413,87 @@ class Walker:
             for expr, base, count in self._pieces(value, inner, length):
                 if count <= 0:
                     continue
-                self.inner_base = base
-                dst, dst_stride = self._affine_flat_store(store, inner)
-                if dst_stride != unit:
-                    raise V09TirError(
-                        f"pointwise destination stride {dst_stride}")
-                self.depth = 0
-                self._materialize(expr, inner, count, into=dst)
+                for offset in range(0, count, MAX_VLEN):
+                    self.inner_base = base + offset
+                    dst, dst_stride = self._affine_flat_store(store, inner)
+                    if dst_stride != unit and count != 1:
+                        raise V09TirError(
+                            f"pointwise destination stride {dst_stride}")
+                    self.depth = 0
+                    self._materialize(expr, inner, min(count - offset, MAX_VLEN), into=dst)
             self.inner_base = 0
+
+    def _try_bulk_copy_fill(self, store, spatial, extents):
+        """Coalesce adjacent SRAM copies/fills, including padding branches.
+
+        Only a copy or literal can cross row boundaries this way: general
+        expressions may have row broadcasts and scratch-sized intermediates.
+        Preflight every piece before emitting, and never merge overlapping
+        source/destination regions where row execution order would matter.
+        """
+        def eligible(expr):
+            if isinstance(expr, (tir.BufferLoad, tir.FloatImm, tir.IntImm)):
+                return True
+            return (isinstance(expr, tir.Call)
+                    and expr.op.name == "tir.if_then_else"
+                    and eligible(expr.args[1]) and eligible(expr.args[2]))
+
+        if (not spatial or store.buffer.data not in self.sram
+                or str(store.buffer.dtype) != "float16" or not eligible(store.value)):
+            return False
+        inner, outer = spatial[-1], spatial[:-1]
+        runs = []
+        try:
+            for position in self._outer_positions(outer, extents):
+                self.env.update(zip(outer, position))
+                for expr, base, count in self._pieces(store.value, inner, extents[inner]):
+                    if count <= 0:
+                        continue
+                    self.inner_base = base
+                    dst, stride = self._affine_flat_store(store, inner)
+                    if stride != 4:
+                        return False
+                    if isinstance(expr, tir.BufferLoad):
+                        if expr.buffer.data not in self.sram or str(expr.buffer.dtype) != "float16":
+                            return False
+                        src, stride = self._affine_flat(expr, inner)
+                        if stride != 4:
+                            return False
+                        kind, value = "copy", src
+                    else:
+                        kind, value = "fill", float(expr.value)
+                    if runs and runs[-1][0] == kind:
+                        prev = runs[-1]
+                        adjacent = dst == prev[2] + prev[3] * 4
+                        same = (value == prev[1] if kind == "fill" else
+                                value == prev[1] + prev[3] * 4)
+                        length = prev[3] + count
+                        disjoint = (kind == "fill" or prev[1] + length * 4 <= prev[2]
+                                    or prev[2] + length * 4 <= prev[1])
+                        if adjacent and same and disjoint:
+                            prev[3] = length
+                            continue
+                    runs.append([kind, value, dst, count])
+        finally:
+            self.inner_base = 0
+        self.flush()
+        for kind, value, dst, count in runs:
+            offset = 0
+            while offset < count:
+                part = min(MAX_VLEN, count - offset)
+                self.a.vlen(part)
+                if kind == "copy":
+                    self.stage.vector(SRC1, value + offset * 4)
+                    self.a.load(0, SRC1)
+                    self.a.v_copy()
+                else:
+                    if value not in self.constants:
+                        raise V09TirError(f"constant {value} not in the pool")
+                    self.stage.broadcast(self.constants[value])
+                self.stage.vector(DST, dst + offset * 4)
+                self.a.save(0)
+                offset += part
+        return True
 
     def _narrow(self, predicate, spatial, extents):
         """Shrink the loop extents to the part a block predicate allows.
@@ -399,7 +507,7 @@ class Walker:
         if guard is None:
             guard = lambda env: bool(self.ev(predicate))
         saved = {axis: self.env.get(axis) for axis in spatial}
-        limits, allowed = [0] * len(spatial), 0
+        limits, minima, allowed = [0] * len(spatial), [extents[a] for a in spatial], 0
         for position in self._outer_positions(spatial, extents):
             for axis, value in zip(spatial, position):
                 self.env[axis] = value
@@ -407,19 +515,21 @@ class Walker:
                 allowed += 1
                 limits = [max(limit, value + 1)
                           for limit, value in zip(limits, position)]
+                minima = [min(low, value) for low, value in zip(minima, position)]
         for axis, value in saved.items():
             if value is None:
                 self.env.pop(axis, None)
             else:
                 self.env[axis] = value
         box = 1
-        for limit in limits:
-            box *= limit
+        lengths = [max(0, high-low) for high, low in zip(limits, minima)]
+        for length in lengths:
+            box *= length
         if box != allowed:
-            raise V09TirError("block predicate is not a box at the origin")
+            raise V09TirError("block predicate is not a rectangular region")
         narrowed = dict(extents)
-        narrowed.update(zip(spatial, limits))
-        return narrowed
+        narrowed.update(zip(spatial, lengths))
+        return narrowed, dict(zip(spatial, minima))
 
     def _pieces(self, value, inner, length):
         """Split a row into (expression, start, count) pieces.
@@ -471,9 +581,12 @@ class Walker:
     def _split_row(self, value, inner, lo, count):
         name = (value.op.name if isinstance(value, tir.Call)
                 and hasattr(value.op, "name") else None)
-        if name != "tir.if_then_else":
+        if isinstance(value, tir.Select):
+            condition, taken, other = value.condition, value.true_value, value.false_value
+        elif name == "tir.if_then_else":
+            condition, taken, other = value.args
+        else:
             return [(value, lo, count)]
-        condition, taken, other = value.args
         guard = self._scanner(condition, inner)
         if guard is None:
             def guard(index, _condition=condition):
@@ -504,6 +617,8 @@ class Walker:
         """Emit `expr` over `length` elements; return the SRAM address holding it."""
         asm = self.a
         if isinstance(expr, tir.BufferLoad):
+            if str(expr.buffer.dtype) not in CONTRACT["vector_load"]:
+                raise V09TirError(f"v09 vector load does not support {expr.buffer.dtype}")
             base, stride = self._affine_flat(expr, inner)
             data = expr.buffer.data
             unit = (self.width(data) if data in self.sram
@@ -558,14 +673,9 @@ class Walker:
         if isinstance(expr, tir.Call):
             name = expr.op.name if hasattr(expr.op, "name") else str(expr.op)
             call = self._CALLS.get(name)
-            if call is None and name == "tir.fabs":
-                return self._fabs(expr, inner, length, into)
-            if call is None and name == "tir.rsqrt":
-                return self._rsqrt(expr, inner, length, into)
-            if call is None and name == "tir.sigmoid":
-                return self._sigmoid(expr, inner, length, into)
-            if call is None and name == "tir.tanh":
-                return self._tanh(expr, inner, length, into)
+            composite = CONTRACT["composite"].get(name)
+            if call is None and composite is not None:
+                return getattr(self, composite[0])(expr, inner, length, into)
             if call is None:
                 raise V09TirError(f"unsupported intrinsic {name}")
             depth = self.depth
@@ -719,9 +829,9 @@ class Walker:
         quantization needs it: the row scale is the row's absolute maximum.
         """
         asm = self.a
-        depth = self.depth
         operand = self._materialize(expr.args[0], inner, length)
-        self.depth = depth
+        # max(x, -x) reads x twice. Keep a computed operand's slot live
+        # while writing -x; resetting depth here aliases and destroys x.
         negated = self._slot()
         asm.vlen(length)
         self.stage.vector(SRC1, operand)
@@ -780,9 +890,9 @@ class Walker:
         inner = spatial[-1]
         outer = spatial[:-1]
         length = extents[inner]
-        self.flush()
         source = self._addresser(value, inner, outer)
         target = self._addresser(store, inner, outer, store=True)
+        self.flush()
         src_unit = (self.width(value.buffer.data)
                     if value.buffer.data in self.sram
                     else self.itemsize(value.buffer.data))
@@ -792,20 +902,19 @@ class Walker:
         for position in self._outer_positions(outer, extents):
             src_base, src_stride = source(position)
             dst_base, dst_stride = target(position)
-            if dst_stride != dst_unit:
+            if dst_stride != dst_unit and length != 1:
                 raise V09TirError(f"movement destination stride {dst_stride}")
             asm = self.a
-            if src_stride == src_unit:               # contiguous copy / slice
-                # the vector length field is 16-bit; longer rows go in pieces
+            if src_stride == src_unit or length == 1:  # contiguous copy / slice
                 offset = 0
-                while length - offset > 0xFFFF:
-                    asm.vlen(0xFFFF)
+                while length - offset > MAX_VLEN:
+                    asm.vlen(MAX_VLEN)
                     self.stage.vector(SRC1, src_base + offset * src_unit)
                     asm.load(0, SRC1)
                     asm.v_copy()
                     self.stage.vector(DST, dst_base + offset * dst_unit)
                     asm.save(0)
-                    offset += 0xFFFF
+                    offset += MAX_VLEN
                 asm.vlen(length - offset)
                 self.stage.vector(SRC1, src_base + offset * src_unit)
                 asm.load(0, SRC1)
@@ -813,19 +922,44 @@ class Walker:
                 self.stage.vector(DST, dst_base + offset * dst_unit)
                 asm.save(0)
                 continue
-            elif src_stride == 0:                    # broadcast along the row
+            elif src_stride == 0:
                 asm.vlen(length)
                 self.stage.broadcast(src_base)
             else:
-                # non-unit source stride (transpose): the vector load only
-                # reads contiguously, so use the matrix strided load, which
-                # gathers one column, then copy it out as a vector
                 self.stage.strided(SRC1, src_base, src_stride // src_unit, length)
                 asm.load(1, SRC1, strided=1, ncols=1, start=0)
                 asm.vlen(length)
                 asm.v_copy()
             self.stage.vector(DST, dst_base)
             asm.save(0)
+
+    def _try_matrix_copy(self,store,spatial,extents):
+        """Save the unchanged FP32 result twice, preserving both FP16 stores."""
+        value=store.value
+        src_space,dst_space=self._space(value.buffer),self._space(store.buffer)
+        inner,outer=spatial[-1],spatial[:-1]
+        length=extents[inner]
+        source=self._addresser(value,inner,outer)
+        target=self._addresser(store,inner,outer,store=True)
+        if (self.pending is not None and src_space == SRAM_SCOPE and dst_space == SRAM_SCOPE
+                and str(value.buffer.dtype) == str(store.buffer.dtype) == 'float16'
+                and len(outer) == 1 and extents[outer[0]] == TILE and length == TILE):
+            c, sc = self.pending
+            dest, unit = target((0,))
+            step = target((1,))[0] - dest
+            if unit == 4 and step >= TILE*4 and step % 4 == 0:
+                same = dest == c and step == sc*4
+                disjoint = (dest+(TILE-1)*step+TILE*4 <= c or
+                            c+(TILE-1)*sc*4+TILE*4 <= dest)
+                if (same or disjoint) and all(
+                        source((row,)) == (c+row*sc*4,4) and
+                        target((row,)) == (dest+row*step,4) for row in range(TILE)):
+                    self.flush()
+                    if not same:
+                        self.stage.region(DST,dest,step//4,TILE,TILE)
+                        self.a.save(1)
+                    return True
+        return False
 
     def _emit_dma(self, store, load, spatial, extents, to_sram):
         """Emit GLOAD/GSTORE for a cache block, one per contiguous run.
@@ -861,8 +995,15 @@ class Walker:
         for position in self._outer_positions(outer, extents):
             src_base, src_stride = source(position)
             dst_base, dst_stride = target(position)
-            if src_stride != src_unit or dst_stride != dst_unit:
-                raise V09TirError("DMA stage needs contiguous rows")
+            if length > 1 and (src_stride != src_unit or dst_stride != dst_unit):
+                # Unit output columns can leave a strided M loop after TVM
+                # removes N=1. Transfer individual elements with the existing
+                # cell-preserving bounce implementation.
+                for index in range(length):
+                    src, dst = src_base + index * src_stride, dst_base + index * dst_stride
+                    glob, sram = (src, dst) if to_sram else (dst, src)
+                    segments.append([glob, sram, nbytes // length])
+                continue
             glob, sram = ((src_base, dst_base) if to_sram
                           else (dst_base, src_base))
             # segment lengths are bytes; every dtype packs SRAM at two nibbles
@@ -1006,7 +1147,7 @@ class Walker:
                 group = self._contiguous_group(segments, index)
                 aligned = all(g % 4 == 0 and n % 4 == 0
                               for g, _, n in segments[index:group])
-            if (aligned or group == index + 1) and glob % 4 == 0:
+            if (aligned or group == index + 1) and glob % 4 == 0 and count % 4 == 0:
                 if to_sram:
                     self.stage.dma_in(glob, sram, count)
                 else:
@@ -1061,17 +1202,34 @@ class Walker:
         moved in aligned chunks.
         """
         self.flush()                    # the copies below take the PE output
+        if len(self.scratch_slots) < 2:
+            raise V09TirError("bounce DMA requires a bounded scratch region")
         scratch = self.scratch_slots[0]
+        slot_nibbles = self.scratch_slots[1] - scratch
+        if slot_nibbles <= 0 or any(
+                slot != scratch + i * slot_nibbles
+                for i, slot in enumerate(self.scratch_slots)):
+            raise V09TirError("bounce DMA requires contiguous uniform scratch slots")
+        # DMA runs between vector expressions, so it owns the whole scratch
+        # region.  Bound the staging chunks by its actual allocated size.
+        capacity = min(2 * self.BOUNCE_BYTES,
+                       len(self.scratch_slots) * slot_nibbles // 2) // 4 * 4
+        if capacity < 4:
+            raise V09TirError("bounce DMA scratch cannot hold one cell")
         lead = glob % 4       # bytes sharing the first cell with someone else
         glob -= lead
         chunk, total = [], 0
-        for piece in pieces:
-            chunk.append(piece)
-            total += piece[1]
-            if total + lead >= self.BOUNCE_BYTES and (total + lead) % 4 == 0:
-                glob = self._bounce_chunk(glob, chunk, total, scratch, to_sram,
-                                          lead)
-                chunk, total, lead = [], 0, 0
+        for sram, nbytes in pieces:
+            while nbytes:
+                part = min(nbytes, capacity - lead - total)
+                chunk.append((sram, part))
+                total += part
+                sram += part * 2
+                nbytes -= part
+                if total + lead == capacity:
+                    glob = self._bounce_chunk(glob, chunk, total, scratch,
+                                              to_sram, lead)
+                    chunk, total, lead = [], 0, 0
         if chunk:
             self._bounce_chunk(glob, chunk, total, scratch, to_sram, lead)
 
@@ -1087,6 +1245,12 @@ class Walker:
             # the bytes sharing the first cell belong to someone else, so read
             # them back before the cell is written
             self.stage.dma_in(glob, scratch, lead)
+        if not to_sram and span % 4:
+            # The final partial cell also shares bytes with another tensor
+            # region (e.g. the next row's first element after an N=65 tail).
+            tail = span // 4 * 4
+            if tail or not lead:
+                self.stage.dma_in(glob + tail, scratch + tail * 2, 4)
         offset = lead
         for sram, nbytes in pieces:
             if nbytes % 2 or offset % 2:
@@ -1164,124 +1328,95 @@ class Walker:
                 and expr.op.name == "tir.call_extern"):
             raise V09TirError(f"unhandled call {expr}")
         name = expr.args[0].value
-        if name in ("npu_fill_zero", "npu_fill_zero_fp32"):
+        if name in ("npu_quantize_row", "npu_scaled_mac", "npu_store_scaled",
+                    "npu_reset_quant_descriptors"):
+            self._w8a8_call(name, expr.args[1:])
+        elif name in ("npu_fill_zero_fp32", "npu_gemm_acc_int8"):
+            raise V09TirError("FP32 matrix SRAM storage is unsupported; use the scaled W8A8 register contract")
+        elif name == "npu_fill_zero":
             self.zeroed.add(self.ptr(expr.args[1]))
-        elif name in ("npu_gemm_acc", "npu_gemm_acc_int8"):
+        elif name == "npu_gemm_acc":
             c, sc = self.ptr(expr.args[1]), self.ev(expr.args[2])
             a, sa = self.ptr(expr.args[3]), self.ev(expr.args[4])
             b, sb = self.ptr(expr.args[5]), self.ev(expr.args[6])
-            self.emit_gemm(c, sc, a, sa, b, sb,
-                           integer=name.endswith("_int8"))
-        elif name.startswith("npu_ew2_"):
-            self.flush()
-            self.emit_binary(name[len("npu_ew2_"):], self.ptr(expr.args[1]),
-                             self.ptr(expr.args[2]), self.ptr(expr.args[3]),
-                             self.ev(expr.args[4]))
-        elif name.startswith("npu_ew1_"):
-            self.flush()
-            self.emit_unary(name[len("npu_ew1_"):], self.ptr(expr.args[1]),
-                            self.ptr(expr.args[2]), self.ev(expr.args[3]))
+            self.emit_gemm(c, sc, a, sa, b, sb)
         else:
             raise V09TirError(f"unknown intrinsic {name}")
 
+    def _w8a8_call(self, name, args):
+        # These intrinsics use standard TIR element offsets, after
+        # LowerMatchBuffer. Older matrix intrinsics use nibble-offset views.
+        def ptr(access):
+            data, offset = access.args[1:3]
+            return self.sram[data] + self.ev(offset) * self.width(data)
+        asm = self.a
+        if name == "npu_quantize_row":
+            from .npu_w8a8_intrin import quantize_row
+            self.flush()
+            if getattr(self, "scaled_pending", None) is not None:
+                raise RuntimeError("quantization interrupts a scaled MAC chain")
+            quantize_row(asm, *[ptr(a) for a in args[:5]], self.ev(args[5]))
+        elif name == "npu_scaled_mac":
+            c, a, stride, b, sa, sw, rows, first = args
+            a_access, b_access = a, b
+            c = c.args[1]  # local.accumulator is a register token, not SRAM
+            a, b, sa, sw = (ptr(v) for v in (a, b, sa, sw))
+            rows, stride = self.ev(rows), self.ev(stride)
+            if self.ev(first):
+                self.flush()
+                if getattr(self, "scaled_pending", None) is not None:
+                    raise RuntimeError("scaled accumulator overwritten before save")
+                self.scaled_pending = (c, rows)
+            elif getattr(self, "scaled_pending", None) != (c, rows):
+                raise RuntimeError("scaled MAC has no matching accumulator")
+            asm.ascale(sa)
+            asm.wscale(sw)
+            self.stage.region_dt(SRC1, a, stride, rows, 64, DT_INT8,
+                main_base=self.sram[a_access.args[1]],
+                main_rows=self.ev(a_access.args[2] + a_access.args[3]) // stride)
+            asm.load(1, SRC1)
+            self.stage.region_dt(SRC2, b, 64, 64, 64, DT_INT8,
+                main_base=self.sram[b_access.args[1]],
+                main_rows=self.ev(b_access.args[2] + b_access.args[3]) // 64)
+            asm.load(1, SRC2)
+            asm.m_mul(VECTOR, mac=not self.ev(first))
+        elif name == "npu_store_scaled":
+            c, dst, rows = args[0].args[1], ptr(args[1]), self.ev(args[2])
+            if getattr(self, "scaled_pending", None) != (c, rows):
+                raise RuntimeError("scaled save has no matching accumulator")
+            self.stage.region_dt(DST, dst, 64, rows, 64, DT_FP16)
+            asm.save(1)
+            self.scaled_pending = None
+        else:
+            if getattr(self, "scaled_pending", None) is not None:
+                raise RuntimeError("scaled accumulator was not saved")
+            for operand in (SRC1, SRC2, DST):
+                asm.shape_dt(operand, 1, 1, 1, DT_FP16)
+
     # ---- v09 emission ----
 
-    def emit_gemm(self, c, sc, a, sa, b, sb, integer=False):
-        """One 64x64x64 tile of C += A @ B.
-
-        Consecutive calls to the same C tile chain through the PE accumulator
-        with the MAC bit and store once, matching the Relax backend's sequence.
-
-        ``integer`` selects the machine's INT8 gemm: the operand descriptors
-        carry INT8 and the accumulator is stored as FP32, which is what the
-        W8A8 kernel's TIR says.  The row and column scale registers are left
-        pointing at the FP32 1.0 the linker places, so the machine's fused
-        scaling is a no-op and the separate ``dequant`` block does it -- that
-        block is what the vendor reference defines.
-        """
+    def emit_gemm(self, c, sc, a, sa, b, sb):
+        """FP16 operands, FP32 register MAC chain, one final FP16 store."""
         asm = self.a
-        if integer:
-            self.acc_dtype[c] = DT_FP32
-            if not self.scales_neutral:
-                asm.ascale(self.one_fp32)
-                asm.wscale(self.one_fp32)
-                self.scales_neutral = True
         first = c in self.zeroed
         if first:
             self.zeroed.discard(c)
             self.flush()
             self.pending = (c, sc)
         elif self.pending is None or self.pending[0] != c:
-            # the chain was interrupted (a vector op owns the PE output in
-            # between), so reload the partial sum before continuing -- the
-            # same trick the 0710 walker used
-            if c not in self.stored:
-                raise V09TirError(f"accumulate into unseen C tile @{c}")
-            self.flush()
-            # bring the stored partial back into the PE output register
-            reload_dt = self.acc_dtype.get(c)
-            if reload_dt is None:
-                self.stage.region(SRC1, c, self.stored[c], TILE, TILE)
-            else:
-                self.stage.region_dt(SRC1, c, self.stored[c], TILE, TILE,
-                                     reload_dt)
-            asm.load(1, SRC1)
-            asm.m_add(IMM, 0)
-            self.pending = (c, sc)
-        operand = DT_INT8 if integer else DT_FP16
-        if integer:
-            self.stage.region_dt(SRC1, a, sa, TILE, TILE, operand)
-        else:
-            self.stage.region(SRC1, a, sa, TILE, TILE)
+            raise V09TirError("FP32 matrix chain interrupted: resuming from an FP16 store would change the reduction")
+        self.stage.region(SRC1, a, sa, TILE, TILE)
         asm.load(1, SRC1)
-        if integer:
-            self.stage.region_dt(SRC2, b, sb, TILE, TILE, operand)
-        else:
-            self.stage.region(SRC2, b, sb, TILE, TILE)
+        self.stage.region(SRC2, b, sb, TILE, TILE)
         asm.load(1, SRC2)
         asm.m_mul(VECTOR, mac=not first)
-
-    _BINARY = {"add": "v_add", "subtract": "v_sub",
-               "multiply": "v_mul", "divide": "v_div"}
-    _UNARY = {"sqrt": "v_sqrt", "exp": "v_exp", "negative": "v_sign_inv",
-              "cos": "v_cos", "sin": "v_sin"}
-
-    def emit_binary(self, op, dst, lhs, rhs, count):
-        method = self._BINARY.get(op)
-        if method is None:
-            raise V09TirError(f"unsupported binary op {op}")
-        asm = self.a
-        asm.vlen(count)
-        self.stage.vector(SRC1, lhs)
-        asm.load(0, SRC1)
-        self.stage.vector(SRC2, rhs)
-        asm.load(0, SRC2)
-        getattr(asm, method)(VECTOR)
-        self.stage.vector(DST, dst)
-        asm.save(0)
-
-    def emit_unary(self, op, dst, src, count):
-        method = self._UNARY.get(op)
-        if method is None:
-            raise V09TirError(f"unsupported unary op {op}")
-        asm = self.a
-        asm.vlen(count)
-        self.stage.vector(SRC1, src)
-        asm.load(0, SRC1)
-        getattr(asm, method)()
-        self.stage.vector(DST, dst)
-        asm.save(0)
 
     def flush(self):
         """Store the finished accumulator tile."""
         if self.pending is None:
             return
         c, sc = self.pending
-        dtype = self.acc_dtype.get(c)
-        if dtype is None:
-            self.stage.region(DST, c, sc, TILE, TILE)
-        else:
-            self.stage.region_dt(DST, c, sc, TILE, TILE, dtype)
+        self.stage.region(DST, c, sc, TILE, TILE)
         self.a.save(1)
         self.stored[c] = sc
         self.pending = None
@@ -1299,6 +1434,8 @@ class Walker:
         self.bases.update(buffer_bases)
         self.visit(prim_func.body)
         self.flush()
+        if getattr(self, "scaled_pending", None) is not None:
+            raise RuntimeError("kernel ended with an unsaved scaled accumulator")
         return self.a
 
 
@@ -1327,14 +1464,15 @@ class SramEmitter:
         self.asm.addr(operand, nibble, 1)
         self.asm.shape(operand, rows, cols, 1)
 
-    def region_dt(self, operand, nibble, stride, rows, cols, dtype):
+    def region_dt(self, operand, nibble, stride, rows, cols, dtype,
+                  main_base=None, main_rows=None):
         """``region`` with the descriptor's dtype bits set explicitly.
 
         Kept separate rather than adding a default argument to ``region`` so
         the FP16 path emits exactly the words it did before.
         """
-        self.asm.addr(operand, nibble, 0)
-        self.asm.shape_dt(operand, rows, stride, 0, dtype)
+        self.asm.addr(operand, nibble if main_base is None else main_base, 0)
+        self.asm.shape_dt(operand, rows if main_rows is None else main_rows, stride, 0, dtype)
         self.asm.addr(operand, nibble, 1)
         self.asm.shape_dt(operand, rows, cols, 1, dtype)
 

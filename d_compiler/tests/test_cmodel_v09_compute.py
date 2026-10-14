@@ -18,11 +18,11 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[0]))
 
-from npu_compiler.isa_0818 import (
+from npu_compiler.isa_compute import (
     ACT_SILU, IMM, MAIN, PARTIAL, SCALAR, VECTOR, Asm,
     enc_addr_hi, enc_addr_lo, enc_broadcast, enc_vlen)
 from npu_compiler import isa_v09 as V
-from npu_compiler.source_runtime_0818 import run as run_0818
+from reference.cmodel_0818 import run as run_0818
 from npu_compiler.v09_runtime import V09Error, run as run_v09
 
 # ------------------------------------------------------------- helpers
@@ -210,7 +210,7 @@ def test_signed_immediates():
     program.append(enc_vlen(8))
     program += vec_addr(0, 0)
     program.append(V.enc_load(0, 0))
-    from npu_compiler.isa_0818 import enc_add
+    from npu_compiler.isa_compute import enc_add
     program.append(enc_add(IMM, -3 & 0xFFFF))
     program += vec_addr(2, 8 * 4)
     program.append(V.enc_save(0))
@@ -226,7 +226,7 @@ def test_signed_immediates():
 def test_reduce_seeded_max_and_long_flat_sum():
     """512-lane single-instruction reduces (the 256-lane datapath strip-mines
     internally; no architectural carry state)."""
-    from npu_compiler.isa_0818 import enc_reduce_max, enc_reduce_sum
+    from npu_compiler.isa_compute import enc_reduce_max, enc_reduce_sum
     rng = np.random.default_rng(7)
     values = (-rng.random(512).astype(np.float16) - np.float16(1))  # all < 0
     gbuf = np.zeros(1024, dtype=np.float16)
@@ -259,7 +259,7 @@ def test_standard_gelu_activation_mode():
     program, cells = staged(gbuf.size)
     _matrix_setup(program, 0, 1, 8, V.DT_FP16, 128, 8, V.DT_FP16, 256)
     program.append(V.enc_load(1, 0))
-    from npu_compiler.isa_0818 import enc_m_add
+    from npu_compiler.isa_compute import enc_m_add
     program.append(enc_m_add(IMM, 0, activation=V.ACT_GELU_STD))
     program.append(V.enc_save(1))
     out, _ = run_simple(finish(program, cells), gbuf)
@@ -309,7 +309,7 @@ def test_w8a16_feeder_and_drain_dequant():
     _matrix_setup(program, 0, m, k, V.DT_FP16, 64, n, V.DT_INT8, 256)
     program += V.enc_wscale(128)
     program += [V.enc_load(1, 0), V.enc_load(1, 1)]
-    from npu_compiler.isa_0818 import enc_m_mul
+    from npu_compiler.isa_compute import enc_m_mul
     program.append(enc_m_mul(VECTOR))
     program.append(V.enc_save(1))
     program += V.enc_gstore(12, 4, 256, rows=1, cols=4)
@@ -339,7 +339,7 @@ def test_w8a8_integer_path_and_double_scale_drain():
     _matrix_setup(program, 0, m, k, V.DT_INT8, 64, n, V.DT_INT8, 512)
     program += V.enc_ascale(128) + V.enc_wscale(192)
     program += [V.enc_load(1, 0), V.enc_load(1, 1)]
-    from npu_compiler.isa_0818 import enc_m_mul
+    from npu_compiler.isa_compute import enc_m_mul
     program.append(enc_m_mul(VECTOR))
     program.append(V.enc_save(1))
     program += V.enc_gstore(12, 4, 512, rows=1, cols=4)
@@ -368,7 +368,7 @@ def test_groupwise_scale_change_over_mac_chain():
     program = list(V.enc_gload(0, 4, 0, rows=1, cols=4))
     program += V.enc_gload(4, 4, 64, rows=1, cols=4)
     program += V.enc_gload(8, 8, 128, rows=1, cols=8)
-    from npu_compiler.isa_0818 import enc_m_mul
+    from npu_compiler.isa_compute import enc_m_mul
     for g in range(groups):
         a_nib = g * kg * 4          # column offset inside A (stride k)
         w_nib = 64 + g * kg * n * 2
@@ -411,7 +411,7 @@ def test_vquant_vdequant_and_fp32_scale_production():
     # absmax -> scale = absmax/127 stored FP32 at nibble 256
     program += vec_addr(0, 0)
     program.append(V.enc_load(0, 0))
-    from npu_compiler.isa_0818 import enc_sign_inv, enc_minmax, enc_div
+    from npu_compiler.isa_compute import enc_sign_inv, enc_minmax, enc_div
     program.append(enc_sign_inv())
     program += vec_addr(2, 64 * 4)
     program.append(V.enc_save(0))
@@ -424,7 +424,7 @@ def test_vquant_vdequant_and_fp32_scale_production():
     program.append(V.enc_save(0))
     program += vec_addr(0, 80 * 4)
     program.append(V.enc_load(0, 0))
-    from npu_compiler.isa_0818 import enc_reduce_max
+    from npu_compiler.isa_compute import enc_reduce_max
     program.append(enc_reduce_max())
     program += vec_addr(2, 96 * 4)
     program.append(V.enc_save(0))
@@ -517,7 +517,7 @@ def test_illegal_dtype_paths_are_errors():
     p += [V.enc_mrows(0, 1, PARTIAL, V.DT_INT8),
           V.enc_mcols(0, 8, PARTIAL, V.DT_INT8), V.enc_load(0, 0)]
     expect(p, "vector load requires FP16")
-    from npu_compiler.isa_0818 import enc_m_mul
+    from npu_compiler.isa_compute import enc_m_mul
     p = base()
     _matrix_setup(p, 0, 2, 2, V.DT_INT8, 64, 2, V.DT_FP16, 512)
     p += [V.enc_load(1, 0), V.enc_load(1, 1), enc_m_mul(VECTOR)]

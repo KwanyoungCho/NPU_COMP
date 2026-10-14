@@ -10,7 +10,7 @@ import numpy as np
 from tvm.relax.frontend import nn
 from tvm.relax.frontend.nn import op
 
-from .llama import MLP, _apply_rope, causal_mask, rope_freqs, rope_inputs
+from .llama import MLP, _apply_rope, causal_mask, rope_freqs, rope_inputs, validate_rope_scaling
 
 
 class Qwen3Config:
@@ -25,7 +25,10 @@ class Qwen3Config:
         self.vocab_size = int(hf_config["vocab_size"])
         self.rms_eps = float(hf_config.get("rms_norm_eps", 1e-6))
         self.rope_theta = float(hf_config.get("rope_theta", 1000000.0))
-        self.rope_scaling = bool(hf_config.get("rope_scaling"))
+        self.rope_scaling = validate_rope_scaling(hf_config.get("rope_scaling"))
+        if self.num_heads <= 0 or self.num_kv_heads <= 0 or self.num_heads % self.num_kv_heads:
+            raise ValueError("attention heads must be positive and divisible by KV heads")
+        rope_freqs(self.head_dim, self.rope_theta, self.rope_scaling)
         self.tie_embeddings = bool(hf_config.get("tie_word_embeddings", False))
         self.dtype = "float16"
 

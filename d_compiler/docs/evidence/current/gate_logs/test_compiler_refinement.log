@@ -1,0 +1,12 @@
+test_direct_output_handles_column_offset_stride_and_multiple_k_tiles (__main__.CompilerRefinement.test_direct_output_handles_column_offset_stride_and_multiple_k_tiles) ... ok
+test_dram_compaction_moves_outputs_and_constants_without_dma_changes (__main__.CompilerRefinement.test_dram_compaction_moves_outputs_and_constants_without_dma_changes) ... ok
+test_dram_used_by_later_versions_is_preserved (__main__.CompilerRefinement.test_dram_used_by_later_versions_is_preserved) ... ok
+test_fused_silu_uses_long_vectors_without_changing_rounding (__main__.CompilerRefinement.test_fused_silu_uses_long_vectors_without_changing_rounding) ... ok
+test_inaccurate_reused_cost_retries_with_actual_emission (__main__.CompilerRefinement.test_inaccurate_reused_cost_retries_with_actual_emission) ... ok
+test_repeated_layer_cost_reuse_keeps_actual_instructions_and_output (__main__.CompilerRefinement.test_repeated_layer_cost_reuse_keeps_actual_instructions_and_output) ... ok
+test_row_broadcast_remains_correct_when_silu_is_coalesced (__main__.CompilerRefinement.test_row_broadcast_remains_correct_when_silu_is_coalesced) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 13.297s
+
+OK

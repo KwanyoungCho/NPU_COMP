@@ -1,0 +1,21 @@
+test_bounce_dma_preserves_the_buffer_after_scratch (__main__.BackendContractTests.test_bounce_dma_preserves_the_buffer_after_scratch) ... ok
+test_odd_width_dma_staging_does_not_overwrite_live_sram (__main__.BackendContractTests.test_odd_width_dma_staging_does_not_overwrite_live_sram) ... ok
+test_panel_search_finds_a_non_halving_divisor_within_budget (__main__.BackendContractTests.test_panel_search_finds_a_non_halving_divisor_within_budget) ... ok
+test_peephole_boundary_map_includes_dma_payload_and_end (__main__.BackendContractTests.test_peephole_boundary_map_includes_dma_payload_and_end) ... ok
+test_real_width_ragged_matmul_does_not_reread_weights (__main__.BackendContractTests.test_real_width_ragged_matmul_does_not_reread_weights) ... ok
+test_renamed_matmul_and_ragged_panels_execute_correctly (__main__.BackendContractTests.test_renamed_matmul_and_ragged_panels_execute_correctly) ... ok
+test_unscaled_int8_to_fp32_is_rejected_at_compile_time (__main__.BackendContractTests.test_unscaled_int8_to_fp32_is_rejected_at_compile_time) ... ok
+test_w8a8_panel_tail_uses_the_available_capacity (__main__.BackendContractTests.test_w8a8_panel_tail_uses_the_available_capacity) ... ok
+test_w8a8_zero_rows_and_all_calls_are_accounted (__main__.BackendContractTests.test_w8a8_zero_rows_and_all_calls_are_accounted) ... ok
+test_pool_size_and_nonzero_offset_are_bytes (__main__.MemoryContractTests.test_pool_size_and_nonzero_offset_are_bytes) ... ok
+test_tvm_generated_pools_retain_their_byte_size (__main__.MemoryContractTests.test_tvm_generated_pools_retain_their_byte_size) ... ok
+test_gamma_stays_after_the_fp16_rounding_boundary (__main__.RewriteContractTests.test_gamma_stays_after_the_fp16_rounding_boundary) ... ok
+test_npu_rms_legalization_rejects_unsupported_axis_and_precision (__main__.RewriteContractTests.test_npu_rms_legalization_rejects_unsupported_axis_and_precision) ... [08:33:04] /home/chokwans99/tvm-src/src/relax/ir/block_builder.cc:65: Warning: BlockBuilder destroyed with remaining blocks!
+[08:33:04] /home/chokwans99/tvm-src/src/relax/ir/block_builder.cc:65: Warning: BlockBuilder destroyed with remaining blocks!
+ok
+test_rms_rewrite_requires_the_complete_semantic_contract (__main__.RewriteContractTests.test_rms_rewrite_requires_the_complete_semantic_contract) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 42.275s
+
+OK

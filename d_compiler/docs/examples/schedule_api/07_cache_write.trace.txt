@@ -1,0 +1,2 @@
+b0 = sch.get_block(name="C", func_name="main")
+b1 = sch.cache_write(block=b0, write_buffer_index=0, storage_scope="global.sram")
